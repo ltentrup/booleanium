@@ -1,0 +1,32 @@
+[package]
+name = "booleanium"
+version = "0.1.0"
+authors = ["Leander Tentrup <leander.tentrup@gmail.com>"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+miette = { version = "5.4", features = ["fancy"] }
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+varisat = "0.2"
+ordered-float = "3.4"
+derivative = "2.2"
+cryptominisat = "5.8"
+clap = "4.1"
+
+[dev-dependencies]
+proptest = "1.0.0"
+
+[profile.profiling]
+inherits = "release"
+lto = false
+debug = true
+
+[profile.release]
+lto = true
+panic = 'abort'
+codegen-units = 1
+incremental = false
