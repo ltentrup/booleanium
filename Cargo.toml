@@ -14,7 +14,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 varisat = "0.2"
 ordered-float = "3.4"
 derivative = "2.2"
-cryptominisat = "5.8"
+cryptominisat = { version = "5.8", optional = true }
 clap = "4.1"
 
 [dev-dependencies]
