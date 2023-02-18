@@ -18,7 +18,7 @@ use crate::{
         trail::{DecLvl, Trail},
     },
     qdimacs::FromQdimacs,
-    sat::{cmsat::CryptoMiniSat, varisat::Varisat},
+    sat::varisat::Varisat,
     QuantTy, SolverResult,
 };
 use std::{
@@ -56,7 +56,7 @@ pub struct IncDet {
     watches: WatchList,
     graph: ImplGraph,
     conflict_analysis: ConflictAnalysis,
-    conflict_check: ConflictCheck<CryptoMiniSat>, //Varisat<'static>
+    conflict_check: ConflictCheck<Varisat>,
     dec_lvls: VarVec<Option<DecLvl>>,
     vsids: Vsids,
     /// set to true if the empty clause was added

@@ -4,14 +4,14 @@ use super::{SatSolver, SatSolverLit};
 use crate::literal::{Lit, Var};
 use varisat::ExtendFormula;
 
-pub(crate) struct Varisat<'a> {
-    solver: varisat::Solver<'a>,
+pub(crate) struct Varisat {
+    solver: varisat::Solver<'static>,
     /// the index of the next variable
     new_lit: usize,
     model: Vec<varisat::Lit>,
 }
 
-impl<'a> SatSolver for Varisat<'a> {
+impl SatSolver for Varisat {
     type Lit = varisat::Lit;
     type Err = varisat::solver::SolverError;
 
@@ -45,7 +45,7 @@ impl<'a> SatSolver for Varisat<'a> {
     }
 }
 
-impl<'a> Default for Varisat<'a> {
+impl Default for Varisat {
     fn default() -> Self {
         Self { solver: varisat::Solver::new(), new_lit: 0, model: Vec::default() }
     }

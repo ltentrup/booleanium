@@ -4,7 +4,7 @@ use crate::{
     incdet::IncDet,
     literal::{filter_lit, Lit, Var},
     qcdcl::propagation::trail::DecLvl,
-    sat::{cmsat::CryptoMiniSat, varisat::Varisat, LookupSolver, SatSolver},
+    sat::{varisat::Varisat, LookupSolver, SatSolver},
 };
 use derivative::Derivative;
 use std::collections::{BTreeMap, HashSet};
@@ -79,7 +79,7 @@ impl IncDet {
         // faster, incomplete check
         trace!("local conflict check");
         self.stats.skolem.local_conflict_checks += 1;
-        self._is_conflicted::<Varisat<'static>>(var, decision, false)?;
+        self._is_conflicted::<Varisat>(var, decision, false)?;
         // slower, complete check
         trace!("global conflict check");
         self.stats.skolem.global_conflict_checks += 1;

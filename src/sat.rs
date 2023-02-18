@@ -7,6 +7,7 @@ use crate::{
     literal::{Lit, Var},
 };
 
+#[cfg(feature = "cryptominisat")]
 pub(crate) mod cmsat;
 pub(crate) mod varisat;
 
