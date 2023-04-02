@@ -1,7 +1,8 @@
 //! Implication graph
 
 use crate::{
-    clause::alloc::ClauseId, datastructure::LitVec, literal::Lit, qcdcl::propagation::trail::DecLvl,
+    clause::alloc::ClauseId, datastructure::LitVec, incdet::propagation::trail::DecLvl,
+    literal::Lit,
 };
 
 pub(crate) type ImplGraph = LitVec<Vec<Impl>>;

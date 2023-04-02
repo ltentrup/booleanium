@@ -1,9 +1,6 @@
 //! VSIDS branching heuristics
 
-use crate::{
-    datastructure::{heap::VarHeap, VarVec},
-    literal::Var,
-};
+use crate::{datastructure::heap::VarHeap, literal::Var};
 use ordered_float::NotNan;
 
 const BUMP_INITIAL: f64 = 1.0;
@@ -22,7 +19,7 @@ pub(crate) struct Vsids {
 impl Default for Vsids {
     fn default() -> Self {
         Self {
-            heap: Default::default(),
+            heap: VarHeap::default(),
             bump: NotNan::new(BUMP_INITIAL).unwrap(),
             decay: NotNan::new(DECAY_INITIAL).unwrap(),
         }

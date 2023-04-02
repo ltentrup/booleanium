@@ -24,6 +24,7 @@ impl<T> Default for VarVec<T> {
 }
 
 impl<T> VarVec<Vec<T>> {
+    #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         self.0.iter_mut().for_each(Vec::clear);
     }

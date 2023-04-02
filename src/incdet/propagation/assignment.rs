@@ -42,16 +42,6 @@ impl Assignment {
     pub(crate) fn is_assigned(&self, var: Var) -> bool {
         self.assignment[var].is_some()
     }
-
-    pub(crate) fn lit_is_true(&self, lit: Lit) -> bool {
-        todo!();
-        // self[lit] == Some(true)
-    }
-
-    pub(crate) fn lit_is_false(&self, lit: Lit) -> bool {
-        todo!();
-        // self[lit] == Some(false)
-    }
 }
 
 impl std::ops::Index<Var> for Assignment {
@@ -68,23 +58,6 @@ impl std::ops::IndexMut<Var> for Assignment {
     }
 }
 
-// impl std::ops::Index<Lit> for Assignment {
-//     type Output = Option<Value>;
-
-//     fn index(&self, index: Lit) -> &Self::Output {
-//         if let Some(val) = self[index.var()] {
-//             if index.is_negative() {}
-//             if index.value_from_var(val) {
-//                 &Some(true)
-//             } else {
-//                 &Some(false)
-//             }
-//         } else {
-//             &None
-//         }
-//     }
-// }
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -94,9 +67,8 @@ mod test {
         let mut assignment = Assignment::default();
         assignment.set_var_count(10);
         let var1 = Var::from_dimacs(1);
-        let lit1 = Lit::positive(var1);
         assert_eq!(assignment[var1], None);
-        // assert_eq!(assignment[lit1], None);
         *assignment[var1].get_or_insert(Value::False) = Value::True;
+        assert_eq!(assignment[var1], Some(Value::True));
     }
 }

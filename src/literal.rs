@@ -1,7 +1,4 @@
-use crate::qcdcl::propagation::assignment::Assignment;
 use std::fmt::Display;
-
-pub(crate) mod db;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Var {
@@ -18,11 +15,11 @@ impl Var {
 
     pub fn from_dimacs(var: i32) -> Self {
         assert!(var > 0);
-        Self::from_index((var - 1) as u32)
+        Self::from_index((var - 1).try_into().expect("var - 1 is greater or equal to 0"))
     }
 
     pub fn to_dimacs(self) -> i32 {
-        (self.index + 1) as i32
+        (self.index + 1).try_into().expect("index + 1 should always be smaller than i32::MAX")
     }
 
     pub(crate) fn as_index(self) -> usize {
@@ -99,20 +96,13 @@ impl Lit {
         }
     }
 
-    pub(crate) fn value_from_var(&self, var_value: bool) -> bool {
-        var_value ^ self.is_negative()
-    }
-
-    // pub(crate) fn value(&self, assignment: Assignment) -> Option<bool> {
-    //     assignment[self.var()].map(|value| self.value_from_var(value))
-    // }
-
-    pub(crate) fn as_index(&self) -> usize {
+    pub(crate) fn as_index(self) -> usize {
         self.repr as usize
     }
 
+    #[allow(dead_code)]
     pub(crate) fn from_index(idx: usize) -> Lit {
-        Lit { repr: idx as u32 }
+        Lit { repr: idx.try_into().expect("index should be smaller than u32::MAX") }
     }
 }
 
@@ -175,10 +165,6 @@ mod test {
         assert_ne!(l, neg_l);
         assert_eq!(neg_l, Lit::negative(a));
         assert_eq!(l, !neg_l);
-        assert_eq!(l.value_from_var(true), true);
-        assert_eq!((!l).value_from_var(true), false);
-        assert_eq!(l.value_from_var(false), false);
-        assert_eq!((!l).value_from_var(false), true);
     }
 
     #[test]
@@ -196,11 +182,11 @@ mod test {
 /// Provides a strategy for randomly generating variables and literals.
 #[cfg(test)]
 pub(crate) mod strategy {
-    use super::*;
+    use super::{Lit, Var};
     use proptest::{bool, prelude::*};
 
     fn var(index: impl Strategy<Value = u32>) -> impl Strategy<Value = Var> {
-        index.prop_map(|index| Var::from_index(index))
+        index.prop_map(Var::from_index)
     }
 
     pub(crate) fn lit(index: impl Strategy<Value = u32>) -> impl Strategy<Value = Lit> {

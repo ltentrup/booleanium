@@ -1,8 +1,8 @@
-use miette::Result;
 use booleanium::{
     qcnf::QCNF,
     qdimacs::{ExtendedParseError, QdimacsParser},
 };
+use miette::Result;
 use std::io::Cursor;
 
 fn main() -> Result<()> {

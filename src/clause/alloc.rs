@@ -13,9 +13,10 @@ pub(crate) struct Allocator {
 
 impl Allocator {
     pub(crate) fn reserve(&mut self, num_clauses: u32) {
-        self.clauses.reserve(usize::try_from(num_clauses).unwrap())
+        self.clauses.reserve(usize::try_from(num_clauses).unwrap());
     }
 
+    #[allow(unused)]
     pub(crate) fn len(&self) -> usize {
         self.clauses.len()
     }

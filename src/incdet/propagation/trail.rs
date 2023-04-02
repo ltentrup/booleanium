@@ -4,8 +4,6 @@ use crate::literal::Lit;
 pub(crate) struct Trail {
     /// List of assignments in chronological order
     trail: Vec<Lit>,
-    /// Index into trail which marks the next assignment to propagate
-    next_propagation: usize,
     /// Indices into trail marking the decision levels
     decisions: Vec<usize>,
 }
@@ -16,16 +14,6 @@ pub(crate) struct DecLvl(usize);
 impl Trail {
     pub(crate) fn push(&mut self, lit: Lit) {
         self.trail.push(lit);
-    }
-
-    pub(super) fn next_lit_to_propagate(&mut self) -> Option<Lit> {
-        if self.next_propagation >= self.trail.len() {
-            // already at the end of the trail
-            return None;
-        }
-        let next_propagation = self.next_propagation;
-        self.next_propagation += 1;
-        Some(self.trail[next_propagation])
     }
 
     pub(crate) fn decision_level(&self) -> DecLvl {
@@ -64,11 +52,11 @@ impl Trail {
 impl DecLvl {
     pub(crate) const ROOT: DecLvl = DecLvl(0);
 
-    pub(crate) fn is_root(&self) -> bool {
-        *self == Self::ROOT
+    pub(crate) fn is_root(self) -> bool {
+        self == Self::ROOT
     }
 
-    pub(crate) fn successor(&self) -> Self {
+    pub(crate) fn successor(self) -> Self {
         Self(self.0 + 1)
     }
 }

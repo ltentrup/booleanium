@@ -1,8 +1,4 @@
-use crate::{
-    clause::alloc::ClauseId,
-    datastructure::{LitVec, VarVec},
-    literal::{Lit, Var},
-};
+use crate::{clause::alloc::ClauseId, datastructure::LitVec, literal::Lit};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Watch {

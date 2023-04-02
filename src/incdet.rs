@@ -3,6 +3,10 @@
 use self::{
     conflict::{analysis::ConflictAnalysis, check::ConflictCheck},
     graph::ImplGraph,
+    propagation::{
+        assignment::{Assignment, Value},
+        trail::{DecLvl, Trail},
+    },
     skolem::Skolem,
     stats::Statistics,
     vsids::Vsids,
@@ -13,10 +17,6 @@ use crate::{
     datastructure::{heap::VarHeap, VarVec},
     incdet::graph::Impl,
     literal::{filter_lit, filter_var, Lit, LitSlice, Var},
-    qcdcl::propagation::{
-        assignment::{Assignment, Value},
-        trail::{DecLvl, Trail},
-    },
     qdimacs::FromQdimacs,
     sat::varisat::Varisat,
     QuantTy, SolverResult,
@@ -31,6 +31,7 @@ use varisat::{ExtendFormula, Solver};
 
 pub(crate) mod conflict;
 pub(crate) mod graph;
+pub(crate) mod propagation;
 pub(crate) mod skolem;
 pub(crate) mod stats;
 pub(crate) mod vsids;
@@ -85,18 +86,14 @@ pub(crate) struct Conflict {
     assignment: HashSet<Lit>,
 }
 
-#[derive(Debug, Copy, Clone)]
-enum Propagation {
-    Constant(Lit),
-    Function(Var),
-}
-
 impl FromQdimacs for IncDet {
     fn set_num_variables(&mut self, variables: u32) {
         self.set_var_count(variables.try_into().unwrap());
     }
 
-    fn set_num_clauses(&mut self, _clauses: u32) {}
+    fn set_num_clauses(&mut self, clauses: u32) {
+        self.allocator.reserve(clauses);
+    }
 
     fn quantify(&mut self, quant: QuantTy, vars: &[Var]) {
         self._quantify(quant, vars);
@@ -289,12 +286,12 @@ impl IncDet {
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
-                if let Some(result) = self.handle_conflict(conflict) {
+                if let Some(result) = self.handle_conflict(&conflict) {
                     return result;
                 }
                 continue;
             }
-            if let Some(_) = initial.take() {
+            if initial.take().is_some() {
                 info!("number of initial deterministic vars: {}", self.trail.len());
             }
             let Some(var) = self.next_decision_variable() else {
@@ -316,7 +313,7 @@ impl IncDet {
             // check if the decision leads to a conflict
             if let Some(assignment) = self.is_conflicted(var, Some(decision)) {
                 trace!("{} is conflicted", var);
-                if let Some(result) = self.handle_conflict(Conflict { var, assignment }) {
+                if let Some(result) = self.handle_conflict(&Conflict { var, assignment }) {
                     return result;
                 }
                 continue;
@@ -354,82 +351,28 @@ impl IncDet {
         self.vsids.peek()
     }
 
-    /// The next entry to propagate.
-    /// We're always propagating constants first.
-    fn next_propagation(&mut self) -> Option<Propagation> {
-        if let Some(lit) = self.constant_propagation.pop_front() {
-            Some(Propagation::Constant(lit))
-        } else if let Some(var) = self.propagation.pop() {
-            self.propagation.update_value(var, |_| 0);
-            Some(Propagation::Function(var))
-        } else {
-            None
-        }
-    }
-
     fn propagate(&mut self) -> Option<Conflict> {
-        while let Some(entry) = self.next_propagation() {
-            match entry {
-                Propagation::Constant(lit) => {
-                    let var = lit.var();
-                    if let Some(value) = self.assignment[var] {
-                        match value {
-                            Value::True => {
-                                if lit.is_positive() {
-                                    continue;
-                                } else {
-                                    todo!("{value:?} {lit}");
-                                }
-                            }
-                            Value::False => {
-                                if lit.is_negative() {
-                                    continue;
-                                } else {
-                                    todo!("{value:?} {lit}");
-                                }
-                            }
-                            _ => todo!("{value:?} {lit}"),
-                        }
-                    }
-                    for imp in self.skolem[!lit].implications() {
-                        let clause = &self.allocator[imp];
-                        println!("{lit} {clause}");
-                        let mut assignment = HashSet::new();
-                        for &l in clause.lits().iter().filter(filter_lit(!lit)) {
-                            assert!(self.vars[l.var()].is_universal(&self.prefix));
-                            assignment.insert(!l);
-                        }
-                        return Some(Conflict { var: lit.var(), assignment });
-                    }
-                    if self.assignment.is_assigned(var) {
-                        continue;
-                    }
-                    self.assign_and_propagate(lit, false, true);
-                }
-                Propagation::Function(var) => {
-                    if self.assignment.is_assigned(var) {
-                        continue;
-                    }
-                    if !self.has_unique_consequence(var) {
-                        debug_assert!(!self.propagation.contained(var));
-                        continue;
-                    }
-                    trace!("{} has unique consquence", var);
-                    if let Some(assignment) = self.is_conflicted(var, None) {
-                        trace!("{} is conflicted", var);
-                        return Some(Conflict { var, assignment });
-                    }
-                    trace!("{} is deterministic", var);
-                    let lit = if self.skolem[Lit::positive(var)].len()
-                        <= self.skolem[Lit::negative(var)].len()
-                    {
-                        Lit::positive(var)
-                    } else {
-                        Lit::negative(var)
-                    };
-                    self.assign_and_propagate(lit, false, false);
-                }
+        while let Some(var) = self.propagation.pop() {
+            if self.assignment.is_assigned(var) {
+                continue;
             }
+            if !self.has_unique_consequence(var) {
+                debug_assert!(!self.propagation.contained(var));
+                continue;
+            }
+            trace!("{} has unique consquence", var);
+            if let Some(assignment) = self.is_conflicted(var, None) {
+                trace!("{} is conflicted", var);
+                return Some(Conflict { var, assignment });
+            }
+            trace!("{} is deterministic", var);
+            let lit =
+                if self.skolem[Lit::positive(var)].len() <= self.skolem[Lit::negative(var)].len() {
+                    Lit::positive(var)
+                } else {
+                    Lit::negative(var)
+                };
+            self.assign_and_propagate(lit, false, false);
         }
         None
     }
@@ -448,30 +391,7 @@ impl IncDet {
         }
         self.vsids.remove(lit.var());
         self.add_definition_to_conflict_check(lit, is_decision);
-        if is_constant {
-            self.propagate_constant(lit);
-        } else {
-            self.propagate_function(lit.var());
-        }
-    }
-
-    fn propagate_constant(&mut self, lit: Lit) {
-        debug!("propagate constant {lit}");
-        self.stats.skolem.constant_propagations += 1;
-        self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
-        let mut watches = mem::take(&mut self.watches[!lit]);
-        watches.retain(|watch: &Watch| {
-            let clause = &self.allocator[watch.clause];
-            trace!("Propagate {lit} in clause {clause}");
-            let has_universals = clause
-                .lits()
-                .iter()
-                .find(|&&l| self.vars[l.var()].is_universal(&self.prefix))
-                .is_some();
-
-            todo!();
-        });
-        self.watches[lit] = watches;
+        self.propagate_function(lit.var());
     }
 
     /// Use watchlist to determine more implications
@@ -574,7 +494,7 @@ impl IncDet {
         self.conflict_check.backtrack_to(lvl);
     }
 
-    pub(crate) fn handle_conflict(&mut self, conflict: Conflict) -> Option<SolverResult> {
+    pub(crate) fn handle_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {
         if self.trail.decision_level().is_root() {
             return Some(SolverResult::Unsatisfiable);
         }

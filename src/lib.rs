@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 #![deny(unused_must_use)]
 #![warn(clippy::all, clippy::pedantic)]
-#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::missing_panics_doc, clippy::module_name_repetitions)]
 //#![warn(clippy::cargo)]
 
 use std::{
@@ -18,7 +18,6 @@ pub mod qdimacs;
 pub mod cli;
 mod datastructure;
 pub mod incdet;
-pub mod qcdcl;
 mod quantifier;
 mod sat;
 
