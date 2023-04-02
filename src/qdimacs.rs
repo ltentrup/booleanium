@@ -1,5 +1,5 @@
 //! Parser for the QDIMACS input file format.
-//! The format specification is provided at https://www.qbflib.org/qdimacs.html.
+//! The format specification is provided at <https://www.qbflib.org/qdimacs.html>.
 
 use crate::{
     literal::{Lit, Var},
@@ -118,6 +118,12 @@ impl<R: Read> QdimacsParser<R> {
         Self { bytes: reader.bytes().peekable(), offset: 0, num_clauses: 0, num_clauses_read: 0 }
     }
 
+    /// Parses a QDIMACS file and returns the representation `Q`.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the read content is not valid QDIMACS.
+    /// The function propagates underlying IO failures.
     pub fn parse<Q: FromQdimacs>(&mut self) -> Result<Q, ParseError> {
         let mut result = Q::default();
         self.parse_comment_or_header(&mut result)?;
@@ -230,7 +236,7 @@ impl<R: Read> QdimacsParser<R> {
                     err_span: (start_offset..self.err_offset().saturating_sub(1)).into(),
                 });
             }
-            vars.push(Var::from_dimacs(var.try_into().unwrap()));
+            vars.push(Var::from_dimacs(var));
         }
         result.quantify(quant, &vars);
         Ok(())
@@ -325,9 +331,8 @@ impl<R: Read> QdimacsParser<R> {
                 b'-' => {
                     if is_negated {
                         return Err(ParseError::InvalidInt { err_span: self.err_span() });
-                    } else {
-                        is_negated = true;
                     }
+                    is_negated = true;
                 }
                 b @ b'0'..=b'9' => {
                     let val = i64::from(b - b'0');
@@ -343,29 +348,25 @@ impl<R: Read> QdimacsParser<R> {
                     }
                 }
                 b => {
-                    if b.is_ascii_whitespace() {
-                        break;
-                    } else {
-                        println!("{:?} {:?}", start_span, self.err_offset());
+                    if !b.is_ascii_whitespace() {
                         return Err(ParseError::InvalidInt {
                             err_span: (start_span..self.err_offset()).into(),
                         });
                     }
+                    break;
                 }
             }
         }
         if is_negated {
             parsed = -parsed;
         }
-        if let Some(result) = I::try_from(parsed).ok() {
-            Ok(result)
-        } else {
-            return Err(ParseError::LiteralOutOfBound {
+        I::try_from(parsed).map_err(|_| {
+            ParseError::LiteralOutOfBound {
                 val: parsed,
                 // reduce end offset by one, as last byte was a whitespace
                 err_span: (start_span..self.err_offset().saturating_sub(1)).into(),
-            });
-        }
+            }
+        })
     }
 
     fn err_offset(&self) -> usize {
@@ -428,7 +429,7 @@ mod test {
         let qdimacs = "p cnf 0 0";
         let reader = Cursor::new(qdimacs);
         let qbf: QCNF = QdimacsParser::new(reader).parse()?;
-        println!("{}", qbf);
+        println!("{qbf}");
         Ok(())
     }
 
@@ -437,7 +438,7 @@ mod test {
         let qdimacs = "p cnf 10 0\ne 1 2 3 0\na 4 5 6 0\n";
         let reader = Cursor::new(qdimacs);
         let qbf: QCNF = QdimacsParser::new(reader).parse()?;
-        println!("{}", qbf);
+        println!("{qbf}");
         Ok(())
     }
 
@@ -446,7 +447,7 @@ mod test {
         let qdimacs = "p cnf 10 2\n1 2 3 0\n4 5 6 0\n";
         let reader = Cursor::new(qdimacs);
         let qbf: QCNF = QdimacsParser::new(reader).parse()?;
-        println!("{}", qbf);
+        println!("{qbf}");
         Ok(())
     }
 
@@ -465,7 +466,7 @@ mod test {
 		";
         let reader = Cursor::new(qdimacs);
         let qbf: QCNF = QdimacsParser::new(reader).parse()?;
-        println!("{}", qbf);
+        println!("{qbf}");
         Ok(())
     }
 

@@ -165,6 +165,7 @@ where
 
     /// Return the parent position, if it is in the heap
     fn parent(&self, pos: usize) -> Option<usize> {
+        assert!(pos < self.heap.len());
         if pos == 0 {
             return None;
         }

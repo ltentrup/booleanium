@@ -1,9 +1,9 @@
-use std::collections::BTreeMap;
 use crate::{
     clause::alloc::{Allocator, ClauseId},
     datastructure::LitVec,
-    qcdcl::propagation::trail::DecLvl,
+    incdet::propagation::trail::DecLvl,
 };
+use std::collections::BTreeMap;
 
 pub(crate) type Skolem = LitVec<Implications>;
 

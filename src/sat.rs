@@ -48,7 +48,7 @@ pub(crate) struct LookupSolver<S: SatSolver> {
 
 impl<S: SatSolver> Default for LookupSolver<S> {
     fn default() -> Self {
-        Self { sat_solver: Default::default(), var_lookup: Default::default() }
+        Self { sat_solver: Default::default(), var_lookup: VarVec::default() }
     }
 }
 

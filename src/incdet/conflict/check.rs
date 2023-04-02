@@ -1,9 +1,9 @@
 //! (Incremental) conflict checking
 
 use crate::{
+    incdet::propagation::trail::DecLvl,
     incdet::IncDet,
     literal::{filter_lit, Lit, Var},
-    qcdcl::propagation::trail::DecLvl,
     sat::{varisat::Varisat, LookupSolver, SatSolver},
 };
 use derivative::Derivative;
@@ -21,7 +21,7 @@ pub(crate) struct ConflictCheck<S: SatSolver> {
 
 impl<S: SatSolver> Default for ConflictCheck<S> {
     fn default() -> Self {
-        Self { sat_solver: Default::default(), assumptions: BTreeMap::default() }
+        Self { sat_solver: LookupSolver::default(), assumptions: BTreeMap::default() }
     }
 }
 

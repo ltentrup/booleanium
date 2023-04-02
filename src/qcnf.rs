@@ -44,11 +44,9 @@ impl QCNF {
             .unwrap()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_2qbf(&self) -> bool {
-        match &self.prefix[..] {
-            &[(QuantTy::Forall, _), (QuantTy::Exists, _)] => true,
-            _ => false,
-        }
+        matches!(&self.prefix[..], &[(QuantTy::Forall, _), (QuantTy::Exists, _)])
     }
 }
 

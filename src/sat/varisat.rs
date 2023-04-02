@@ -1,4 +1,4 @@
-//! Implementation of SAT solver interface for (varisat)[https://crates.io/crates/varisat].
+//! Implementation of SAT solver interface for [varisat](https://crates.io/crates/varisat).
 
 use super::{SatSolver, SatSolverLit};
 use crate::literal::{Lit, Var};

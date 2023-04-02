@@ -1,8 +1,8 @@
 use crate::{
     datastructure::VarVec,
+    incdet::propagation::trail::{DecLvl, Trail},
     incdet::{vsids::Vsids, Conflict, IncDet, Scope, VarData},
     literal::{filter_lit, filter_var, Lit, LitSlice},
-    qcdcl::propagation::trail::{DecLvl, Trail},
 };
 use tracing::{debug, trace};
 
@@ -71,7 +71,7 @@ impl ConflictAnalysis {
 }
 
 impl IncDet {
-    pub(crate) fn analyze(&mut self, conflict: Conflict) -> Result<DecLvl, ()> {
+    pub(crate) fn analyze(&mut self, conflict: &Conflict) -> Result<DecLvl, ()> {
         self.conflict_analysis.reset();
         self.vsids.bump(conflict.var);
 
