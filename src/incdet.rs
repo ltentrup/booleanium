@@ -7,6 +7,7 @@ use self::{
         assignment::{Assignment, Value},
         trail::{DecLvl, Trail},
     },
+    restart::Restart,
     skolem::Skolem,
     stats::Statistics,
     vsids::Vsids,
@@ -32,6 +33,7 @@ use varisat::{ExtendFormula, Solver};
 pub(crate) mod conflict;
 pub(crate) mod graph;
 pub(crate) mod propagation;
+pub(crate) mod restart;
 pub(crate) mod skolem;
 pub(crate) mod stats;
 pub(crate) mod vsids;
@@ -63,6 +65,7 @@ pub struct IncDet {
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
+    restart: Restart,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -499,10 +502,15 @@ impl IncDet {
             return Some(SolverResult::Unsatisfiable);
         }
         let Ok(backtrack_to) = self.analyze(conflict) else {
-                    return Some( SolverResult::Unsatisfiable);
-                };
-        debug!("conflict analysis: backtrack to {backtrack_to:?}");
-        self.backtrack_to(backtrack_to);
+            return Some(SolverResult::Unsatisfiable);
+        };
+        if self.restart.should_do_restart() {
+            debug!("confilct analysis: restart");
+            self.backtrack_to(DecLvl::ROOT);
+        } else {
+            debug!("conflict analysis: backtrack to {backtrack_to:?}");
+            self.backtrack_to(backtrack_to);
+        }
         let clause = self.conflict_analysis.clause().to_owned();
         self._add_clause(&clause);
         self.stats.global.added_clauses += 1;
