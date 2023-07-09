@@ -34,6 +34,10 @@ impl Trail {
         self.decisions.iter().map(|&idx| &self.trail[idx])
     }
 
+    pub(crate) fn is_decision(&self, lit: Lit) -> bool {
+        self.iter_decisions().any(|&l| l == lit)
+    }
+
     pub(crate) fn backtrack_to<F>(&mut self, lvl: DecLvl, callback: F)
     where
         F: FnMut(Lit),
