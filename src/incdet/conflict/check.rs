@@ -10,6 +10,8 @@ use derivative::Derivative;
 use std::collections::{BTreeMap, HashSet};
 use tracing::{debug, trace};
 
+const INCREMENTAL_CONFLICT_CHECK: bool = false;
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub(crate) struct ConflictCheck<S: SatSolver> {
@@ -83,13 +85,19 @@ impl IncDet {
         // slower, complete check
         trace!("global conflict check");
         self.stats.skolem.global_conflict_checks += 1;
-        let assignment = self.is_conflicted_incremental(var, decision)?;
-        // let assignment = self._is_conflicted(var, decision, true)
+        let assignment = if INCREMENTAL_CONFLICT_CHECK {
+            self.is_conflicted_incremental(var, decision)?
+        } else {
+            self._is_conflicted::<Varisat>(var, decision, true)?
+        };
         self.stats.global.conflicts += 1;
         Some(assignment)
     }
 
     pub(crate) fn add_definition_to_conflict_check(&mut self, lit: Lit, is_decision: bool) {
+        if !INCREMENTAL_CONFLICT_CHECK {
+            return;
+        }
         let lvl = self.trail.decision_level();
         // add definition from implication clauses
         for cid in [lit, lit.negated()].into_iter().flat_map(|lit| self.skolem[lit].implications())

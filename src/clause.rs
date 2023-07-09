@@ -1,4 +1,6 @@
-use crate::literal::Lit;
+use std::collections::HashSet;
+
+use crate::literal::{filter_lit, Lit};
 
 pub(crate) mod alloc;
 
@@ -24,6 +26,14 @@ impl Clause {
     #[allow(dead_code)]
     pub(crate) fn lits_mut(&mut self) -> &mut [Lit] {
         &mut self.lits
+    }
+
+    /// For a clause of the form $\bigwedge_{p \in premise} \rightarrow implied_lit$,
+    /// this function returns whether the premise is satisfied by the assignment.
+    /// As a consequence, the `implied_lit` has to be true.
+    pub(crate) fn is_implied(&self, implied_lit: Lit, assignment: &HashSet<Lit>) -> bool {
+        assert!(self.lits.contains(&implied_lit));
+        !self.iter().filter(filter_lit(implied_lit)).any(|l| assignment.contains(l))
     }
 }
 

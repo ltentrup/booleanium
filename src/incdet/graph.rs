@@ -1,7 +1,12 @@
 //! Implication graph
 
 use crate::{
-    clause::alloc::ClauseId, datastructure::LitVec, incdet::propagation::trail::DecLvl,
+    clause::{
+        alloc::{Allocator, ClauseId},
+        Clause,
+    },
+    datastructure::LitVec,
+    incdet::propagation::trail::DecLvl,
     literal::Lit,
 };
 
@@ -19,5 +24,11 @@ impl ImplGraph {
         self.iter_mut().for_each(|imps| {
             imps.retain(|imp| imp.dec_lvl <= lvl);
         });
+    }
+}
+
+impl Impl {
+    pub(crate) fn reason<'alloc>(&self, allocator: &'alloc Allocator) -> &'alloc Clause {
+        &allocator[self.clause]
     }
 }
