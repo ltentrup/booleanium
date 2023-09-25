@@ -151,7 +151,7 @@ dependencies = [
  "cryptominisat",
  "derivative",
  "miette",
- "ordered-float 3.9.0",
+ "ordered-float 4.1.0",
  "proptest",
  "thiserror",
  "tracing",
@@ -510,9 +510,9 @@ dependencies = [
 
 [[package]]
 name = "ordered-float"
-version = "3.9.0"
+version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "126d3e6f3926bfb0fb24495b4f4da50626f547e54956594748e3d8882a0320b4"
+checksum = "e3a540f3e3b3d7929c884e46d093d344e4e5bdeed54d08bf007df50c93cc85d5"
 dependencies = [
  "num-traits",
 ]
