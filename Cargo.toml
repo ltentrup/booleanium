@@ -15,7 +15,7 @@ varisat = "0.2"
 ordered-float = "3.9"
 derivative = "2.2"
 cryptominisat = { version = "5.8", optional = true }
-clap = { version = "4.3", features = ["derive"] }
+clap = { version = "4.4", features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
