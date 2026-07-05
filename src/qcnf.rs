@@ -130,6 +130,56 @@ macro_rules! qcnf_formula {
 	};
 }
 
+#[cfg(test)]
+impl QCNF {
+    /// Evaluates the QBF semantics by brute-force enumeration of all
+    /// assignments. Only usable for tiny instances; serves as a trivially
+    /// correct reference for differential testing.
+    pub(crate) fn brute_force(&self) -> crate::SolverResult {
+        use std::collections::HashMap;
+
+        fn eval(
+            vars: &[(QuantTy, Var)],
+            assignment: &mut HashMap<Var, bool>,
+            matrix: &[Vec<crate::literal::Lit>],
+        ) -> bool {
+            let Some(&(quant, var)) = vars.first() else {
+                return matrix.iter().all(|clause| {
+                    clause.iter().any(|lit| {
+                        assignment
+                            .get(&lit.var())
+                            .map_or(false, |&value| value == lit.is_positive())
+                    })
+                });
+            };
+            let rest = &vars[1..];
+            let mut branch = |value: bool| {
+                assignment.insert(var, value);
+                let result = eval(rest, assignment, matrix);
+                assignment.remove(&var);
+                result
+            };
+            match quant {
+                QuantTy::Exists => branch(false) || branch(true),
+                QuantTy::Forall => branch(false) && branch(true),
+            }
+        }
+
+        let vars: Vec<(QuantTy, Var)> = self
+            .prefix
+            .iter()
+            .flat_map(|(quant, vars)| vars.iter().map(move |&var| (*quant, var)))
+            .collect();
+        assert!(vars.len() <= 24, "brute-force evaluation only supports tiny instances");
+        let mut assignment = HashMap::new();
+        if eval(&vars, &mut assignment, &self.matrix) {
+            crate::SolverResult::Satisfiable
+        } else {
+            crate::SolverResult::Unsatisfiable
+        }
+    }
+}
+
 /// Provides a strategy for randomly generating QCNFs.
 #[cfg(test)]
 pub(crate) mod strategy {
