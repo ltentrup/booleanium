@@ -629,6 +629,16 @@ impl IncDet {
     }
 
     pub(crate) fn handle_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {
+        if self.stats.global.conflicts % 1024 == 0 {
+            info!(
+                "progress: {} conflicts, {} decisions, {} restarts, {} learnt clauses, {} determinacy checks",
+                self.stats.global.conflicts,
+                self.stats.global.decisions,
+                self.stats.global.restarts,
+                self.stats.global.added_clauses,
+                self.stats.skolem.local_det_checks,
+            );
+        }
         if self.trail.decision_level().is_root() {
             return Some(SolverResult::Unsatisfiable);
         }

@@ -42,6 +42,7 @@ impl<T> VarVec<T> {
         self.0.iter_mut()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(&self, index: Var) -> Option<&T> {
         self.0.get(index.as_index())
     }

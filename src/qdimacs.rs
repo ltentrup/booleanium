@@ -119,9 +119,21 @@ impl<R: Read> QdimacsParser<R> {
     /// The function propagates underlying IO failures.
     pub fn parse<Q: FromQdimacs>(&mut self) -> Result<Q, ParseError> {
         let mut result = Q::default();
-        self.parse_comment_or_header(&mut result)?;
-        self.parse_prefix(&mut result)?;
-        self.parse_matrix(&mut result)?;
+        self.parse_into(&mut result)?;
+        Ok(result)
+    }
+
+    /// Parses a QDIMACS file into an existing (e.g. pre-configured)
+    /// representation.
+    ///
+    /// # Errors
+    ///
+    /// This function will return an error if the read content is not valid QDIMACS.
+    /// The function propagates underlying IO failures.
+    pub fn parse_into<Q: FromQdimacs>(&mut self, result: &mut Q) -> Result<(), ParseError> {
+        self.parse_comment_or_header(result)?;
+        self.parse_prefix(result)?;
+        self.parse_matrix(result)?;
 
         // Headers with wrong clause counts are common in the wild; warn
         // instead of rejecting the instance.
@@ -133,7 +145,7 @@ impl<R: Read> QdimacsParser<R> {
             );
         }
 
-        Ok(result)
+        Ok(())
     }
 
     /// Either `c ...` or `p cnf ...`

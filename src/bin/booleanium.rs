@@ -1,25 +1,65 @@
 use booleanium::{
-    cli,
-    incdet::IncDet,
+    incdet::{IncDet, Options},
     qdimacs::{ExtendedParseError, QdimacsParser},
     SolverResult,
 };
-use miette::Result;
-use std::io::Cursor;
+use clap::Parser;
+use miette::{IntoDiagnostic, Result};
+use std::{io::Cursor, io::Read, path::PathBuf};
+
+/// An experimental QBF solver based on incremental determinization.
+#[derive(Debug, Parser)]
+#[command(version, about)]
+struct Args {
+    /// Path to a QDIMACS file; reads from stdin if omitted.
+    file: Option<PathBuf>,
+
+    /// Disable eager propagation of constant Skolem functions.
+    #[arg(long)]
+    no_constant_propagation: bool,
+
+    /// Rebuild a SAT solver per global conflict check instead of reusing an
+    /// incremental solver.
+    #[arg(long)]
+    no_incremental_conflict_check: bool,
+
+    /// Restart the search on a Luby schedule.
+    #[arg(long)]
+    restarts: bool,
+}
+
+impl Args {
+    fn options(&self) -> Options {
+        Options {
+            constant_propagation: !self.no_constant_propagation,
+            incremental_conflict_check: !self.no_incremental_conflict_check,
+            restarts: self.restarts,
+        }
+    }
+}
 
 fn main() -> Result<SolverResult> {
     tracing_subscriber::fmt::init();
+    let args = Args::parse();
 
-    let contents = cli::content_from_args()?;
+    let contents = match &args.file {
+        Some(path) => std::fs::read(path).into_diagnostic()?,
+        None => {
+            tracing::info!("no file provided, reading from stdin");
+            let mut buffer = Vec::new();
+            std::io::stdin().read_to_end(&mut buffer).into_diagnostic()?;
+            buffer
+        }
+    };
     let reader = Cursor::new(&contents);
 
-    let mut solver: IncDet = match QdimacsParser::new(reader).parse() {
-        Ok(q) => q,
-        Err(err) => Err(ExtendedParseError { source_code: contents, related: vec![err] })?,
-    };
+    let mut solver = IncDet::with_options(args.options());
+    if let Err(err) = QdimacsParser::new(reader).parse_into(&mut solver) {
+        Err(ExtendedParseError { source_code: contents, related: vec![err] })?;
+    }
 
     let result = solver.solve();
-    println!("result status: {}", result);
+    println!("result status: {result}");
 
     Ok(result)
 }
