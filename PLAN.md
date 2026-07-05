@@ -150,9 +150,14 @@ Remaining performance work:
   allocator never shrinks; add activity-based deletion and restarts
   (the Varisat-inspired infrastructure — `clause::alloc`, VSIDS — is
   prepared for this).
-* **Benchmarking on real instances**: evaluate on QBFEVAL 2QBF tracks
-  against CADET/DepQBF, and profile the split between determinacy checks,
-  conflict checks, and clause learning (`Statistics` already counts these).
+* **Benchmarking on real instances**: the solver is validated against the
+  CADET integration-test suite (117 QDIMACS instances with known results):
+  82 correct, 0 wrong, 0 panics, 2 timeouts at 30s (`bug8.qdimacs`,
+  `adder2.qdimacs`, both UNSAT), 33 unsupported (more than one quantifier
+  alternation). Getting this suite to run also required QDIMACS
+  free-variable support and header tolerance. Next: the two timeouts are
+  concrete performance targets, and QBFEVAL 2QBF tracks would give a
+  competitive comparison against CADET/DepQBF.
 * **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
   rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
   the hot path of conflict analysis.
