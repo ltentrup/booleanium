@@ -106,11 +106,12 @@ Done in the performance pass (see `src/bin/bench.rs`; run with
 * **Model extraction** is linear now (was quadratic), and implication counts
   are cached.
 
-Effect on the benchmark: `parity-1000` 46ms → ~4ms (12x), the
-conflict-heavy `random-10-60-220-1` 195s → ~1s. Note that conflict-heavy
-instances show large search variance: the learned clauses depend on which
-model the conflict check happens to return, so per-instance times scatter
-in both directions and only aggregate comparisons over many instances are
+Effect (A/B against the pre-optimization solver, 18 random instances,
+150s timeout): solved instances 15/18 → 17/18, and the instances solved by
+both got ~20x faster in aggregate (282s → 14s); `parity-1000` went from
+46ms to ~4ms. Note that conflict-heavy instances show large search
+variance — the learned clauses depend on which model the conflict check
+happens to return — so only aggregate comparisons over many instances are
 meaningful. The remaining time on conflict-heavy instances is dominated by
 the incremental global conflict checks, of which only ~13% find an actual
 conflict.
