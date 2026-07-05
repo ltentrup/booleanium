@@ -81,19 +81,60 @@ increasing order of ambition:
 
 ### 3. Performance
 
-* **Cheaper determinacy checks**: `has_unique_consequence` builds a fresh
-  varisat solver per check. Add syntactic pre-filters (e.g. a variable with
-  implications in only one polarity and no covering clause set can be skipped
-  cheaply) and consider one incremental solver per variable, mirroring the
-  incremental conflict check.
+Done in the performance pass (see `src/bin/bench.rs`; run with
+`cargo run --release --bin bench`):
+
+* **Determinacy checks** no longer build a SAT solver: the formulas are tiny
+  and local, so a budgeted DPLL (`incdet::determinacy`) decides almost all
+  checks directly, falling back to a solver only when the budget runs out.
+  A shared incremental solver with guard literals was tried first and was
+  8x *slower* than the per-check solver on propagation-heavy instances —
+  the checks are too local for a global solver to pay off.
+* **Conflict checks**: the SAT-based local pre-check was replaced by a
+  syntactic pairwise-compatibility check (ignoring global constraints,
+  "both polarities can fire" holds iff some pair of implication clauses of
+  opposite polarity has no clashing literals). The incremental global check
+  reuses activation literals and fire arbiters cached per (clause, implied
+  literal) instead of re-encoding every implication clause with fresh
+  variables on every check, and variable mappings are kept stable across
+  backtracking (the checked variable is scrubbed from the returned model
+  since it carries no meaningful value).
+* The special decision handling in the conflict check turned out to be
+  semantically redundant (a fired implication of the decided polarity
+  contradicts "no implication of the decision fires"), so the check is the
+  same for decisions and propagations and the encoding was removed.
+* **Model extraction** is linear now (was quadratic), and implication counts
+  are cached.
+
+Effect on the benchmark: `parity-1000` 46ms → ~4ms (12x), the
+conflict-heavy `random-10-60-220-1` 195s → ~1s. Note that conflict-heavy
+instances show large search variance: the learned clauses depend on which
+model the conflict check happens to return, so per-instance times scatter
+in both directions and only aggregate comparisons over many instances are
+meaningful. The remaining time on conflict-heavy instances is dominated by
+the incremental global conflict checks, of which only ~13% find an actual
+conflict.
+
+Remaining performance work:
+
+* **Sharper conflict gating**: the syntactic pair check filters only ~10% of
+  global checks; investigate stronger cheap filters (e.g. incorporating
+  determined constants/functions of premise variables, or caching
+  compatible-pair witnesses across checks of the same variable).
+* **Cone-of-influence reduction** for the rebuilt (non-incremental) global
+  check: only clauses of variables in the transitive premise cone of the
+  checked variable are relevant.
+* **Watch bookkeeping**: `propagate_function` scans watch lists to find and
+  move watched literals; storing the two watched literals per clause would
+  make this O(1). Not measurable on current benchmarks, worth revisiting
+  with clause databases that have longer clauses.
 * **Clause database management**: learned clauses are never deleted and the
   allocator never shrinks; add activity-based deletion and restarts
   (the Varisat-inspired infrastructure — `clause::alloc`, VSIDS — is
   prepared for this).
-* **Benchmarking on real instances**: random instances solve almost entirely
-  by propagation; evaluate on QBFEVAL 2QBF tracks against CADET/DepQBF, and
-  profile the split between determinacy checks, conflict checks, and clause
-  learning (`Statistics` already counts these).
+* **Benchmarking on real instances**: evaluate on QBFEVAL 2QBF tracks
+  against CADET/DepQBF, and profile the split between determinacy checks,
+  conflict checks, and clause learning (`Statistics` already counts these).
 * **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
   rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
   the hot path of conflict analysis.
