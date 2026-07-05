@@ -22,16 +22,19 @@ mod fuzz {
         let expected = qcnf.brute_force();
         for constant_propagation in [false, true] {
             for incremental_conflict_check in [false, true] {
-                let options = Options { constant_propagation, incremental_conflict_check };
-                let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
-                let actual = solver.solve();
-                prop_assert_eq!(
-                    actual,
-                    expected,
-                    "solver with {:?} disagrees with oracle on instance:\n{}",
-                    options,
-                    qcnf
-                );
+                for restarts in [false, true] {
+                    let options =
+                        Options { constant_propagation, incremental_conflict_check, restarts };
+                    let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
+                    let actual = solver.solve();
+                    prop_assert_eq!(
+                        actual,
+                        expected,
+                        "solver with {:?} disagrees with oracle on instance:\n{}",
+                        options,
+                        qcnf
+                    );
+                }
             }
         }
         Ok(())
@@ -224,7 +227,8 @@ fn bench_conflict_check_configs() {
         let qcnf = strat.new_tree(&mut runner).unwrap().current();
         let mut results = Vec::new();
         for (idx, incremental_conflict_check) in [false, true].into_iter().enumerate() {
-            let options = Options { constant_propagation: true, incremental_conflict_check };
+            let options =
+                Options { constant_propagation: true, incremental_conflict_check, restarts: true };
             let mut solver = IncDet::from_qcnf_with_options(&qcnf, options);
             let start = Instant::now();
             results.push(solver.solve());

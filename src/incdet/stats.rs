@@ -10,6 +10,7 @@ pub(crate) struct Statistics {
 pub(crate) struct GlobalStats {
     pub(crate) decisions: u32,
     pub(crate) conflicts: u32,
+    pub(crate) restarts: u32,
     pub(crate) added_clauses: u32,
     pub(crate) solve_time: Duration,
 }

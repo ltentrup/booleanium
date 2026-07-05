@@ -52,11 +52,29 @@ pub struct Options {
     /// Reuse a single incremental SAT solver for the global conflict checks
     /// instead of rebuilding a solver for every check.
     pub incremental_conflict_check: bool,
+    /// Restart the search (backtrack to the root level, keeping all learnt
+    /// clauses and variable activities) on a Luby schedule to escape
+    /// heavy-tailed search behavior.
+    pub restarts: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { constant_propagation: true, incremental_conflict_check: true }
+        Self { constant_propagation: true, incremental_conflict_check: true, restarts: true }
+    }
+}
+
+/// Number of conflicts of the base Luby restart interval.
+const RESTART_INTERVAL: u32 = 100;
+
+/// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
+fn luby(mut i: u32) -> u32 {
+    loop {
+        let bits = 32 - i.leading_zeros();
+        if i == (1 << bits) - 1 {
+            return 1 << (bits - 1);
+        }
+        i -= (1 << (bits - 1)) - 1;
     }
 }
 
@@ -305,16 +323,30 @@ impl IncDet {
         self.build_watchlist();
         self.build_vsids_heap();
         let mut initial = Some(());
+        let mut conflicts_since_restart = 0;
+        let mut restart_number = 1;
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
                 if let Some(result) = self.handle_conflict(&conflict) {
                     return result;
                 }
+                conflicts_since_restart += 1;
                 continue;
             }
             if initial.take().is_some() {
                 info!("number of initial deterministic vars: {}", self.trail.len());
+            }
+            if self.options.restarts
+                && conflicts_since_restart >= RESTART_INTERVAL * luby(restart_number)
+                && !self.trail.decision_level().is_root()
+            {
+                debug!("restart {restart_number}");
+                self.stats.global.restarts += 1;
+                restart_number += 1;
+                conflicts_since_restart = 0;
+                self.backtrack_to(DecLvl::ROOT);
+                continue;
             }
             let Some(var) = self.next_decision_variable() else {
                 break;
@@ -338,6 +370,7 @@ impl IncDet {
                 if let Some(result) = self.handle_conflict(&Conflict { var, assignment }) {
                     return result;
                 }
+                conflicts_since_restart += 1;
                 continue;
             }
             // TODO: is_constant
