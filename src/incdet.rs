@@ -4,7 +4,7 @@ use self::{
     conflict::{analysis::ConflictAnalysis, check::ConflictCheck},
     graph::ImplGraph,
     propagation::{
-        assignment::{Assignment, Value},
+        assignment::Assignment,
         trail::{DecLvl, Trail},
     },
     skolem::Skolem,
@@ -16,7 +16,7 @@ use crate::{
     clause::alloc::{Allocator, ClauseId},
     datastructure::{heap::VarHeap, VarVec},
     incdet::graph::Impl,
-    literal::{filter_lit, filter_var, Lit, LitSlice, Var},
+    literal::{filter_var, Lit, LitSlice, Var},
     qdimacs::FromQdimacs,
     sat::varisat::Varisat,
     QuantTy, SolverResult,
@@ -40,10 +40,29 @@ pub(crate) mod watch;
 #[cfg(test)]
 mod test;
 
-const ENABLE_CONSTANT_PROPAGATION: bool = false;
+/// Configuration of the incremental determinization algorithm.
+///
+/// The default enables all features; the options mainly exist to make it
+/// possible to test and benchmark the features in isolation.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// Propagate constant Skolem functions eagerly. Constants admit cheaper
+    /// determinacy and conflict checks than general Skolem functions.
+    pub constant_propagation: bool,
+    /// Reuse a single incremental SAT solver for the global conflict checks
+    /// instead of rebuilding a solver for every check.
+    pub incremental_conflict_check: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { constant_propagation: true, incremental_conflict_check: true }
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct IncDet {
+    options: Options,
     vars: VarVec<VarData>,
     prefix: Vec<Scope>,
     clauses: Vec<ClauseId>,
@@ -105,9 +124,20 @@ impl FromQdimacs for IncDet {
 }
 
 impl IncDet {
+    /// Creates a solver with the provided configuration.
+    #[must_use]
+    pub fn with_options(options: Options) -> Self {
+        Self { options, ..Self::default() }
+    }
+
     #[cfg(test)]
     fn from_qcnf(qcnf: &crate::qcnf::QCNF) -> Self {
-        let mut solver = Self::default();
+        Self::from_qcnf_with_options(qcnf, Options::default())
+    }
+
+    #[cfg(test)]
+    fn from_qcnf_with_options(qcnf: &crate::qcnf::QCNF, options: Options) -> Self {
+        let mut solver = Self::with_options(options);
         for (qty, vars) in &qcnf.prefix {
             solver._quantify(*qty, vars);
         }
@@ -209,19 +239,13 @@ impl IncDet {
         }
         if let Some(&lit) = singleton {
             self.skolem[lit].add_implication(clause_id, DecLvl::ROOT);
-            if ENABLE_CONSTANT_PROPAGATION && no_universals {
+            if self.options.constant_propagation && no_universals {
                 self.constant_propagation.push_back(lit);
             } else {
                 self.propagation
                     .add_and_set(lit.var(), self.skolem[lit].len() + self.skolem[!lit].len());
             }
-            for univ in lits.iter().filter(|l| self.vars[l.var()].is_universal(&self.prefix)) {
-                self.graph[lit].push(Impl {
-                    lit: univ.negated(),
-                    clause: clause_id,
-                    dec_lvl: DecLvl::ROOT,
-                });
-            }
+            self.graph[lit].push(Impl { clause: clause_id, dec_lvl: DecLvl::ROOT });
         } else {
             // TODO: handle constant functions
             self.clauses.push(clause_id);
@@ -253,11 +277,7 @@ impl IncDet {
                         watch1.var(),
                         self.skolem[watch1].len() + self.skolem[!watch1].len(),
                     );
-                    self.graph[watch1].push(Impl {
-                        lit: watch2.negated(),
-                        clause: clause_id,
-                        dec_lvl: max_lvl,
-                    });
+                    self.graph[watch1].push(Impl { clause: clause_id, dec_lvl: max_lvl });
                 }
             }
         }
@@ -352,7 +372,17 @@ impl IncDet {
     }
 
     fn propagate(&mut self) -> Option<Conflict> {
-        while let Some(var) = self.propagation.pop() {
+        loop {
+            // constants are the cheapest propagation, handle them first
+            if let Some(lit) = self.constant_propagation.pop_front() {
+                if let Some(conflict) = self.propagate_constant(lit) {
+                    return Some(conflict);
+                }
+                continue;
+            }
+            let Some(var) = self.propagation.pop() else {
+                return None;
+            };
             if self.assignment.is_assigned(var) {
                 continue;
             }
@@ -374,6 +404,35 @@ impl IncDet {
                 };
             self.assign_and_propagate(lit, false, false);
         }
+    }
+
+    /// Handles a literal that is forced to be constant true, i.e., its
+    /// variable has the constant Skolem function `lit.is_positive()`.
+    fn propagate_constant(&mut self, lit: Lit) -> Option<Conflict> {
+        let var = lit.var();
+        if self.assignment.is_assigned(var) {
+            return match self.assignment.constant_value(lit) {
+                // already assigned to the same constant
+                Some(true) => None,
+                // two contradicting constants; the conflict does not depend
+                // on any universal assignment
+                Some(false) => Some(Conflict { var, assignment: HashSet::new() }),
+                None => {
+                    // cannot happen: implications are only added to unassigned
+                    // variables, so the constant would have been queued before
+                    // the variable was assigned a function
+                    debug_assert!(false, "constants are queued before functions are assigned");
+                    None
+                }
+            };
+        }
+        trace!("{lit} is constant");
+        self.stats.skolem.constant_propagations += 1;
+        if let Some(assignment) = self.is_conflicted(var, None) {
+            trace!("{} is conflicted", var);
+            return Some(Conflict { var, assignment });
+        }
+        self.assign_and_propagate(lit, false, true);
         None
     }
 
@@ -404,6 +463,12 @@ impl IncDet {
             watches.retain(|watch: &Watch| {
                 let clause = &self.allocator[watch.clause];
                 trace!("Propagate {var} in clause {clause}");
+                if clause.iter().any(|&l| self.assignment.constant_value(l) == Some(true)) {
+                    // the clause is globally satisfied by a constant
+                    // (constants are only assigned at the root level),
+                    // no implications can be derived from it
+                    return true;
+                }
                 // iterate over existential literals that are not watched
                 let mut iter = clause
                     .lits()
@@ -418,11 +483,6 @@ impl IncDet {
                     trace!("New watched lit {l} in clause {}", clause);
                     return false;
                 }
-                let propagated_lit = *clause
-                    .lits()
-                    .iter()
-                    .find(|lit| lit.var() == var)
-                    .expect("this is the propagated literal");
                 // there is no other existential literal to watch for,
                 // thus, this is an implication clause for the remaining variable
                 let Some(&lit) = clause
@@ -438,15 +498,23 @@ impl IncDet {
                 };
                 trace!("New implication clause for {}: {}", lit, clause);
 
+                if self.options.constant_propagation
+                    && self.trail.decision_level().is_root()
+                    && clause
+                        .iter()
+                        .filter(|&&l| l != lit)
+                        .all(|&l| self.assignment.constant_value(l) == Some(false))
+                {
+                    // all other literals are constant false, so `lit` is
+                    // forced to be constant true
+                    self.constant_propagation.push_back(lit);
+                }
                 self.skolem[lit].add_implication(watch.clause, self.trail.decision_level());
                 self.propagation
                     .add_and_set(lit.var(), self.skolem[lit].len() + self.skolem[!lit].len());
                 // add the propagation reason to implication graph
-                self.graph[lit].push(Impl {
-                    lit: propagated_lit.negated(),
-                    clause: watch.clause,
-                    dec_lvl: self.trail.decision_level(),
-                });
+                self.graph[lit]
+                    .push(Impl { clause: watch.clause, dec_lvl: self.trail.decision_level() });
                 true
             });
             self.watches[lit] = watches;
@@ -461,12 +529,19 @@ impl IncDet {
             .chain(self.skolem[Lit::negative(var)].implications())
         {
             let clause = &self.allocator[cid];
-            // todo
-            // assert!(clause.lits().len() > 1);
+            if clause
+                .iter()
+                .any(|&l| l.var() != var && self.assignment.constant_value(l) == Some(true))
+            {
+                // the implication can never fire as the clause is globally
+                // satisfied by a constant
+                continue;
+            }
             solver.add_clause(
                 &clause
                     .iter()
                     .filter(|l| l.var() != var)
+                    .filter(|&&l| self.assignment.constant_value(l) != Some(false))
                     .map(|l| varisat::Lit::from_dimacs(l.to_dimacs().try_into().unwrap()))
                     .collect::<Vec<_>>(),
             );
@@ -482,16 +557,32 @@ impl IncDet {
     }
 
     pub(crate) fn backtrack_to(&mut self, lvl: DecLvl) {
+        let mut unassigned = Vec::new();
         self.trail.backtrack_to(lvl, |assigned_lit| {
             self.assignment.unassign(assigned_lit.var());
             self.dec_lvls[assigned_lit.var()] = None;
             self.vsids.add(assigned_lit.var());
             self.conflict_check.forget(assigned_lit.var());
+            unassigned.push(assigned_lit.var());
         });
         self.skolem.backtrack_to(lvl);
-        self.propagation.clear();
         self.graph.backtrack_to(lvl);
         self.conflict_check.backtrack_to(lvl);
+        // Unassigned variables that still have implication clauses may still
+        // be uniquely determined, so their determinacy checks are re-queued.
+        for var in unassigned {
+            self.requeue_determinacy_check(var);
+        }
+    }
+
+    /// Queues the determinacy check for `var` if there are implication
+    /// clauses for one of its literals.
+    fn requeue_determinacy_check(&mut self, var: Var) {
+        let implications =
+            self.skolem[Lit::positive(var)].len() + self.skolem[Lit::negative(var)].len();
+        if implications > 0 {
+            self.propagation.add_and_set(var, implications);
+        }
     }
 
     pub(crate) fn handle_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {
@@ -507,6 +598,11 @@ impl IncDet {
         self._add_clause(&clause);
         self.stats.global.added_clauses += 1;
         assert!(!self.conflicted, "empty clause cannot be added through conflict analysis");
+        // the learnt clause constrains the conflicted variable further, so it
+        // may have become uniquely determined
+        if !self.assignment.is_assigned(conflict.var) {
+            self.requeue_determinacy_check(conflict.var);
+        }
         None
     }
 }

@@ -189,6 +189,7 @@ impl IncDet {
             "clause minimization for clause {}",
             LitSlice::from(self.conflict_analysis.clause.as_slice())
         );
+        let mut cache = std::collections::HashMap::new();
         let mut redundant = Vec::new();
         for &lit in &self.conflict_analysis.clause {
             trace!("{lit}");
@@ -197,7 +198,7 @@ impl IncDet {
                 // We keep the single literal at the current decision level
                 continue;
             }
-            if self.is_literal_redundant(lit, conflict) {
+            if self.is_literal_redundant(lit, conflict, &mut cache) {
                 redundant.push(lit);
             }
         }
@@ -211,9 +212,35 @@ impl IncDet {
         );
     }
 
-    fn is_literal_redundant(&self, lit: Lit, conflict: &Conflict) -> bool {
+    /// Checks whether `lit` is implied by the remaining literals of the
+    /// learnt clause and can therefore be removed.
+    ///
+    /// The check recurses along the implication graph, whose edges always
+    /// point to strictly earlier trail positions, so the recursion is
+    /// well-founded. Results are memoized in `cache` to avoid re-exploring
+    /// shared sub-graphs.
+    fn is_literal_redundant(
+        &self,
+        lit: Lit,
+        conflict: &Conflict,
+        cache: &mut std::collections::HashMap<Lit, bool>,
+    ) -> bool {
         trace!("check if {lit} is redundant");
 
+        if let Some(&redundant) = cache.get(&lit) {
+            return redundant;
+        }
+        let redundant = self.is_literal_redundant_uncached(lit, conflict, cache);
+        cache.insert(lit, redundant);
+        redundant
+    }
+
+    fn is_literal_redundant_uncached(
+        &self,
+        lit: Lit,
+        conflict: &Conflict,
+        cache: &mut std::collections::HashMap<Lit, bool>,
+    ) -> bool {
         if self.vars[lit.var()].is_universal(&self.prefix) {
             return false;
         }
@@ -230,7 +257,7 @@ impl IncDet {
             }
 
             for &premise in reason.iter().filter(filter_lit(!lit)) {
-                if !self.is_literal_redundant(premise, conflict) {
+                if !self.is_literal_redundant(premise, conflict, cache) {
                     return false;
                 }
             }

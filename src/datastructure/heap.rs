@@ -100,6 +100,7 @@ where
         self.positions[var].is_some()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn clear(&mut self) {
         self.values.values_mut().for_each(|val| *val = T::default());
         self.heap.clear();

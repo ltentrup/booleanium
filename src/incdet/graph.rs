@@ -7,14 +7,15 @@ use crate::{
     },
     datastructure::LitVec,
     incdet::propagation::trail::DecLvl,
-    literal::Lit,
 };
 
 pub(crate) type ImplGraph = LitVec<Vec<Impl>>;
 
+/// An implication clause that acts as the reason for a propagated literal.
+/// The premise of the implication are the negated remaining literals of the
+/// clause.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Impl {
-    pub(crate) lit: Lit,
     pub(crate) clause: ClauseId,
     pub(crate) dec_lvl: DecLvl,
 }

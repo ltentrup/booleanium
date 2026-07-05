@@ -42,6 +42,17 @@ impl Assignment {
     pub(crate) fn is_assigned(&self, var: Var) -> bool {
         self.assignment[var].is_some()
     }
+
+    /// Returns the truth value of `lit` if its variable is assigned a
+    /// constant Skolem function, and `None` if it is unassigned or assigned
+    /// a non-constant function.
+    pub(crate) fn constant_value(&self, lit: Lit) -> Option<bool> {
+        match self.assignment[lit.var()]? {
+            Value::True => Some(lit.is_positive()),
+            Value::False => Some(lit.is_negative()),
+            Value::PositiveImplications | Value::NegativeImplications => None,
+        }
+    }
 }
 
 impl std::ops::Index<Var> for Assignment {
