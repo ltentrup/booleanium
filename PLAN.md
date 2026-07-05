@@ -155,9 +155,17 @@ Remaining performance work:
   82 correct, 0 wrong, 0 panics, 2 timeouts at 30s (`bug8.qdimacs`,
   `adder2.qdimacs`, both UNSAT), 33 unsupported (more than one quantifier
   alternation). Getting this suite to run also required QDIMACS
-  free-variable support and header tolerance. Next: the two timeouts are
-  concrete performance targets, and QBFEVAL 2QBF tracks would give a
-  competitive comparison against CADET/DepQBF.
+  free-variable support and header tolerance. QBFEVAL 2QBF tracks would
+  give a competitive comparison against CADET/DepQBF.
+* **XOR-heavy conflict checks**: stack sampling shows the two timeout
+  instances spend essentially all time inside varisat on the global
+  conflict checks — `adder2` is an adder miter whose conflict check is an
+  equivalence proof over XOR chains, which plain CDCL handles
+  exponentially badly. This needs a SAT backend with XOR reasoning
+  (e.g. CryptoMiniSat with Gaussian elimination). The optional
+  `cryptominisat` feature exists but the crate v5.8 does not build (its
+  bundled CMake build is missing a script in the published package);
+  updating or replacing that binding is the concrete path.
 * **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
   rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
   the hot path of conflict analysis.
