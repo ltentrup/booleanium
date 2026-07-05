@@ -51,7 +51,15 @@ impl Default for Varisat {
     }
 }
 
-impl SatSolverLit for varisat::Lit {}
+impl SatSolverLit for varisat::Lit {
+    fn var_index(self) -> usize {
+        self.var().index()
+    }
+
+    fn is_positive(self) -> bool {
+        varisat::Lit::is_positive(self)
+    }
+}
 
 #[cfg(test)]
 mod test {

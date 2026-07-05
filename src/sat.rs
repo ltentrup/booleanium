@@ -2,10 +2,7 @@
 
 use derivative::Derivative;
 
-use crate::{
-    datastructure::VarVec,
-    literal::{Lit, Var},
-};
+use crate::{datastructure::VarVec, literal::Lit};
 
 #[cfg(feature = "cryptominisat")]
 pub(crate) mod cmsat;
@@ -35,7 +32,12 @@ pub(crate) trait SatSolver: Default {
     }
 }
 
-pub(crate) trait SatSolverLit: Copy + Eq + std::ops::Not<Output = Self> {}
+pub(crate) trait SatSolverLit: Copy + Eq + std::ops::Not<Output = Self> {
+    /// Index of the underlying solver variable.
+    fn var_index(self) -> usize;
+    /// Whether the literal has positive polarity.
+    fn is_positive(self) -> bool;
+}
 
 #[derive(Derivative)]
 #[derivative(Debug)]
@@ -57,10 +59,6 @@ impl<S: SatSolver> LookupSolver<S> {
         self.var_lookup.set_var_count(count);
     }
 
-    pub(crate) fn forget(&mut self, var: Var) {
-        self.var_lookup[var].take();
-    }
-
     pub(crate) fn lookup(&mut self, lit: Lit) -> S::Lit {
         let sat_var =
             *self.var_lookup[lit.var()].get_or_insert_with(|| self.sat_solver.add_variable());
@@ -73,18 +71,20 @@ impl<S: SatSolver> LookupSolver<S> {
 
     pub(crate) fn orig_model(&mut self) -> Option<Vec<Lit>> {
         let model = self.sat_solver.model()?;
+        // index the model by solver variable to avoid scanning it per lookup
+        let len = model.iter().map(|l| l.var_index() + 1).max().unwrap_or(0);
+        let mut values: Vec<Option<bool>> = vec![None; len];
+        for lit in model {
+            values[lit.var_index()] = Some(lit.is_positive());
+        }
         Some(
             self.var_lookup
                 .iter()
                 .filter_map(|(var, &mapped)| {
                     let mapped = mapped?;
-                    if model.contains(&mapped) {
-                        Some(Lit::positive(var))
-                    } else if model.contains(&!mapped) {
-                        Some(Lit::negative(var))
-                    } else {
-                        None
-                    }
+                    let value = values.get(mapped.var_index()).copied().flatten()?;
+                    let value = value == mapped.is_positive();
+                    Some(if value { Lit::positive(var) } else { Lit::negative(var) })
                 })
                 .collect(),
         )

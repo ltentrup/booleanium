@@ -65,7 +65,15 @@ impl Default for CryptoMiniSat {
     }
 }
 
-impl SatSolverLit for cryptominisat::Lit {}
+impl SatSolverLit for cryptominisat::Lit {
+    fn var_index(self) -> usize {
+        self.var() as usize
+    }
+
+    fn is_positive(self) -> bool {
+        !self.isneg()
+    }
+}
 
 #[cfg(test)]
 mod test {

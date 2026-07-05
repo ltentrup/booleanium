@@ -11,11 +11,14 @@ pub(crate) type Skolem = LitVec<Implications>;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Implications {
     implications: BTreeMap<DecLvl, Vec<ClauseId>>,
+    /// Total number of implication clauses across all levels.
+    count: usize,
 }
 
 impl Implications {
     pub(crate) fn add_implication(&mut self, clause_id: ClauseId, lvl: DecLvl) {
         self.implications.entry(lvl).or_default().push(clause_id);
+        self.count += 1;
     }
 
     pub(crate) fn implications(&self) -> impl Iterator<Item = ClauseId> + '_ {
@@ -23,7 +26,7 @@ impl Implications {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.implications.values().map(Vec::len).sum()
+        self.count
     }
 
     pub(crate) fn lit_count(&self, alloc: &Allocator) -> usize {
@@ -31,8 +34,9 @@ impl Implications {
     }
 
     fn backtrack_to(&mut self, lvl: DecLvl) {
-        // backtrackign to `lvl` means that we keep all entries with level <= `lvl`
-        self.implications.split_off(&lvl.successor());
+        // backtracking to `lvl` means that we keep all entries with level <= `lvl`
+        let removed = self.implications.split_off(&lvl.successor());
+        self.count -= removed.values().map(Vec::len).sum::<usize>();
     }
 }
 
