@@ -53,14 +53,19 @@ pub struct Options {
     /// instead of rebuilding a solver for every check.
     pub incremental_conflict_check: bool,
     /// Restart the search (backtrack to the root level, keeping all learnt
-    /// clauses and variable activities) on a Luby schedule to escape
-    /// heavy-tailed search behavior.
+    /// clauses and variable activities) on a Luby schedule.
+    ///
+    /// Disabled by default: unlike in SAT solvers, a restart discards the
+    /// level-tagged implication structure whose reconstruction requires
+    /// SAT-based determinacy and conflict checks rather than cheap unit
+    /// propagation, and this cost outweighed the variance reduction on all
+    /// benchmarked instance families.
     pub restarts: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { constant_propagation: true, incremental_conflict_check: true, restarts: true }
+        Self { constant_propagation: true, incremental_conflict_check: true, restarts: false }
     }
 }
 

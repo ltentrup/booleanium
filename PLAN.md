@@ -116,6 +116,23 @@ meaningful. The remaining time on conflict-heavy instances is dominated by
 the incremental global conflict checks, of which only ~13% find an actual
 conflict.
 
+Two further ideas were implemented, benchmarked, and rejected — recorded
+here so they are not retried naively:
+
+* **No-conflict verdict caching**: "no conflict" verdicts are monotone
+  along a branch (constraints only grow), so they can be cached and
+  invalidated by per-variable implication epochs plus level incarnation
+  ids. Sound (fuzz-verified), but the hit rate was only ~4% — propagation
+  waves touch most variables' implication sets — and skipping solver calls
+  perturbs the incremental solver state enough that the search got slower
+  on balance.
+* **Luby restarts** (`Options::restarts`, kept but off by default): on the
+  random suite restarts lost about 2x in aggregate at both base intervals
+  100 and 500. Unlike in a SAT solver, a restart discards the level-tagged
+  implication structure, and rebuilding it costs SAT-based determinacy and
+  conflict checks rather than cheap unit propagation. Worth re-evaluating
+  on QBFEVAL instances together with phase saving.
+
 Remaining performance work:
 
 * **Sharper conflict gating**: the syntactic pair check filters only ~10% of
