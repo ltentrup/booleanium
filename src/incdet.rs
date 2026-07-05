@@ -27,9 +27,9 @@ use std::{
     time::Instant,
 };
 use tracing::{debug, error, info, trace};
-use varisat::{ExtendFormula, Solver};
 
 pub(crate) mod conflict;
+pub(crate) mod determinacy;
 pub(crate) mod graph;
 pub(crate) mod propagation;
 pub(crate) mod skolem;
@@ -135,8 +135,10 @@ impl IncDet {
         Self::from_qcnf_with_options(qcnf, Options::default())
     }
 
-    #[cfg(test)]
-    fn from_qcnf_with_options(qcnf: &crate::qcnf::QCNF, options: Options) -> Self {
+    /// Creates a solver with the provided configuration and loads the
+    /// given formula.
+    #[must_use]
+    pub fn from_qcnf_with_options(qcnf: &crate::qcnf::QCNF, options: Options) -> Self {
         let mut solver = Self::with_options(options);
         for (qty, vars) in &qcnf.prefix {
             solver._quantify(*qty, vars);
@@ -331,7 +333,7 @@ impl IncDet {
                 self.skolem[Lit::positive(var)].len()
             );
             // check if the decision leads to a conflict
-            if let Some(assignment) = self.is_conflicted(var, Some(decision)) {
+            if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);
                 if let Some(result) = self.handle_conflict(&Conflict { var, assignment }) {
                     return result;
@@ -391,7 +393,7 @@ impl IncDet {
                 continue;
             }
             trace!("{} has unique consquence", var);
-            if let Some(assignment) = self.is_conflicted(var, None) {
+            if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);
                 return Some(Conflict { var, assignment });
             }
@@ -428,7 +430,7 @@ impl IncDet {
         }
         trace!("{lit} is constant");
         self.stats.skolem.constant_propagations += 1;
-        if let Some(assignment) = self.is_conflicted(var, None) {
+        if let Some(assignment) = self.is_conflicted(var) {
             trace!("{} is conflicted", var);
             return Some(Conflict { var, assignment });
         }
@@ -521,35 +523,6 @@ impl IncDet {
         }
     }
 
-    fn has_unique_consequence(&mut self, var: Var) -> bool {
-        self.stats.skolem.local_det_checks += 1;
-        let mut solver = Solver::new();
-        for cid in self.skolem[Lit::positive(var)]
-            .implications()
-            .chain(self.skolem[Lit::negative(var)].implications())
-        {
-            let clause = &self.allocator[cid];
-            if clause
-                .iter()
-                .any(|&l| l.var() != var && self.assignment.constant_value(l) == Some(true))
-            {
-                // the implication can never fire as the clause is globally
-                // satisfied by a constant
-                continue;
-            }
-            solver.add_clause(
-                &clause
-                    .iter()
-                    .filter(|l| l.var() != var)
-                    .filter(|&&l| self.assignment.constant_value(l) != Some(false))
-                    .map(|l| varisat::Lit::from_dimacs(l.to_dimacs().try_into().unwrap()))
-                    .collect::<Vec<_>>(),
-            );
-        }
-        let result = solver.solve().unwrap();
-        !result
-    }
-
     fn iter_implication_clauses(&self) -> impl Iterator<Item = ClauseId> + '_ {
         self.trail.iter().flat_map(|&lit| {
             [lit, lit.negated()].into_iter().flat_map(|lit| self.skolem[lit].implications())
@@ -562,7 +535,6 @@ impl IncDet {
             self.assignment.unassign(assigned_lit.var());
             self.dec_lvls[assigned_lit.var()] = None;
             self.vsids.add(assigned_lit.var());
-            self.conflict_check.forget(assigned_lit.var());
             unassigned.push(assigned_lit.var());
         });
         self.skolem.backtrack_to(lvl);
