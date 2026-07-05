@@ -90,7 +90,55 @@ mod fuzz {
         fn differential_exists_forall(qcnf in strategy::qcnf(2..=2, 1..=5, 1..=14, 1..=5).prop_map(flip_quantifiers)) {
             check(&qcnf)?;
         }
+
+        /// Purely existential instances with free variables (every third
+        /// variable is removed from the prefix).
+        #[test]
+        fn differential_free_variables(qcnf in strategy::qcnf(1..=1, 1..=8, 1..=16, 1..=5).prop_map(drop_vars_from_prefix)) {
+            check(&qcnf)?;
+        }
     }
+
+    /// Removes every third variable from the prefix, making it free.
+    fn drop_vars_from_prefix(mut qcnf: QCNF) -> QCNF {
+        let mut counter = 0;
+        for (_, vars) in &mut qcnf.prefix {
+            vars.retain(|_| {
+                counter += 1;
+                counter % 3 != 0
+            });
+        }
+        qcnf
+    }
+}
+
+/// Free variables are treated as outermost existential variables.
+#[test]
+fn free_variables() {
+    use crate::qdimacs::QdimacsParser;
+    use std::io::Cursor;
+
+    // variables 2 and 3 are free, the formula is satisfiable
+    let qdimacs = "p cnf 3 2\ne 1 0\n1 -2 0\n2 -3 0\n";
+    let mut solver: IncDet = QdimacsParser::new(Cursor::new(qdimacs)).parse().unwrap();
+    assert_eq!(solver.solve(), SolverResult::Satisfiable);
+
+    // all variables free, unsatisfiable
+    let qdimacs = "p cnf 1 2\n1 0\n-1 0\n";
+    let mut solver: IncDet = QdimacsParser::new(Cursor::new(qdimacs)).parse().unwrap();
+    assert_eq!(solver.solve(), SolverResult::Unsatisfiable);
+}
+
+/// Variables that are declared in the header but occur neither in the
+/// prefix nor in the matrix used to crash the solver.
+#[test]
+fn declared_but_unused_variables() {
+    use crate::qdimacs::QdimacsParser;
+    use std::io::Cursor;
+
+    let qdimacs = "p cnf 5 2\na 1 0\ne 2 0\n1 -2 0\n-1 2 0\n";
+    let mut solver: IncDet = QdimacsParser::new(Cursor::new(qdimacs)).parse().unwrap();
+    assert_eq!(solver.solve(), SolverResult::Satisfiable);
 }
 
 #[test]

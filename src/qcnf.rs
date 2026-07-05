@@ -136,7 +136,7 @@ impl QCNF {
     /// assignments. Only usable for tiny instances; serves as a trivially
     /// correct reference for differential testing.
     pub(crate) fn brute_force(&self) -> crate::SolverResult {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
 
         fn eval(
             vars: &[(QuantTy, Var)],
@@ -165,10 +165,23 @@ impl QCNF {
             }
         }
 
-        let vars: Vec<(QuantTy, Var)> = self
-            .prefix
-            .iter()
-            .flat_map(|(quant, vars)| vars.iter().map(move |&var| (*quant, var)))
+        // free variables are existentially quantified at the outermost level
+        let bound: HashSet<Var> =
+            self.prefix.iter().flat_map(|(_, vars)| vars.iter().copied()).collect();
+        let mut free: Vec<Var> = Vec::new();
+        for lit in self.matrix.iter().flatten() {
+            if !bound.contains(&lit.var()) && !free.contains(&lit.var()) {
+                free.push(lit.var());
+            }
+        }
+        let vars: Vec<(QuantTy, Var)> = free
+            .into_iter()
+            .map(|var| (QuantTy::Exists, var))
+            .chain(
+                self.prefix
+                    .iter()
+                    .flat_map(|(quant, vars)| vars.iter().map(move |&var| (*quant, var))),
+            )
             .collect();
         assert!(vars.len() <= 24, "brute-force evaluation only supports tiny instances");
         let mut assignment = HashMap::new();

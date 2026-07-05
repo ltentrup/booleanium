@@ -184,7 +184,30 @@ impl IncDet {
         self.propagation.set_var_count(count);
     }
 
+    /// Ensures that the outermost scope (index 0) exists. It is always
+    /// existential and additionally holds the free variables, following the
+    /// QDIMACS convention that free variables are existentially quantified
+    /// at the outermost level.
+    fn ensure_free_scope(&mut self) {
+        if self.prefix.is_empty() {
+            self.prefix.push(Scope {
+                id: ScopeId(0),
+                quantifier: QuantTy::Exists,
+                variables: Vec::new(),
+            });
+        }
+    }
+
+    /// Binds a variable that occurs in the matrix but not in the prefix to
+    /// the outermost existential scope.
+    fn bind_free_variable(&mut self, var: Var) {
+        self.ensure_free_scope();
+        self.vars[var].scope = Some(ScopeId(0));
+        self.prefix[0].variables.push(var);
+    }
+
     fn _quantify(&mut self, quant: QuantTy, vars: &[Var]) {
+        self.ensure_free_scope();
         let id = match self.prefix.last_mut() {
             Some(scope) if scope.quantifier == quant => {
                 scope.variables.extend_from_slice(vars);
@@ -214,10 +237,16 @@ impl IncDet {
 
     fn _add_clause(&mut self, lits: &[Lit]) {
         debug!("Add clause: {}", LitSlice::from(lits));
-        assert!(
-            lits.iter().all(|&l| self.vars.get(l.var()).map_or(false, |data| data.scope.is_some())),
-            "unbound variables are not supported"
-        );
+        // bind free variables to the outermost existential scope
+        for lit in lits {
+            let var = lit.var();
+            if var.as_index() >= self.vars.get_var_count() {
+                self.set_var_count(var.as_index() + 1);
+            }
+            if self.vars[var].scope.is_none() {
+                self.bind_free_variable(var);
+            }
+        }
         let mut lits = Vec::from(lits);
         lits.sort_unstable();
         lits.dedup();
@@ -318,7 +347,9 @@ impl IncDet {
     }
 
     fn _solve(&mut self) -> SolverResult {
-        if self.prefix.len() > 2 {
+        // the outermost scope may be an empty placeholder for free variables
+        let blocks = self.prefix.iter().filter(|scope| !scope.variables.is_empty()).count();
+        if blocks > 2 {
             error!("Only 2QBF is currently supported");
             return SolverResult::Unknown;
         }
@@ -403,7 +434,9 @@ impl IncDet {
     fn build_vsids_heap(&mut self) {
         self.vars
             .iter()
-            .filter(|(_, data)| data.is_existential(&self.prefix))
+            // variables that occur neither in the prefix nor in the matrix
+            // remain unbound and are ignored
+            .filter(|(_, data)| data.scope.is_some() && data.is_existential(&self.prefix))
             .for_each(|(var, _)| self.vsids.add(var));
     }
 

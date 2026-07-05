@@ -74,13 +74,6 @@ pub enum ParseError {
         #[label]
         err_span: SourceSpan,
     },
-
-    #[error(
-        "Number of clauses does not match header: expected {}, but found {} clauses",
-        expected,
-        found
-    )]
-    NumClausesMismatch { expected: u32, found: u32 },
 }
 
 #[derive(Debug, Error, Diagnostic)]
@@ -130,12 +123,14 @@ impl<R: Read> QdimacsParser<R> {
         self.parse_prefix(&mut result)?;
         self.parse_matrix(&mut result)?;
 
-        // check that number of clauses match the header
+        // Headers with wrong clause counts are common in the wild; warn
+        // instead of rejecting the instance.
         if self.num_clauses_read != self.num_clauses {
-            return Err(ParseError::NumClausesMismatch {
-                expected: self.num_clauses,
-                found: self.num_clauses_read,
-            });
+            tracing::warn!(
+                "number of clauses does not match header: expected {}, but found {} clauses",
+                self.num_clauses,
+                self.num_clauses_read
+            );
         }
 
         Ok(result)
@@ -531,11 +526,13 @@ mod test {
     }
 
     #[test]
-    fn num_clauses() {
-        expect_error!(
-            b"p cnf 3 2\n1 -2 0\n2 -3 0\n3 -1 0\n",
-            ParseError::NumClausesMismatch { expected: 2, found: 3 }
-        );
+    fn num_clauses() -> Result<(), ParseError> {
+        // a wrong clause count in the header is tolerated
+        let qdimacs = "p cnf 3 2\n1 -2 0\n2 -3 0\n3 -1 0\n";
+        let reader = Cursor::new(qdimacs);
+        let qcnf: QCNF = QdimacsParser::new(reader).parse()?;
+        assert_eq!(qcnf.matrix.len(), 3);
+        Ok(())
     }
 }
 
