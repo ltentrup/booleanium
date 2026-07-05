@@ -157,15 +157,21 @@ Remaining performance work:
   alternation). Getting this suite to run also required QDIMACS
   free-variable support and header tolerance. QBFEVAL 2QBF tracks would
   give a competitive comparison against CADET/DepQBF.
-* **XOR-heavy conflict checks**: stack sampling shows the two timeout
-  instances spend essentially all time inside varisat on the global
-  conflict checks — `adder2` is an adder miter whose conflict check is an
-  equivalence proof over XOR chains, which plain CDCL handles
-  exponentially badly. This needs a SAT backend with XOR reasoning
-  (e.g. CryptoMiniSat with Gaussian elimination). The optional
-  `cryptominisat` feature exists but the crate v5.8 does not build (its
-  bundled CMake build is missing a script in the published package);
-  updating or replacing that binding is the concrete path.
+* **The two timeout instances are search-bound**: stack sampling first
+  suggested XOR-hard conflict checks, so the optional CryptoMiniSat
+  backend was made buildable (git binding plus C++14 flags in
+  `.cargo/config.toml`), wired in as the conflict-check solver behind the
+  `cryptominisat` feature, and root-level definitions are now added as
+  raw unguarded clauses so the backend can detect structure (both
+  fuzz-validated; no regression for the default varisat backend). Neither
+  helped: progress logging shows `adder2` grinding at ~250 conflicts/s
+  with only 209 of 515 variables initially deterministic — consistent
+  with a one-sided (Plaisted–Greenbaum-style) clause encoding, where
+  gate variables have implications in only one polarity and incremental
+  determinization degenerates into plain search. The promising fix is a
+  **one-sided function rule** (a variable whose literal of one polarity
+  never fires can be assigned the pure-polarity function, as in CADET's
+  handling), plus learnt-clause deletion to keep the grind cheap.
 * **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
   rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
   the hot path of conflict analysis.

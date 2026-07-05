@@ -18,7 +18,6 @@ use crate::{
     incdet::graph::Impl,
     literal::{filter_var, Lit, LitSlice, Var},
     qdimacs::FromQdimacs,
-    sat::varisat::Varisat,
     QuantTy, SolverResult,
 };
 use std::{
@@ -39,6 +38,14 @@ pub(crate) mod watch;
 
 #[cfg(test)]
 mod test;
+
+/// The SAT solver used for the global conflict checks. CryptoMiniSat's XOR
+/// reasoning (Gaussian elimination) handles the equivalence-proof-like
+/// checks of circuit instances much better than plain CDCL.
+#[cfg(feature = "cryptominisat")]
+type ConflictSolver = crate::sat::cmsat::CryptoMiniSat;
+#[cfg(not(feature = "cryptominisat"))]
+type ConflictSolver = crate::sat::varisat::Varisat;
 
 /// Configuration of the incremental determinization algorithm.
 ///
@@ -99,7 +106,7 @@ pub struct IncDet {
     watches: WatchList,
     graph: ImplGraph,
     conflict_analysis: ConflictAnalysis,
-    conflict_check: ConflictCheck<Varisat>,
+    conflict_check: ConflictCheck<ConflictSolver>,
     dec_lvls: VarVec<Option<DecLvl>>,
     vsids: Vsids,
     /// set to true if the empty clause was added

@@ -32,7 +32,9 @@ impl SatSolver for CryptoMiniSat {
         match result {
             Lbool::True => Ok(true),
             Lbool::False => Ok(false),
-            Lbool::Undef => todo!(),
+            Lbool::Undef => {
+                unreachable!("solving was interrupted, but no timeout was configured")
+            }
         }
     }
 

@@ -1,0 +1,8 @@
+[env]
+# The bundled C++ sources of the optional cryptominisat backend predate
+# C++17 (std::bind1st) and rely on transitive <cstdint> includes.
+CXXFLAGS = "-std=gnu++14 -Wno-deprecated-declarations -include cstdint"
+
+[net]
+# The cryptominisat dependency is fetched from git.
+git-fetch-with-cli = true

@@ -233,9 +233,8 @@ checksum = "acbf1af155f9b9ef647e42cdc158db4b64a1b61f743629225fde6f3e0be2a7c7"
 
 [[package]]
 name = "cryptominisat"
-version = "5.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a49589484de3ec90c080df2c415d816e16712502fdb080920a01b3866bab997"
+version = "5.8.0-rust1"
+source = "git+https://github.com/msoos/cryptominisat-rs#de76b24982150c24f5edd541b816e4281d8b945a"
 dependencies = [
  "cmake",
  "libc",

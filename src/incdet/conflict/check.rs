@@ -26,9 +26,9 @@
 use crate::{
     clause::{alloc::ClauseId, Clause},
     incdet::propagation::trail::DecLvl,
-    incdet::IncDet,
+    incdet::{ConflictSolver, IncDet},
     literal::{Lit, Var},
-    sat::{varisat::Varisat, LookupSolver, SatSolver},
+    sat::{LookupSolver, SatSolver},
 };
 use derivative::Derivative;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -45,6 +45,9 @@ pub(crate) struct ConflictCheck<S: SatSolver> {
     clause_lits: HashMap<ClauseId, S::Lit>,
     #[derivative(Debug = "ignore")]
     fire_arbiters: HashMap<(ClauseId, Lit), S::Lit>,
+    /// Clauses that have been added permanently (root-level definitions).
+    #[derivative(Debug = "ignore")]
+    permanent_clauses: HashSet<ClauseId>,
 }
 
 impl<S: SatSolver> Default for ConflictCheck<S> {
@@ -54,6 +57,7 @@ impl<S: SatSolver> Default for ConflictCheck<S> {
             assumptions: BTreeMap::default(),
             clause_lits: HashMap::default(),
             fire_arbiters: HashMap::default(),
+            permanent_clauses: HashSet::default(),
         }
     }
 }
@@ -76,6 +80,18 @@ impl<S: SatSolver> ConflictCheck<S> {
         self.sat_solver.add_clause(
             &clause.iter().copied().chain(std::iter::once(!assumption_lit)).collect::<Vec<_>>(),
         );
+    }
+
+    /// Adds a root-level definition clause directly, without reification or
+    /// guards. Root-level definitions are permanent, and the unmodified
+    /// clause enables structural reasoning (e.g. XOR detection) in the
+    /// backend solver.
+    fn add_permanent_clause(&mut self, cid: ClauseId, clause: &Clause) {
+        if !self.permanent_clauses.insert(cid) {
+            return;
+        }
+        let encoded: Vec<S::Lit> = clause.iter().map(|&l| self.sat_solver.lookup(l)).collect();
+        self.sat_solver.add_clause(&encoded);
     }
 
     /// Returns the activation literal `r` with `r → C`, encoding the clause
@@ -146,7 +162,7 @@ impl IncDet {
         let mut assignment = if self.options.incremental_conflict_check {
             self.is_conflicted_incremental(var)?
         } else {
-            self._is_conflicted::<Varisat>(var, true)?
+            self._is_conflicted::<ConflictSolver>(var, true)?
         };
         // the model contains no meaningful value for the checked variable
         assignment.remove(&Lit::positive(var));
@@ -193,8 +209,16 @@ impl IncDet {
         // activate the implication clauses of the assigned variable
         for cid in [lit, lit.negated()].into_iter().flat_map(|lit| self.skolem[lit].implications())
         {
-            let activation = self.conflict_check.clause_lit(cid, &self.allocator[cid]);
-            self.conflict_check.add_definition_clause(lvl, &[activation]);
+            if lvl.is_root() {
+                // Root-level definitions are permanent, so the clause can be
+                // added directly without reification. This keeps the clause
+                // structure intact, which enables structural reasoning in
+                // the SAT solver (e.g. XOR detection).
+                self.conflict_check.add_permanent_clause(cid, &self.allocator[cid]);
+            } else {
+                let activation = self.conflict_check.clause_lit(cid, &self.allocator[cid]);
+                self.conflict_check.add_definition_clause(lvl, &[activation]);
+            }
         }
         if !is_decision {
             return;

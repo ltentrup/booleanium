@@ -14,7 +14,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 varisat = "0.2"
 ordered-float = "4.2"
 derivative = "2.2"
-cryptominisat = { version = "5.8", optional = true }
+cryptominisat = { git = "https://github.com/msoos/cryptominisat-rs", optional = true }
 clap = { version = "4.4", features = ["derive"] }
 
 [dev-dependencies]
