@@ -122,8 +122,18 @@ meaningful. The remaining time on conflict-heavy instances is dominated by
 the incremental global conflict checks, of which only ~13% find an actual
 conflict.
 
-Two further ideas were implemented, benchmarked, and rejected — recorded
-here so they are not retried naively:
+Three further ideas were implemented, benchmarked, and rejected as
+defaults — recorded here so they are not retried naively:
+
+* **CaDiCaL as conflict-check backend** (feature `cadical`, kept as an
+  optional backend): correct under certified fuzzing, but slower in
+  aggregate on the hard random instances (147s → 210s+ with one new
+  timeout; individual instances swing both ways) and no improvement on
+  the two suite timeouts. The conflict-check workload is many small
+  assumption-solves on a growing formula, where varisat's low per-call
+  overhead beats CaDiCaL's stronger-but-heavier core, mirroring the
+  earlier CryptoMiniSat result. Worth retrying together with the
+  conflict-check solver reboot, where per-solve formula sizes change.
 
 * **No-conflict verdict caching**: "no conflict" verdicts are monotone
   along a branch (constraints only grow), so they can be cached and
