@@ -174,10 +174,16 @@ Remaining performance work:
   with only 209 of 515 variables initially deterministic — consistent
   with a one-sided (Plaisted–Greenbaum-style) clause encoding, where
   gate variables have implications in only one polarity and incremental
-  determinization degenerates into plain search. The promising fix is a
-  **one-sided function rule** (a variable whose literal of one polarity
-  never fires can be assigned the pure-polarity function, as in CADET's
-  handling), plus learnt-clause deletion to keep the grind cheap.
+  determinization degenerates into plain search. A **one-sided function
+  rule** (decide the polarity with the non-empty implication set, giving
+  the natural gate function) was implemented and rejected by measurement:
+  it did not speed up the circuit instances and slowed the random suite by
+  an order of magnitude. Progress logging further shows a **progressive
+  slowdown** as learnt clauses accumulate in the implication sets that
+  every determinacy check processes (the gap between 1024-conflict
+  milestones grows 4s → 13s within 30s of solving), which makes
+  **learnt-clause deletion** the highest-leverage remaining fix for these
+  instances.
 * **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
   rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
   the hot path of conflict analysis.

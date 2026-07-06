@@ -401,17 +401,17 @@ impl IncDet {
             };
             self.stats.global.decisions += 1;
             assert!(!self.assignment.is_assigned(var));
+            // Note: deciding the polarity with the *non-empty* implication
+            // set when the other side is empty (a "one-sided function rule"
+            // yielding the natural gate function of one-sidedly encoded
+            // circuits) was benchmarked and rejected: it did not help the
+            // circuit instances and slowed random instances by an order of
+            // magnitude.
             let neg_count = self.skolem[Lit::negative(var)].lit_count(&self.allocator);
             let pos_count = self.skolem[Lit::positive(var)].lit_count(&self.allocator);
             let decision =
                 if neg_count <= pos_count { Lit::negative(var) } else { Lit::positive(var) };
-            trace!(
-                "decide {decision} (neg: {}/{}, pos: {}/{})",
-                neg_count,
-                self.skolem[Lit::negative(var)].len(),
-                pos_count,
-                self.skolem[Lit::positive(var)].len()
-            );
+            trace!("decide {decision} (neg: {neg_count}, pos: {pos_count} implication literals)");
             // check if the decision leads to a conflict
             if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);
