@@ -9,6 +9,9 @@ pub(crate) struct ClauseId(usize);
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Allocator {
     clauses: Vec<Clause>,
+    /// Reference count of registrations as implication clause. Locked
+    /// clauses act as reasons on the trail and must not be deleted.
+    locks: Vec<u32>,
 }
 
 impl Allocator {
@@ -29,7 +32,31 @@ impl Allocator {
         let clause = Clause::new(clause);
         let idx = self.clauses.len();
         self.clauses.push(clause);
+        self.locks.push(0);
         ClauseId(idx)
+    }
+
+    /// Marks the clause as registered implication clause.
+    pub(crate) fn lock(&mut self, cid: ClauseId) {
+        self.locks[cid.0] += 1;
+    }
+
+    /// Removes one implication registration of the clause.
+    pub(crate) fn unlock(&mut self, cid: ClauseId) {
+        debug_assert!(self.locks[cid.0] > 0);
+        self.locks[cid.0] -= 1;
+    }
+
+    /// Whether the clause is currently registered as an implication clause.
+    pub(crate) fn is_locked(&self, cid: ClauseId) -> bool {
+        self.locks[cid.0] > 0
+    }
+
+    /// Deletes the clause, freeing its literal storage. The id stays valid
+    /// but must not be referenced anymore.
+    pub(crate) fn delete(&mut self, cid: ClauseId) {
+        debug_assert!(!self.is_locked(cid));
+        self.clauses[cid.0] = Clause::new(&[]);
     }
 }
 

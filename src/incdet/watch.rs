@@ -33,6 +33,11 @@ impl WatchList {
     pub(crate) fn set_enabled(&mut self) {
         self.enabled = true;
     }
+
+    /// Removes all watches that refer to one of the given clauses.
+    pub(crate) fn remove_clauses(&mut self, deleted: &std::collections::HashSet<ClauseId>) {
+        self.watches.iter_mut().for_each(|list| list.retain(|w| !deleted.contains(&w.clause)));
+    }
 }
 
 impl std::ops::Index<Lit> for WatchList {

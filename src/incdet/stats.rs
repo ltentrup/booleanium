@@ -12,6 +12,7 @@ pub(crate) struct GlobalStats {
     pub(crate) conflicts: u32,
     pub(crate) restarts: u32,
     pub(crate) added_clauses: u32,
+    pub(crate) deleted_clauses: u32,
     pub(crate) solve_time: Duration,
 }
 

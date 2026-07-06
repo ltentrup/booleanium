@@ -33,15 +33,26 @@ impl Implications {
         self.implications().map(|c| alloc[c].lits().len()).sum()
     }
 
-    fn backtrack_to(&mut self, lvl: DecLvl) {
+    fn backtrack_to<F>(&mut self, lvl: DecLvl, removed_callback: &mut F)
+    where
+        F: FnMut(ClauseId),
+    {
         // backtracking to `lvl` means that we keep all entries with level <= `lvl`
         let removed = self.implications.split_off(&lvl.successor());
-        self.count -= removed.values().map(Vec::len).sum::<usize>();
+        for cid in removed.values().flatten() {
+            self.count -= 1;
+            removed_callback(*cid);
+        }
     }
 }
 
 impl Skolem {
-    pub(crate) fn backtrack_to(&mut self, lvl: DecLvl) {
-        self.iter_mut().for_each(|imp| imp.backtrack_to(lvl));
+    /// Removes all implications above `lvl`, reporting every removed clause
+    /// to the callback (used to unlock the clauses in the allocator).
+    pub(crate) fn backtrack_to<F>(&mut self, lvl: DecLvl, mut removed_callback: F)
+    where
+        F: FnMut(ClauseId),
+    {
+        self.iter_mut().for_each(|imp| imp.backtrack_to(lvl, &mut removed_callback));
     }
 }

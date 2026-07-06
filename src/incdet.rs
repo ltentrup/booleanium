@@ -60,6 +60,10 @@ pub struct Options {
     /// Reuse a single incremental SAT solver for the global conflict checks
     /// instead of rebuilding a solver for every check.
     pub incremental_conflict_check: bool,
+    /// Periodically delete long learnt clauses that are not registered as
+    /// implication clauses, keeping propagation and the determinacy and
+    /// conflict checks from slowing down as learnt clauses accumulate.
+    pub clause_deletion: bool,
     /// Restart the search (backtrack to the root level, keeping all learnt
     /// clauses and variable activities) on a Luby schedule.
     ///
@@ -73,12 +77,20 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Self { constant_propagation: true, incremental_conflict_check: true, restarts: false }
+        Self {
+            constant_propagation: true,
+            incremental_conflict_check: true,
+            clause_deletion: true,
+            restarts: false,
+        }
     }
 }
 
 /// Number of conflicts of the base Luby restart interval.
 const RESTART_INTERVAL: u32 = 100;
+
+/// Number of learnt clauses after which the next clause deletion runs.
+const REDUCTION_INCREMENT: usize = 2000;
 
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
@@ -113,6 +125,8 @@ pub struct IncDet {
     /// number of matrix clauses present when solving started; clauses
     /// beyond this index are learnt
     original_clause_count: usize,
+    /// learnt clauses that are candidates for deletion
+    learnts: Vec<ClauseId>,
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
@@ -304,6 +318,7 @@ impl IncDet {
         }
         if let Some(&lit) = singleton {
             self.skolem[lit].add_implication(clause_id, DecLvl::ROOT);
+            self.allocator.lock(clause_id);
             if self.options.constant_propagation && no_universals {
                 self.constant_propagation.push_back(lit);
             } else {
@@ -315,6 +330,9 @@ impl IncDet {
             // TODO: handle constant functions
             self.clauses.push(clause_id);
             if self.watches.enabled() {
+                // clauses added during solving are learnt and may be
+                // deleted again
+                self.learnts.push(clause_id);
                 let mut unassigned = lits
                     .iter()
                     .filter(|lit| self.vars[lit.var()].is_existential(&self.prefix))
@@ -338,6 +356,7 @@ impl IncDet {
                         .expect("There is a literal with the provided decision level");
                     self.watches.add_watch(watch2, Watch { clause: clause_id });
                     self.skolem[watch1].add_implication(clause_id, max_lvl);
+                    self.allocator.lock(clause_id);
                     self.propagation.add_and_set(
                         watch1.var(),
                         self.skolem[watch1].len() + self.skolem[!watch1].len(),
@@ -373,6 +392,7 @@ impl IncDet {
         let mut initial = Some(());
         let mut conflicts_since_restart = 0;
         let mut restart_number = 1;
+        let mut next_reduction = REDUCTION_INCREMENT;
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
@@ -384,6 +404,10 @@ impl IncDet {
             }
             if initial.take().is_some() {
                 info!("number of initial deterministic vars: {}", self.trail.len());
+            }
+            if self.options.clause_deletion && self.learnts.len() >= next_reduction {
+                self.reduce_learnts();
+                next_reduction += REDUCTION_INCREMENT;
             }
             if self.options.restarts
                 && conflicts_since_restart >= RESTART_INTERVAL * luby(restart_number)
@@ -543,6 +567,9 @@ impl IncDet {
         debug!("propagate function {var}");
         self.stats.skolem.function_propagations += 1;
         self.dec_lvls[var] = Some(self.trail.decision_level());
+        // clauses to lock in the allocator (the closure below already
+        // borrows the allocator immutably)
+        let mut locked = Vec::new();
         for lit in [Lit::positive(var), Lit::negative(var)] {
             let mut watches = mem::take(&mut self.watches[lit]);
             watches.retain(|watch: &Watch| {
@@ -595,6 +622,7 @@ impl IncDet {
                     self.constant_propagation.push_back(lit);
                 }
                 self.skolem[lit].add_implication(watch.clause, self.trail.decision_level());
+                locked.push(watch.clause);
                 self.propagation
                     .add_and_set(lit.var(), self.skolem[lit].len() + self.skolem[!lit].len());
                 // add the propagation reason to implication graph
@@ -603,6 +631,9 @@ impl IncDet {
                 true
             });
             self.watches[lit] = watches;
+        }
+        for cid in locked {
+            self.allocator.lock(cid);
         }
     }
 
@@ -620,7 +651,7 @@ impl IncDet {
             self.vsids.add(assigned_lit.var());
             unassigned.push(assigned_lit.var());
         });
-        self.skolem.backtrack_to(lvl);
+        self.skolem.backtrack_to(lvl, |cid| self.allocator.unlock(cid));
         self.graph.backtrack_to(lvl);
         self.conflict_check.backtrack_to(lvl);
         // Unassigned variables that still have implication clauses may still
@@ -638,6 +669,31 @@ impl IncDet {
         if implications > 0 {
             self.propagation.add_and_set(var, implications);
         }
+    }
+
+    /// Deletes the longer half of the learnt clauses that are neither
+    /// registered as implication clauses nor binary.
+    fn reduce_learnts(&mut self) {
+        let mut candidates: Vec<ClauseId> = self
+            .learnts
+            .iter()
+            .copied()
+            .filter(|&cid| !self.allocator.is_locked(cid) && self.allocator[cid].lits().len() > 2)
+            .collect();
+        candidates.sort_by_key(|&cid| std::cmp::Reverse(self.allocator[cid].lits().len()));
+        candidates.truncate(candidates.len() / 2);
+        if candidates.is_empty() {
+            return;
+        }
+        let deleted: HashSet<ClauseId> = candidates.into_iter().collect();
+        for &cid in &deleted {
+            self.allocator.delete(cid);
+        }
+        self.learnts.retain(|cid| !deleted.contains(cid));
+        self.clauses.retain(|cid| !deleted.contains(cid));
+        self.watches.remove_clauses(&deleted);
+        self.stats.global.deleted_clauses += u32::try_from(deleted.len()).unwrap();
+        debug!("deleted {} learnt clauses", deleted.len());
     }
 
     pub(crate) fn handle_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {

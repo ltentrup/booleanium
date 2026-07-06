@@ -23,6 +23,10 @@ struct Args {
     #[arg(long)]
     no_incremental_conflict_check: bool,
 
+    /// Disable periodic deletion of long, unused learnt clauses.
+    #[arg(long)]
+    no_clause_deletion: bool,
+
     /// Restart the search on a Luby schedule.
     #[arg(long)]
     restarts: bool,
@@ -37,6 +41,7 @@ impl Args {
         Options {
             constant_propagation: !self.no_constant_propagation,
             incremental_conflict_check: !self.no_incremental_conflict_check,
+            clause_deletion: !self.no_clause_deletion,
             restarts: self.restarts,
         }
     }

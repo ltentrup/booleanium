@@ -29,9 +29,13 @@ mod fuzz {
         let expected = qcnf.brute_force();
         for constant_propagation in [false, true] {
             for incremental_conflict_check in [false, true] {
-                for restarts in [false, true] {
-                    let options =
-                        Options { constant_propagation, incremental_conflict_check, restarts };
+                for flags in 0..4 {
+                    let options = Options {
+                        constant_propagation,
+                        incremental_conflict_check,
+                        clause_deletion: flags & 1 != 0,
+                        restarts: flags & 2 != 0,
+                    };
                     let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
                     let actual = solver.solve();
                     prop_assert_eq!(
@@ -290,8 +294,7 @@ fn bench_conflict_check_configs() {
         let qcnf = strat.new_tree(&mut runner).unwrap().current();
         let mut results = Vec::new();
         for (idx, incremental_conflict_check) in [false, true].into_iter().enumerate() {
-            let options =
-                Options { constant_propagation: true, incremental_conflict_check, restarts: true };
+            let options = Options { incremental_conflict_check, ..Options::default() };
             let mut solver = IncDet::from_qcnf_with_options(&qcnf, options);
             let start = Instant::now();
             results.push(solver.solve());
