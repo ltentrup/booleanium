@@ -152,10 +152,16 @@ Remaining performance work:
   move watched literals; storing the two watched literals per clause would
   make this O(1). Not measurable on current benchmarks, worth revisiting
   with clause databases that have longer clauses.
-* **Clause database management**: learned clauses are never deleted and the
-  allocator never shrinks; add activity-based deletion and restarts
-  (the Varisat-inspired infrastructure — `clause::alloc`, VSIDS — is
-  prepared for this).
+* **Clause database management — partially done**
+  (`Options::clause_deletion`, default on): every 2000 learnt clauses the
+  longer half of those not currently registered as implications (tracked
+  by lock reference counts in the allocator) is deleted. No regression on
+  the benchmark suite, and long-running instances keep a bounded clause
+  database. The residual progressive slowdown on the two suite timeouts
+  lives in the *incremental conflict-check solver*, which cannot shed
+  retired clauses; the follow-up is to periodically rebuild that solver
+  from the live definitions (a "solver reboot"), and to refine the
+  deletion heuristic (activity/LBD instead of length).
 * **Benchmarking on real instances**: the solver is validated against the
   CADET integration-test suite (117 QDIMACS instances with known results):
   82 correct, 0 wrong, 0 panics, 2 timeouts at 30s (`bug8.qdimacs`,
