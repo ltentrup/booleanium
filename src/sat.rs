@@ -4,6 +4,8 @@ use derivative::Derivative;
 
 use crate::{datastructure::VarVec, literal::Lit};
 
+#[cfg(feature = "cadical")]
+pub(crate) mod cadical;
 #[cfg(feature = "cryptominisat")]
 pub(crate) mod cmsat;
 pub(crate) mod varisat;

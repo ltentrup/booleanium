@@ -40,12 +40,14 @@ pub(crate) mod watch;
 #[cfg(test)]
 mod test;
 
-/// The SAT solver used for the global conflict checks. CryptoMiniSat's XOR
-/// reasoning (Gaussian elimination) handles the equivalence-proof-like
-/// checks of circuit instances much better than plain CDCL.
-#[cfg(feature = "cryptominisat")]
+/// The SAT solver used for the global conflict checks; selected by feature
+/// flag (`cadical` takes precedence over `cryptominisat`, the default is
+/// varisat).
+#[cfg(feature = "cadical")]
+type ConflictSolver = crate::sat::cadical::Cadical;
+#[cfg(all(feature = "cryptominisat", not(feature = "cadical")))]
 type ConflictSolver = crate::sat::cmsat::CryptoMiniSat;
-#[cfg(not(feature = "cryptominisat"))]
+#[cfg(not(any(feature = "cadical", feature = "cryptominisat")))]
 type ConflictSolver = crate::sat::varisat::Varisat;
 
 /// Configuration of the incremental determinization algorithm.
