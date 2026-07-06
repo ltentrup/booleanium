@@ -45,19 +45,9 @@ pub(crate) struct Cegar {
     /// SAT solver over the original matrix, asking for existential
     /// responses to assumed universal assignments. Built on first use.
     solver: Option<ExistsSolver>,
-    /// The handled cases.
-    pub(crate) cases: Vec<Case>,
     /// Exponential moving average of the recorded cube sizes.
     cube_size_ema: f64,
     rounds: u32,
-}
-
-/// A handled case: for every universal assignment extending `cube`, the
-/// constant existential assignment `response` satisfies the matrix.
-#[derive(Debug)]
-pub(crate) struct Case {
-    pub(crate) cube: Vec<Lit>,
-    pub(crate) response: Vec<Lit>,
 }
 
 struct ExistsSolver {
@@ -177,8 +167,8 @@ impl IncDet {
             .collect();
         let satisfiable = cube.is_empty();
         self.stats.cegar.cases += 1;
-        self.conflict_check_exclude_cube(&cube);
-        self.cegar.cases.push(Case { cube, response });
+        self.exclude_cube(&cube);
+        self.handled_cases.push(crate::incdet::casesplit::HandledCase::Response { cube, response });
         if satisfiable {
             CegarOutcome::Satisfiable
         } else {

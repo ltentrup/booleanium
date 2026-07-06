@@ -73,8 +73,10 @@ pub struct Options {
     /// response at all (immediate UNSAT if not) and record generalized,
     /// handled cases instead of learning clauses.
     pub cegar: bool,
-    /// Split the universal domain on a universal variable and solve the two
-    /// specialized instances in isolation once the search stalls.
+    /// Once the search stalls, assume a universal literal (restricting all
+    /// checks to the halved domain), solve the case with the full machinery
+    /// while keeping all derived state, and exclude the closed case from
+    /// the remaining search.
     pub case_splits: bool,
     /// Number of conflicts after which the search counts as stalled and a
     /// case split is attempted.
@@ -151,10 +153,11 @@ pub struct IncDet {
     learnts: Vec<ClauseId>,
     /// state of the CEGAR extension
     cegar: cegar::Cegar,
-    /// recursion depth of case splitting
-    split_depth: u32,
-    /// a performed case split (kept for certification)
-    split: Option<Box<casesplit::CaseSplit>>,
+    /// state of interleaved case splitting
+    casesplits: casesplit::CaseSplits,
+    /// handled universal regions (CEGAR responses and closed cases), in the
+    /// order they were excluded from the conflict search
+    handled_cases: Vec<casesplit::HandledCase>,
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
@@ -380,6 +383,7 @@ impl IncDet {
                         .expect("there is at least one assigned existential literal");
                     let watch2 = *lits
                         .iter()
+                        .filter(|lit| self.vars[lit.var()].is_existential(&self.prefix))
                         .find(|l| self.dec_lvls[l.var()] == Some(max_lvl))
                         .expect("There is a literal with the provided decision level");
                     self.watches.add_watch(watch2, Watch { clause: clause_id });
@@ -422,6 +426,7 @@ impl IncDet {
         let mut restart_number = 1;
         let mut next_reduction = REDUCTION_INCREMENT;
         let mut last_reboot = 0;
+        let mut conflicts_at_last_case = 0;
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
@@ -445,12 +450,16 @@ impl IncDet {
                 self.reboot_conflict_check();
                 last_reboot = self.stats.skolem.global_conflict_checks;
             }
-            if self.should_case_split() {
-                if let Some(result) = self.solve_by_case_split() {
-                    return result;
+            if self.options.case_splits
+                && self.stats.global.conflicts - conflicts_at_last_case
+                    >= self.options.case_split_threshold
+            {
+                conflicts_at_last_case = self.stats.global.conflicts;
+                match self.open_case() {
+                    casesplit::CaseAction::Assumed => continue,
+                    casesplit::CaseAction::DomainEmpty => return SolverResult::Satisfiable,
+                    casesplit::CaseAction::NoUniversals => self.options.case_splits = false,
                 }
-                // no universal variable to split on, keep searching
-                self.options.case_splits = false;
             }
             if self.options.restarts
                 && conflicts_since_restart >= RESTART_INTERVAL * luby(restart_number)
@@ -464,6 +473,12 @@ impl IncDet {
                 continue;
             }
             let Some(var) = self.next_decision_variable() else {
+                if self.casesplits_active() {
+                    // all existential variables are assigned within the
+                    // active case: close it and continue on the rest
+                    self.close_cases();
+                    continue;
+                }
                 break;
             };
             self.stats.global.decisions += 1;
@@ -689,11 +704,15 @@ impl IncDet {
     pub(crate) fn backtrack_to(&mut self, lvl: DecLvl) {
         let mut unassigned = Vec::new();
         self.trail.backtrack_to(lvl, |assigned_lit| {
-            self.assignment.unassign(assigned_lit.var());
-            self.dec_lvls[assigned_lit.var()] = None;
-            self.vsids.add(assigned_lit.var());
-            unassigned.push(assigned_lit.var());
+            let var = assigned_lit.var();
+            self.assignment.unassign(var);
+            self.dec_lvls[var] = None;
+            if self.vars[var].scope.is_some() && self.vars[var].is_existential(&self.prefix) {
+                self.vsids.add(var);
+            }
+            unassigned.push(var);
         });
+        self.prune_cases_on_backtrack(lvl);
         self.skolem.backtrack_to(lvl, |cid| self.allocator.unlock(cid));
         self.graph.backtrack_to(lvl);
         self.conflict_check.backtrack_to(lvl);
@@ -761,7 +780,11 @@ impl IncDet {
         let clause = self.conflict_analysis.clause().to_owned();
         self._add_clause(&clause);
         self.stats.global.added_clauses += 1;
-        assert!(!self.conflicted, "empty clause cannot be added through conflict analysis");
+        if self.conflicted {
+            // the learnt clause contained only universal literals (e.g. the
+            // negation of a case assumption) and reduced to the empty clause
+            return Some(SolverResult::Unsatisfiable);
+        }
         // the learnt clause constrains the conflicted variable further, so it
         // may have become uniquely determined
         if !self.assignment.is_assigned(conflict.var) {

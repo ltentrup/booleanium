@@ -5,12 +5,19 @@ pub(crate) struct Statistics {
     pub(crate) global: GlobalStats,
     pub(crate) skolem: SkolemStats,
     pub(crate) cegar: CegarStats,
+    pub(crate) cases: CaseStats,
 }
 
 #[derive(Debug, Default)]
 pub(crate) struct CegarStats {
     pub(crate) rounds: u32,
     pub(crate) cases: u32,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CaseStats {
+    pub(crate) assumptions: u32,
+    pub(crate) closed: u32,
 }
 
 #[derive(Debug, Default)]

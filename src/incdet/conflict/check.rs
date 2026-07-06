@@ -259,19 +259,37 @@ impl IncDet {
         let trail: Vec<Lit> = self.trail.iter().copied().collect();
         for lit in trail {
             let lvl = self.dec_lvls[lit.var()].expect("trail variables have decision levels");
+            let data = &self.vars[lit.var()];
+            if data.scope.is_some() && data.is_universal(&self.prefix) {
+                // an active case assumption
+                let unit = self.conflict_check.sat_solver.lookup(lit);
+                self.conflict_check.add_definition_clause(lvl, &[unit]);
+                continue;
+            }
             let is_decision = self.trail.is_decision(lit);
             self.add_definition_to_conflict_check_at(lit, is_decision, lvl);
         }
-        for case in &self.cegar.cases {
-            self.conflict_check.add_universal_exclusion(&case.cube);
+        for case in &self.handled_cases {
+            self.conflict_check.add_universal_exclusion(case.cube());
         }
     }
 
-    /// Excludes a handled CEGAR case from future conflict checks.
+    /// Excludes a handled case from future conflict checks.
     pub(crate) fn conflict_check_exclude_cube(&mut self, cube: &[Lit]) {
         if self.options.incremental_conflict_check {
             self.conflict_check.add_universal_exclusion(cube);
         }
+    }
+
+    /// Adds an active case assumption as a unit clause guarded by the
+    /// assumption's decision level.
+    pub(crate) fn conflict_check_assume(&mut self, lit: Lit) {
+        if !self.options.incremental_conflict_check {
+            return;
+        }
+        let lvl = self.trail.decision_level();
+        let unit = self.conflict_check.sat_solver.lookup(lit);
+        self.conflict_check.add_definition_clause(lvl, &[unit]);
     }
 
     fn is_conflicted_incremental(&mut self, var: Var) -> Option<HashSet<Lit>> {
@@ -308,9 +326,9 @@ impl IncDet {
             }
         }
 
-        // universal assignments of handled CEGAR cases are excluded
-        for case in &self.cegar.cases {
-            let encoded: Vec<S::Lit> = case.cube.iter().map(|&l| solver.lookup(!l)).collect();
+        // universal assignments of handled cases are excluded
+        for case in &self.handled_cases {
+            let encoded: Vec<S::Lit> = case.cube().iter().map(|&l| solver.lookup(!l)).collect();
             solver.add_clause(&encoded);
         }
 
@@ -318,11 +336,17 @@ impl IncDet {
             // add already determined skolem functions
             for cid in self.iter_implication_clauses() {
                 let clause = &self.allocator[cid];
+                trace!("exact check: function clause {clause}");
                 let clause = clause.iter().map(|&l| solver.lookup(l)).collect::<Vec<_>>();
                 solver.add_clause(&clause);
             }
             // add decided skolem functions
             for &lit in self.trail.iter_decisions() {
+                let data = &self.vars[lit.var()];
+                if data.scope.is_some() && data.is_universal(&self.prefix) {
+                    // case assumptions are added as constants above
+                    continue;
+                }
                 trace!("Constraint for decided literal {lit}");
                 let mut build = vec![solver.lookup(lit.negated())];
                 for cid in self.skolem[lit].implications() {
@@ -342,6 +366,7 @@ impl IncDet {
             let mut build = Vec::new();
             for cid in self.skolem[lit].implications() {
                 let clause = &self.allocator[cid];
+                trace!("exact check: implication of {lit}: {clause}");
                 let arbiter = solver.add_variable();
                 for l in clause.iter().copied().filter(|&l| l != lit) {
                     let lits = [arbiter, solver.lookup(l.negated())];

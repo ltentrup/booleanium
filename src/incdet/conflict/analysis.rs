@@ -60,11 +60,38 @@ impl ConflictAnalysis {
             .unwrap_or(DecLvl::ROOT)
     }
 
-    fn clause_max_dec_lvl(&self, dec_lvls: &VarVec<Option<DecLvl>>) -> DecLvl {
+    /// The deepest decision level of an existential literal of the clause.
+    /// Universal literals are ignored: case assumptions carry decision
+    /// levels, but the clause must assert its deepest existential literal,
+    /// not a case assumption.
+    fn clause_max_existential_lvl(
+        &self,
+        vars: &VarVec<VarData>,
+        prefix: &[Scope],
+        dec_lvls: &VarVec<Option<DecLvl>>,
+    ) -> DecLvl {
         assert_eq!(self.current_level_count, 0);
         self.clause
             .iter()
+            .filter(|l| vars[l.var()].is_existential(prefix))
             .map(|&l| dec_lvls[l.var()].unwrap_or(DecLvl::ROOT))
+            .max()
+            .unwrap_or(DecLvl::ROOT)
+    }
+
+    /// The deepest decision level among the clause literals that lies
+    /// strictly below `below`. Backtracking there unassigns every literal
+    /// at level `below` while keeping the remaining premises (including
+    /// case assumptions) intact.
+    fn get_backtrack_level_below(
+        &self,
+        dec_lvls: &VarVec<Option<DecLvl>>,
+        below: DecLvl,
+    ) -> DecLvl {
+        self.clause
+            .iter()
+            .map(|&l| dec_lvls[l.var()].unwrap_or(DecLvl::ROOT))
+            .filter(|&lvl| lvl < below)
             .max()
             .unwrap_or(DecLvl::ROOT)
     }
@@ -117,16 +144,7 @@ impl IncDet {
             LitSlice::from(self.conflict_analysis.clause.as_slice())
         );
         if self.conflict_analysis.current_level_count == 0 {
-            let max_lvl = self.conflict_analysis.clause_max_dec_lvl(&self.dec_lvls);
-            if max_lvl == DecLvl::ROOT {
-                tracing::trace!("Conflict: max-lvl == root level");
-                return Err(());
-            }
-            let backtrack_to = self.conflict_analysis.get_backtrack_level(&self.dec_lvls, max_lvl);
-            self.vsids.decay();
-
-            tracing::debug!("Backtrack to level {backtrack_to}");
-            return Ok(backtrack_to);
+            return self.analyze_below_conflict_level();
         } else if self.conflict_analysis.current_level_count <= 1 {
             self.minimize_learnt_clause(conflict);
             let backtrack_to = self
@@ -181,6 +199,28 @@ impl IncDet {
         self.vsids.decay();
 
         debug!("Backtrack to level {backtrack_to}");
+        Ok(backtrack_to)
+    }
+
+    /// Resolves a conflict clause with no existential literal at the
+    /// conflict level: the backtrack must go strictly below the deepest
+    /// existential literal so the clause asserts it (case assumptions may
+    /// sit at higher levels). A clause without existential literals above
+    /// the root level refutes the instance.
+    fn analyze_below_conflict_level(&mut self) -> Result<DecLvl, ()> {
+        let max_lvl = self.conflict_analysis.clause_max_existential_lvl(
+            &self.vars,
+            &self.prefix,
+            &self.dec_lvls,
+        );
+        if max_lvl == DecLvl::ROOT {
+            tracing::trace!("Conflict: max-lvl == root level");
+            return Err(());
+        }
+        let backtrack_to =
+            self.conflict_analysis.get_backtrack_level_below(&self.dec_lvls, max_lvl);
+        self.vsids.decay();
+        tracing::debug!("Backtrack to level {backtrack_to}");
         Ok(backtrack_to)
     }
 

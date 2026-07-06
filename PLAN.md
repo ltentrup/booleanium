@@ -75,20 +75,36 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   random benchmark instances: 10–300x faster (e.g. `random-12-90-330-4`
   88s → 0.3s); the certified fuzz harness validates recorded cases in
   every satisfiable result.
-* **Case splits — v1 done** (`Options::case_splits`, default on with a
-  stall threshold of 5000 conflicts, CLI `--case-split-threshold`): once
-  the search stalls, the domain is split on the most frequent universal
-  variable and the two specialized instances `φ[u:=1]`, `φ[u:=0]` are
-  solved recursively by fresh sub-solvers (specialization strips the
-  matrix, so constants cascade); satisfiable results keep the sub-solvers
-  and certification verifies both branches of the if-then-else function.
-  Limitation: this restart-from-scratch variant re-derives everything per
-  tree node, so `adder2.qdimacs` (which needs many input bits fixed)
-  still times out even with aggressive thresholds — the split cascade
-  works (depth 12 within seconds, sub-cases resolve) but the tree is too
-  large. The paper's interleaved formulation, which keeps one solver and
-  shares derived state across cases, is the remaining step for such
-  instances.
+* **Interleaved case splits — done** (`Options::case_splits`, default on
+  with a stall threshold of 5000 conflicts, CLI `--case-split-threshold`;
+  replaces the v1 restart-from-scratch recursion): once the search
+  stalls, a universal literal is *assumed* — assigned as a constant at a
+  fresh decision level — which restricts all determinacy and conflict
+  checks to the halved domain while keeping the full solver state (learnt
+  clauses are matrix-implied resolvents and stay valid across cases).
+  When every existential variable is assigned inside a case, the case is
+  closed: the Skolem functions are snapshotted for certification, the
+  assumption cube is excluded from all future conflict checks, and the
+  solver backtracks below the assumptions. A small domain solver over the
+  universal variables holds the negation of every handled cube (CEGAR
+  cubes included); its models pick the next assumption polarity, and its
+  unsatisfiability proves the whole domain is covered. Certification
+  works piecewise: region `k` of the handled-case list is valid on its
+  cube minus the cubes handled before it, and the final solver state
+  covers the rest.
+
+  The subtle part is conflict analysis: case assumptions give universal
+  literals decision levels, so a learnt clause whose deepest existential
+  literal lies *below* the deepest case-assumption literal would — with
+  the standard "second-highest level" rule — backtrack without
+  unassigning that existential, and the clause would be registered as an
+  implication for an already-assigned variable, silently corrupting its
+  function (found via a certified fuzz counterexample). The backtrack
+  level of such clauses is therefore computed from the existential
+  literals only, going strictly below the deepest one. Learnt clauses
+  consisting purely of universal literals refute the instance outright
+  (they are matrix-implied, so the universal player wins by picking the
+  cube).
 
 ### 1. Algorithm: beyond 2QBF
 
@@ -213,8 +229,15 @@ Remaining performance work:
 * **Benchmarking on real instances**: the solver is validated against the
   CADET integration-test suite (117 QDIMACS instances with known results):
   83 correct, 0 wrong, 0 panics, 1 timeout at 30s (`adder2.qdimacs`,
-  UNSAT, waiting for the case-split extension), 33 unsupported (more than
-  one quantifier alternation). Getting this suite to run also required QDIMACS
+  UNSAT), 33 unsupported (more than one quantifier alternation).
+  `adder2` also resists the interleaved case splits: progress logging
+  shows the case assumptions never stack — conflicts whose learnt clause
+  bottoms out at root-assigned existentials must backtrack to the root
+  (see the case-split section), which prunes the assumption before a
+  second one can be made. The CADET-style refinement would be to keep the
+  case active and instead resolve such a clause against the functions of
+  its assigned existentials until it asserts something inside the case
+  (or refutes the case outright). Getting this suite to run also required QDIMACS
   free-variable support and header tolerance. QBFEVAL 2QBF tracks would
   give a competitive comparison against CADET/DepQBF.
 * **The two timeout instances are search-bound**: stack sampling first

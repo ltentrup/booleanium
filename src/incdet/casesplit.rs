@@ -1,100 +1,244 @@
-//! Case-split extension, adapted from "Understanding and Extending
+//! Interleaved case splits, following "Understanding and Extending
 //! Incremental Determinization for 2QBF" (Rabe, Tentrup, Rasmussen,
 //! Seshia, CAV 2018).
 //!
-//! When the search stalls — many conflicts without a verdict, typically on
-//! instances whose CEGAR cubes do not generalize — the universal domain is
-//! split on a universal variable `u` and the two specialized instances
-//! `φ[u:=1]` and `φ[u:=0]` are solved in isolation by fresh sub-solvers:
-//! the split is the syntactic identity `∀u. φ ≡ φ[u:=1] ∧ φ[u:=0]`.
-//! Specialization removes satisfied clauses and strips falsified literals,
-//! which turns circuit gates into constants that the sub-solvers propagate
-//! cheaply.
+//! Once the search stalls, a universal literal is *assumed*: the variable
+//! is assigned as a constant at a fresh decision level, which restricts all
+//! determinacy and conflict checks to the halved universal domain. The
+//! search continues with the full machinery inside the case, and crucially
+//! keeps all derived state — learnt clauses are resolvents of
+//! matrix-implied clauses and therefore valid across cases.
 //!
-//! The sub-solvers are kept for certification: the combined Skolem function
-//! is the if-then-else over `u` of the branch functions, so a satisfiable
-//! result is verified by verifying both branches.
+//! When every existential variable is assigned while case assumptions are
+//! active, the case is *closed*: the current Skolem functions are
+//! snapshotted for certification, the assumption cube is recorded as a
+//! handled case and permanently excluded from future conflict checks (its
+//! universal assignments are covered), and the solver backtracks below the
+//! assumptions and continues on the remaining domain.
+//!
+//! A small *domain solver* over the universal variables holds the negation
+//! of every handled cube. Its models witness the remaining domain and
+//! provide the polarity of the next assumption; unsatisfiability means the
+//! whole domain is covered and the formula is satisfiable.
 
 use crate::{
+    incdet::propagation::assignment::Value,
+    incdet::propagation::trail::DecLvl,
     incdet::IncDet,
     literal::{Lit, Var},
-    SolverResult,
+    sat::{varisat::Varisat, LookupSolver, SatSolver},
 };
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{debug, info};
 
-/// Maximum case-split recursion depth (at most `2^depth` sub-instances).
-const MAX_SPLIT_DEPTH: u32 = 12;
-
-/// A performed case split with its solved sub-instances.
+/// A universal assignment region that is fully handled, together with the
+/// data to certify it. Region `k` of the list is valid on its cube minus
+/// the cubes of the regions `0..k` handled before it (their exclusions were
+/// active while this region was solved); the current solver state covers
+/// everything outside all handled cubes.
 #[derive(Debug)]
-pub(crate) struct CaseSplit {
-    #[allow(dead_code)]
-    pub(crate) var: Var,
-    pub(crate) positive: IncDet,
-    pub(crate) negative: IncDet,
+pub(crate) enum HandledCase {
+    /// A CEGAR case: the constant `response` satisfies the matrix under
+    /// every extension of `cube`.
+    Response { cube: Vec<Lit>, response: Vec<Lit> },
+    /// A closed case split: the snapshotted Skolem functions satisfy the
+    /// matrix on the region of `cube`.
+    Closed { cube: Vec<Lit>, functions: Vec<SnapshotFunction> },
+}
+
+impl HandledCase {
+    pub(crate) fn cube(&self) -> &[Lit] {
+        match self {
+            HandledCase::Response { cube, .. } | HandledCase::Closed { cube, .. } => cube,
+        }
+    }
+}
+
+/// The Skolem function of one variable, in trail order: the assigned
+/// literal holds iff one of the implication clauses fires (or always, for
+/// constants).
+#[derive(Debug)]
+pub(crate) struct SnapshotFunction {
+    pub(crate) lit: Lit,
+    pub(crate) constant: bool,
+    pub(crate) implications: Vec<Vec<Lit>>,
+}
+
+/// State of interleaved case splitting.
+#[derive(Debug, Default)]
+pub(crate) struct CaseSplits {
+    /// The active case assumptions with the decision level *below* each
+    /// assumption (the level to backtrack to when closing).
+    active: Vec<(Lit, DecLvl)>,
+    /// SAT solver over the universal variables holding the negation of
+    /// every handled cube; models witness the remaining domain.
+    domain: Option<DomainSolver>,
+    /// Occurrence counts of universal variables in the original matrix.
+    occurrences: Option<HashMap<Var, usize>>,
+}
+
+struct DomainSolver(LookupSolver<Varisat>);
+
+impl std::fmt::Debug for DomainSolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DomainSolver").finish()
+    }
+}
+
+pub(crate) enum CaseAction {
+    /// A new case assumption was made, the search continues inside it.
+    Assumed,
+    /// The remaining universal domain is empty.
+    DomainEmpty,
+    /// There is no universal variable to split on.
+    NoUniversals,
 }
 
 impl IncDet {
-    /// Whether the stalled search should be split into cases.
-    pub(crate) fn should_case_split(&self) -> bool {
-        self.options.case_splits
-            && self.split_depth < MAX_SPLIT_DEPTH
-            && self.stats.global.conflicts >= self.options.case_split_threshold
+    /// Whether case assumptions are currently active.
+    pub(crate) fn casesplits_active(&self) -> bool {
+        !self.casesplits.active.is_empty()
     }
 
-    /// Splits the universal domain on the most frequent universal variable
-    /// and solves both specializations. Returns `None` if no universal
-    /// variable occurs in the matrix.
-    pub(crate) fn solve_by_case_split(&mut self) -> Option<SolverResult> {
-        let var = self.split_variable()?;
-        info!(
-            "case split on universal {var} at depth {} after {} conflicts",
-            self.split_depth, self.stats.global.conflicts
-        );
-        let mut positive = self.specialize(Lit::positive(var));
-        let result_pos = positive._solve();
-        let result = match result_pos {
-            SolverResult::Unsatisfiable | SolverResult::Unknown => result_pos,
-            SolverResult::Satisfiable => {
-                let mut negative = self.specialize(Lit::negative(var));
-                let result_neg = negative._solve();
-                self.split = Some(Box::new(CaseSplit { var, positive, negative }));
-                result_neg
+    /// Called when the search stalls: assume a universal literal from the
+    /// remaining domain, or detect that the domain is fully handled.
+    pub(crate) fn open_case(&mut self) -> CaseAction {
+        self.ensure_domain_solver();
+        // the next assumption must lie in the remaining domain, and inside
+        // the active case
+        let active: Vec<Lit> = self.casesplits.active.iter().map(|&(lit, _)| lit).collect();
+        let domain = self.casesplits.domain.as_mut().expect("domain solver was just created");
+        let assumptions: Vec<_> = active.iter().map(|&l| domain.0.lookup(l)).collect();
+        if !domain.0.solve_with_assumptions(&assumptions).unwrap() {
+            if self.casesplits.active.is_empty() {
+                return CaseAction::DomainEmpty;
             }
+            // the active case has no remaining domain, close it
+            self.close_cases();
+            return CaseAction::Assumed;
+        }
+        let model: HashMap<Var, bool> = domain
+            .0
+            .orig_model()
+            .expect("model after sat")
+            .into_iter()
+            .map(|l| (l.var(), l.is_positive()))
+            .collect();
+        // pick the most frequent universal variable that is not active yet
+        let occurrences = self.casesplits.occurrences.as_ref().expect("counted with the solver");
+        let candidate = occurrences
+            .iter()
+            .filter(|(var, _)| !self.assignment.is_assigned(**var))
+            .max_by_key(|(var, count)| (**count, **var))
+            .map(|(&var, _)| var);
+        let Some(var) = candidate else {
+            return CaseAction::NoUniversals;
         };
-        info!("case split on {var} resolved: {result}");
-        Some(result)
+        // default to the positive polarity if the variable is unconstrained
+        // in the domain model
+        let value = model.get(&var).copied().unwrap_or(true);
+        let lit = if value { Lit::positive(var) } else { Lit::negative(var) };
+        self.assume_universal(lit);
+        CaseAction::Assumed
     }
 
-    /// Builds a fresh solver for the matrix specialized by `lit`: clauses
-    /// containing `lit` are satisfied and dropped, occurrences of `¬lit`
-    /// are stripped. The prefix is inherited unchanged — the split variable
-    /// simply no longer occurs.
-    fn specialize(&self, lit: Lit) -> IncDet {
-        let mut sub = IncDet::with_options(self.options);
-        sub.split_depth = self.split_depth + 1;
-        for scope in &self.prefix {
-            if !scope.variables.is_empty() {
-                sub._quantify(scope.quantifier, &scope.variables);
+    /// Assumes a universal literal: the variable becomes a constant at a
+    /// fresh decision level, restricting all checks to the halved domain.
+    fn assume_universal(&mut self, lit: Lit) {
+        info!(
+            "case split: assuming {lit} at depth {} after {} conflicts",
+            self.casesplits.active.len(),
+            self.stats.global.conflicts
+        );
+        self.stats.cases.assumptions += 1;
+        let below = self.trail.decision_level();
+        self.trail.add_decision(lit);
+        self.assignment.assign_constant(lit);
+        self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
+        self.conflict_check_assume(lit);
+        self.casesplits.active.push((lit, below));
+        // determinacy may improve within the restricted domain
+        for (var, data) in self.vars.iter() {
+            if data.scope.is_some()
+                && data.is_existential(&self.prefix)
+                && !self.assignment.is_assigned(var)
+            {
+                let implications =
+                    self.skolem[Lit::positive(var)].len() + self.skolem[Lit::negative(var)].len();
+                if implications > 0 {
+                    self.propagation.add_and_set(var, implications);
+                }
             }
         }
-        let mut stripped = Vec::new();
-        for cid in self.allocator.ids().take(self.original_clause_count) {
-            let clause = &self.allocator[cid];
-            if clause.iter().any(|&l| l == lit) {
+    }
+
+    /// Closes all active cases: every existential variable is assigned (or
+    /// the case domain is empty), so the current functions cover the cube
+    /// of the active assumptions. Records the case, excludes the cube, and
+    /// backtracks below the assumptions.
+    pub(crate) fn close_cases(&mut self) {
+        let cube: Vec<Lit> = self.casesplits.active.iter().map(|&(lit, _)| lit).collect();
+        let below = self.casesplits.active.first().expect("a case is active").1;
+        info!(
+            "closing case {:?} with {} handled cases",
+            cube.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            self.handled_cases.len()
+        );
+        self.stats.cases.closed += 1;
+        let functions = self.snapshot_functions();
+        self.exclude_cube(&cube);
+        self.handled_cases.push(HandledCase::Closed { cube, functions });
+        self.backtrack_to(below);
+        debug_assert!(self.casesplits.active.is_empty());
+    }
+
+    /// Snapshots the Skolem functions of the assigned existential variables
+    /// in trail order (case assumptions are skipped; they form the cube).
+    pub(crate) fn snapshot_functions(&self) -> Vec<SnapshotFunction> {
+        let mut functions = Vec::new();
+        for &lit in self.trail.iter() {
+            let var = lit.var();
+            let data = &self.vars[var];
+            if data.scope.is_some() && data.is_universal(&self.prefix) {
                 continue;
             }
-            stripped.clear();
-            stripped.extend(clause.iter().copied().filter(|&l| l != !lit));
-            sub._add_clause(&stripped);
+            match self.assignment[var].expect("trail variables are assigned") {
+                Value::True | Value::False => {
+                    functions.push(SnapshotFunction { lit, constant: true, implications: vec![] });
+                }
+                Value::PositiveImplications | Value::NegativeImplications => {
+                    let implications = self.skolem[lit]
+                        .implications()
+                        .map(|cid| self.allocator[cid].lits().to_vec())
+                        .collect();
+                    functions.push(SnapshotFunction { lit, constant: false, implications });
+                }
+            }
         }
-        sub
+        functions
     }
 
-    /// The universal variable with the most occurrences in the original
-    /// matrix.
-    fn split_variable(&self) -> Option<Var> {
+    /// Records a cube as handled in every conflict-search structure.
+    pub(crate) fn exclude_cube(&mut self, cube: &[Lit]) {
+        self.conflict_check_exclude_cube(cube);
+        if let Some(domain) = &mut self.casesplits.domain {
+            let excluded: Vec<_> = cube.iter().map(|&l| domain.0.lookup(!l)).collect();
+            domain.0.add_clause(&excluded);
+        }
+    }
+
+    fn ensure_domain_solver(&mut self) {
+        if self.casesplits.domain.is_some() {
+            return;
+        }
+        debug!("building the case-split domain solver");
+        let mut domain = LookupSolver::<Varisat>::default();
+        domain.set_var_count(self.vars.get_var_count());
+        for case in &self.handled_cases {
+            let excluded: Vec<_> = case.cube().iter().map(|&l| domain.lookup(!l)).collect();
+            domain.add_clause(&excluded);
+        }
+        self.casesplits.domain = Some(DomainSolver(domain));
         let mut occurrences: HashMap<Var, usize> = HashMap::new();
         for cid in self.allocator.ids().take(self.original_clause_count) {
             for l in self.allocator[cid].iter() {
@@ -104,6 +248,13 @@ impl IncDet {
                 }
             }
         }
-        occurrences.into_iter().max_by_key(|&(var, count)| (count, var)).map(|(var, _)| var)
+        self.casesplits.occurrences = Some(occurrences);
+    }
+
+    /// Removes case assumptions whose decision levels were unwound.
+    pub(crate) fn prune_cases_on_backtrack(&mut self, lvl: DecLvl) {
+        // an assumption made at level `below + 1` survives iff that level
+        // is kept
+        self.casesplits.active.retain(|&(_, below)| below.successor() <= lvl);
     }
 }
