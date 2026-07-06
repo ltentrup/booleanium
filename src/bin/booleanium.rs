@@ -27,6 +27,10 @@ struct Args {
     #[arg(long)]
     no_clause_deletion: bool,
 
+    /// Disable CEGAR conflict resolution.
+    #[arg(long)]
+    no_cegar: bool,
+
     /// Restart the search on a Luby schedule.
     #[arg(long)]
     restarts: bool,
@@ -42,6 +46,7 @@ impl Args {
             constant_propagation: !self.no_constant_propagation,
             incremental_conflict_check: !self.no_incremental_conflict_check,
             clause_deletion: !self.no_clause_deletion,
+            cegar: !self.no_cegar,
             restarts: self.restarts,
         }
     }

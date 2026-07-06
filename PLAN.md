@@ -53,6 +53,27 @@ prefixes. See `src/incdet/test.rs` (`fuzz` module); run with e.g.
 
 ## Roadmap
 
+### 0. CAV'18 extensions ("Understanding and Extending Incremental
+Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
+
+* **CEGAR conflict resolution — done** (`Options::cegar`, default on):
+  when a conflict check returns a conflicting universal assignment α, a
+  second SAT solver over the original matrix checks whether the
+  existential player has any response to α. If not, the formula is
+  unsatisfiable immediately (this solves the former `bug8.qdimacs`
+  timeout in milliseconds). If yes, the response is generalized to a cube
+  (support-based minimization) recorded as a handled case and excluded
+  from future conflict checks; an empty cube means immediate
+  satisfiability. An effectiveness gate (exponential moving average of
+  cube sizes) falls back to clause learning when cubes degenerate, which
+  is what happens on `adder2.qdimacs` — constant responses do not
+  generalize across carry chains.
+* **Case splits — open**: the paper's second extension (assume a
+  universal literal, solve the halved domain in isolation with the full
+  machinery, then flip) is the designed fix for instances like `adder2`
+  where CEGAR's constant responses are too weak. Requires case-scoped
+  state and undo across cases.
+
 ### 1. Algorithm: beyond 2QBF
 
 `_solve` currently rejects prefixes with more than two blocks. Options, in

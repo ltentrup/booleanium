@@ -123,6 +123,14 @@ impl<S: SatSolver> ConflictCheck<S> {
         arbiter
     }
 
+    /// Permanently excludes a cube over universal variables from the
+    /// conflict search: universal assignments inside the cube are handled
+    /// by a recorded CEGAR case.
+    pub(crate) fn add_universal_exclusion(&mut self, cube: &[crate::literal::Lit]) {
+        let encoded: Vec<S::Lit> = cube.iter().map(|&l| self.sat_solver.lookup(!l)).collect();
+        self.sat_solver.add_clause(&encoded);
+    }
+
     fn solve(&mut self, incremental_var: S::Lit) -> Option<HashSet<Lit>> {
         if !self
             .sat_solver
@@ -206,6 +214,10 @@ impl IncDet {
             return;
         }
         let lvl = self.trail.decision_level();
+        self.add_definition_to_conflict_check_at(lit, is_decision, lvl);
+    }
+
+    fn add_definition_to_conflict_check_at(&mut self, lit: Lit, is_decision: bool, lvl: DecLvl) {
         // activate the implication clauses of the assigned variable
         for cid in [lit, lit.negated()].into_iter().flat_map(|lit| self.skolem[lit].implications())
         {
@@ -232,6 +244,34 @@ impl IncDet {
             build.push(!arbiter);
         }
         self.conflict_check.add_definition_clause(lvl, &build);
+    }
+
+    /// Rebuilds the incremental conflict-check solver from the live state
+    /// by replaying the definitions of the trail. This sheds the retired
+    /// clauses of finished checks and backtracked levels, which the
+    /// backend solver cannot delete itself and which otherwise slow down
+    /// every solving call.
+    pub(crate) fn reboot_conflict_check(&mut self) {
+        debug!("rebooting the incremental conflict-check solver");
+        self.stats.skolem.conflict_check_reboots += 1;
+        self.conflict_check = ConflictCheck::default();
+        self.conflict_check.set_var_count(self.vars.get_var_count());
+        let trail: Vec<Lit> = self.trail.iter().copied().collect();
+        for lit in trail {
+            let lvl = self.dec_lvls[lit.var()].expect("trail variables have decision levels");
+            let is_decision = self.trail.is_decision(lit);
+            self.add_definition_to_conflict_check_at(lit, is_decision, lvl);
+        }
+        for case in &self.cegar.cases {
+            self.conflict_check.add_universal_exclusion(&case.cube);
+        }
+    }
+
+    /// Excludes a handled CEGAR case from future conflict checks.
+    pub(crate) fn conflict_check_exclude_cube(&mut self, cube: &[Lit]) {
+        if self.options.incremental_conflict_check {
+            self.conflict_check.add_universal_exclusion(cube);
+        }
     }
 
     fn is_conflicted_incremental(&mut self, var: Var) -> Option<HashSet<Lit>> {
@@ -266,6 +306,12 @@ impl IncDet {
                 let unit = solver.lookup(lit);
                 solver.add_clause(&[unit]);
             }
+        }
+
+        // universal assignments of handled CEGAR cases are excluded
+        for case in &self.cegar.cases {
+            let encoded: Vec<S::Lit> = case.cube.iter().map(|&l| solver.lookup(!l)).collect();
+            solver.add_clause(&encoded);
         }
 
         if exact {

@@ -27,6 +27,7 @@ use std::{
 };
 use tracing::{debug, error, info, trace};
 
+pub(crate) mod cegar;
 pub(crate) mod certify;
 pub(crate) mod conflict;
 pub(crate) mod determinacy;
@@ -66,6 +67,11 @@ pub struct Options {
     /// implication clauses, keeping propagation and the determinacy and
     /// conflict checks from slowing down as learnt clauses accumulate.
     pub clause_deletion: bool,
+    /// Resolve conflicts by CEGAR rounds while they are effective: check
+    /// whether the conflicting universal assignment has an existential
+    /// response at all (immediate UNSAT if not) and record generalized,
+    /// handled cases instead of learning clauses.
+    pub cegar: bool,
     /// Restart the search (backtrack to the root level, keeping all learnt
     /// clauses and variable activities) on a Luby schedule.
     ///
@@ -83,6 +89,7 @@ impl Default for Options {
             constant_propagation: true,
             incremental_conflict_check: true,
             clause_deletion: true,
+            cegar: true,
             restarts: false,
         }
     }
@@ -93,6 +100,10 @@ const RESTART_INTERVAL: u32 = 100;
 
 /// Number of learnt clauses after which the next clause deletion runs.
 const REDUCTION_INCREMENT: usize = 2000;
+
+/// Number of global conflict checks after which the incremental
+/// conflict-check solver is rebooted from the live state.
+const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 4096;
 
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
@@ -129,6 +140,8 @@ pub struct IncDet {
     original_clause_count: usize,
     /// learnt clauses that are candidates for deletion
     learnts: Vec<ClauseId>,
+    /// state of the CEGAR extension
+    cegar: cegar::Cegar,
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
@@ -395,10 +408,11 @@ impl IncDet {
         let mut conflicts_since_restart = 0;
         let mut restart_number = 1;
         let mut next_reduction = REDUCTION_INCREMENT;
+        let mut last_reboot = 0;
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
-                if let Some(result) = self.handle_conflict(&conflict) {
+                if let Some(result) = self.resolve_conflict(&conflict) {
                     return result;
                 }
                 conflicts_since_restart += 1;
@@ -410,6 +424,13 @@ impl IncDet {
             if self.options.clause_deletion && self.learnts.len() >= next_reduction {
                 self.reduce_learnts();
                 next_reduction += REDUCTION_INCREMENT;
+            }
+            if self.options.incremental_conflict_check
+                && self.stats.skolem.global_conflict_checks - last_reboot
+                    >= CONFLICT_CHECK_REBOOT_INTERVAL
+            {
+                self.reboot_conflict_check();
+                last_reboot = self.stats.skolem.global_conflict_checks;
             }
             if self.options.restarts
                 && conflicts_since_restart >= RESTART_INTERVAL * luby(restart_number)
@@ -441,7 +462,7 @@ impl IncDet {
             // check if the decision leads to a conflict
             if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);
-                if let Some(result) = self.handle_conflict(&Conflict { var, assignment }) {
+                if let Some(result) = self.resolve_conflict(&Conflict { var, assignment }) {
                     return result;
                 }
                 conflicts_since_restart += 1;
@@ -701,12 +722,12 @@ impl IncDet {
     pub(crate) fn handle_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {
         if self.stats.global.conflicts % 1024 == 0 {
             info!(
-                "progress: {} conflicts, {} decisions, {} restarts, {} learnt clauses, {} determinacy checks",
+                "progress: {} conflicts, {} decisions, {} learnt clauses, {} determinacy checks, {} cegar cases",
                 self.stats.global.conflicts,
                 self.stats.global.decisions,
-                self.stats.global.restarts,
                 self.stats.global.added_clauses,
                 self.stats.skolem.local_det_checks,
+                self.stats.cegar.cases,
             );
         }
         if self.trail.decision_level().is_root() {

@@ -67,6 +67,13 @@ impl IncDet {
             }
         }
 
+        // universal assignments inside handled CEGAR cubes are covered by
+        // the recorded responses, which are verified separately below
+        for case in &self.cegar.cases {
+            let excluded: Vec<_> = case.cube.iter().map(|&l| solver.lookup(!l)).collect();
+            solver.add_clause(&excluded);
+        }
+
         // ask for a universal assignment that falsifies an original clause
         let mut some_falsified = Vec::new();
         for cid in self.allocator.ids().take(self.original_clause_count) {
@@ -83,7 +90,23 @@ impl IncDet {
         let counterexample = solver.solve().unwrap();
         if counterexample {
             debug!("Skolem function verification failed");
+            return false;
         }
-        !counterexample
+
+        // every handled case must satisfy every original clause under every
+        // extension of its cube: each clause needs a support among the cube
+        // literals and the recorded response
+        for case in &self.cegar.cases {
+            let supports: std::collections::HashSet<crate::literal::Lit> =
+                case.cube.iter().chain(case.response.iter()).copied().collect();
+            for cid in self.allocator.ids().take(self.original_clause_count) {
+                let clause = &self.allocator[cid];
+                if !clause.iter().any(|l| supports.contains(l)) {
+                    debug!("CEGAR case verification failed for clause {clause}");
+                    return false;
+                }
+            }
+        }
+        true
     }
 }

@@ -29,12 +29,13 @@ mod fuzz {
         let expected = qcnf.brute_force();
         for constant_propagation in [false, true] {
             for incremental_conflict_check in [false, true] {
-                for flags in 0..4 {
+                for flags in 0..8 {
                     let options = Options {
                         constant_propagation,
                         incremental_conflict_check,
                         clause_deletion: flags & 1 != 0,
                         restarts: flags & 2 != 0,
+                        cegar: flags & 4 != 0,
                     };
                     let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
                     let actual = solver.solve();
