@@ -27,6 +27,7 @@ use std::{
 };
 use tracing::{debug, error, info, trace};
 
+pub(crate) mod casesplit;
 pub(crate) mod cegar;
 pub(crate) mod certify;
 pub(crate) mod conflict;
@@ -72,6 +73,12 @@ pub struct Options {
     /// response at all (immediate UNSAT if not) and record generalized,
     /// handled cases instead of learning clauses.
     pub cegar: bool,
+    /// Split the universal domain on a universal variable and solve the two
+    /// specialized instances in isolation once the search stalls.
+    pub case_splits: bool,
+    /// Number of conflicts after which the search counts as stalled and a
+    /// case split is attempted.
+    pub case_split_threshold: u32,
     /// Restart the search (backtrack to the root level, keeping all learnt
     /// clauses and variable activities) on a Luby schedule.
     ///
@@ -90,6 +97,8 @@ impl Default for Options {
             incremental_conflict_check: true,
             clause_deletion: true,
             cegar: true,
+            case_splits: true,
+            case_split_threshold: 5000,
             restarts: false,
         }
     }
@@ -142,6 +151,10 @@ pub struct IncDet {
     learnts: Vec<ClauseId>,
     /// state of the CEGAR extension
     cegar: cegar::Cegar,
+    /// recursion depth of case splitting
+    split_depth: u32,
+    /// a performed case split (kept for certification)
+    split: Option<Box<casesplit::CaseSplit>>,
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
@@ -431,6 +444,13 @@ impl IncDet {
             {
                 self.reboot_conflict_check();
                 last_reboot = self.stats.skolem.global_conflict_checks;
+            }
+            if self.should_case_split() {
+                if let Some(result) = self.solve_by_case_split() {
+                    return result;
+                }
+                // no universal variable to split on, keep searching
+                self.options.case_splits = false;
             }
             if self.options.restarts
                 && conflicts_since_restart >= RESTART_INTERVAL * luby(restart_number)

@@ -31,6 +31,14 @@ struct Args {
     #[arg(long)]
     no_cegar: bool,
 
+    /// Disable case splitting on universal variables.
+    #[arg(long)]
+    no_case_splits: bool,
+
+    /// Number of conflicts after which the search stalls into a case split.
+    #[arg(long, default_value_t = 5000)]
+    case_split_threshold: u32,
+
     /// Restart the search on a Luby schedule.
     #[arg(long)]
     restarts: bool,
@@ -47,7 +55,10 @@ impl Args {
             incremental_conflict_check: !self.no_incremental_conflict_check,
             clause_deletion: !self.no_clause_deletion,
             cegar: !self.no_cegar,
+            case_splits: !self.no_case_splits,
+            case_split_threshold: self.case_split_threshold,
             restarts: self.restarts,
+            ..Options::default()
         }
     }
 }

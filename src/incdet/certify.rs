@@ -28,6 +28,12 @@ impl IncDet {
     /// [`crate::SolverResult::Satisfiable`].
     #[must_use]
     pub fn verify_skolem_functions(&self) -> bool {
+        if let Some(split) = &self.split {
+            // ∀u. φ ≡ φ[u:=1] ∧ φ[u:=0]: the combined Skolem function is the
+            // if-then-else over the split variable of the branch functions
+            return split.positive.verify_skolem_functions()
+                && split.negative.verify_skolem_functions();
+        }
         let mut solver = LookupSolver::<Varisat>::default();
         solver.set_var_count(self.vars.get_var_count());
 

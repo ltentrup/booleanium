@@ -75,11 +75,20 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   random benchmark instances: 10–300x faster (e.g. `random-12-90-330-4`
   88s → 0.3s); the certified fuzz harness validates recorded cases in
   every satisfiable result.
-* **Case splits — open**: the paper's second extension (assume a
-  universal literal, solve the halved domain in isolation with the full
-  machinery, then flip) is the designed fix for instances like `adder2`
-  where CEGAR's constant responses are too weak. Requires case-scoped
-  state and undo across cases.
+* **Case splits — v1 done** (`Options::case_splits`, default on with a
+  stall threshold of 5000 conflicts, CLI `--case-split-threshold`): once
+  the search stalls, the domain is split on the most frequent universal
+  variable and the two specialized instances `φ[u:=1]`, `φ[u:=0]` are
+  solved recursively by fresh sub-solvers (specialization strips the
+  matrix, so constants cascade); satisfiable results keep the sub-solvers
+  and certification verifies both branches of the if-then-else function.
+  Limitation: this restart-from-scratch variant re-derives everything per
+  tree node, so `adder2.qdimacs` (which needs many input bits fixed)
+  still times out even with aggressive thresholds — the split cascade
+  works (depth 12 within seconds, sub-cases resolve) but the tree is too
+  large. The paper's interleaved formulation, which keeps one solver and
+  shares derived state across cases, is the remaining step for such
+  instances.
 
 ### 1. Algorithm: beyond 2QBF
 
