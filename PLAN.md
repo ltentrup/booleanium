@@ -64,10 +64,17 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   timeout in milliseconds). If yes, the response is generalized to a cube
   (support-based minimization) recorded as a handled case and excluded
   from future conflict checks; an empty cube means immediate
-  satisfiability. An effectiveness gate (exponential moving average of
-  cube sizes) falls back to clause learning when cubes degenerate, which
-  is what happens on `adder2.qdimacs` — constant responses do not
-  generalize across carry chains.
+  satisfiability. Recording a case *replaces* clause learning only at the
+  root level; otherwise the conflict additionally goes through clause
+  learning — pure case-carving diverged on an unsatisfiable instance with
+  178 universal variables (`stmt27rrr.qdimacs`), while the combination
+  keeps both the pruning and the refutation progress. An effectiveness
+  gate (exponential moving average of cube sizes) stops CEGAR rounds when
+  cubes degenerate, which happens on `adder2.qdimacs` — constant
+  responses do not generalize across carry chains. Effect on the hard
+  random benchmark instances: 10–300x faster (e.g. `random-12-90-330-4`
+  88s → 0.3s); the certified fuzz harness validates recorded cases in
+  every satisfiable result.
 * **Case splits — open**: the paper's second extension (assume a
   universal literal, solve the halved domain in isolation with the full
   machinery, then flip) is the designed fix for instances like `adder2`
@@ -190,14 +197,15 @@ Remaining performance work:
   the benchmark suite, and long-running instances keep a bounded clause
   database. The residual progressive slowdown on the two suite timeouts
   lives in the *incremental conflict-check solver*, which cannot shed
-  retired clauses; the follow-up is to periodically rebuild that solver
-  from the live definitions (a "solver reboot"), and to refine the
-  deletion heuristic (activity/LBD instead of length).
+  retired clauses; this is now addressed by a periodic **solver reboot**
+  that rebuilds the incremental solver by replaying the trail definitions
+  (and CEGAR exclusions) every 4096 global checks. Remaining refinement:
+  activity/LBD-based deletion instead of length.
 * **Benchmarking on real instances**: the solver is validated against the
   CADET integration-test suite (117 QDIMACS instances with known results):
-  82 correct, 0 wrong, 0 panics, 2 timeouts at 30s (`bug8.qdimacs`,
-  `adder2.qdimacs`, both UNSAT), 33 unsupported (more than one quantifier
-  alternation). Getting this suite to run also required QDIMACS
+  83 correct, 0 wrong, 0 panics, 1 timeout at 30s (`adder2.qdimacs`,
+  UNSAT, waiting for the case-split extension), 33 unsupported (more than
+  one quantifier alternation). Getting this suite to run also required QDIMACS
   free-variable support and header tolerance. QBFEVAL 2QBF tracks would
   give a competitive comparison against CADET/DepQBF.
 * **The two timeout instances are search-bound**: stack sampling first

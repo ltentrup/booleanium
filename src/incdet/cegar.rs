@@ -98,12 +98,19 @@ impl IncDet {
                     return Some(SolverResult::Satisfiable);
                 }
                 CegarOutcome::CaseRecorded => {
-                    // the conflict is resolved without clause learning; the
-                    // variable may have become decidable or deterministic
-                    if !self.assignment.is_assigned(conflict.var) {
-                        self.requeue_determinacy_check(conflict.var);
+                    // The recorded case excludes a whole cube of universal
+                    // assignments, but on unsatisfiable instances with large
+                    // universal spaces case-carving alone diverges; clause
+                    // learning below keeps refutation progress. A conflict
+                    // at the root level would have been unanswerable, so the
+                    // case is only recorded on higher levels where learning
+                    // is possible.
+                    if self.trail.decision_level().is_root() {
+                        if !self.assignment.is_assigned(conflict.var) {
+                            self.requeue_determinacy_check(conflict.var);
+                        }
+                        return None;
                     }
-                    return None;
                 }
             }
         }
