@@ -26,6 +26,10 @@ struct Args {
     /// Restart the search on a Luby schedule.
     #[arg(long)]
     restarts: bool,
+
+    /// Verify the Skolem functions of a satisfiable result.
+    #[arg(long)]
+    certify: bool,
 }
 
 impl Args {
@@ -60,6 +64,14 @@ fn main() -> Result<SolverResult> {
 
     let result = solver.solve();
     println!("result status: {result}");
+    if args.certify && result == SolverResult::Satisfiable {
+        if solver.verify_skolem_functions() {
+            println!("certificate: valid");
+        } else {
+            println!("certificate: INVALID");
+            return Ok(SolverResult::Unknown);
+        }
+    }
 
     Ok(result)
 }

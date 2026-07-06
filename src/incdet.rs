@@ -27,6 +27,7 @@ use std::{
 };
 use tracing::{debug, error, info, trace};
 
+pub(crate) mod certify;
 pub(crate) mod conflict;
 pub(crate) mod determinacy;
 pub(crate) mod graph;
@@ -109,6 +110,9 @@ pub struct IncDet {
     conflict_check: ConflictCheck<ConflictSolver>,
     dec_lvls: VarVec<Option<DecLvl>>,
     vsids: Vsids,
+    /// number of matrix clauses present when solving started; clauses
+    /// beyond this index are learnt
+    original_clause_count: usize,
     /// set to true if the empty clause was added
     conflicted: bool,
     stats: Statistics,
@@ -354,6 +358,7 @@ impl IncDet {
     }
 
     fn _solve(&mut self) -> SolverResult {
+        self.original_clause_count = self.allocator.len();
         // the outermost scope may be an empty placeholder for free variables
         let blocks = self.prefix.iter().filter(|scope| !scope.variables.is_empty()).count();
         if blocks > 2 {

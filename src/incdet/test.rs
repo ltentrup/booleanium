@@ -14,6 +14,13 @@ mod fuzz {
         let mut solver = IncDet::from_qcnf(qcnf);
         let actual = solver.solve();
         prop_assert_eq!(actual, expected, "solver disagrees with oracle on instance:\n{}", qcnf);
+        if actual == crate::SolverResult::Satisfiable {
+            prop_assert!(
+                solver.verify_skolem_functions(),
+                "invalid Skolem functions for instance:\n{}",
+                qcnf
+            );
+        }
         Ok(())
     }
 
@@ -34,6 +41,14 @@ mod fuzz {
                         options,
                         qcnf
                     );
+                    if actual == crate::SolverResult::Satisfiable {
+                        prop_assert!(
+                            solver.verify_skolem_functions(),
+                            "invalid Skolem functions with {:?} for instance:\n{}",
+                            options,
+                            qcnf
+                        );
+                    }
                 }
             }
         }

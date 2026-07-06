@@ -16,9 +16,13 @@ impl Allocator {
         self.clauses.reserve(usize::try_from(num_clauses).unwrap());
     }
 
-    #[allow(unused)]
     pub(crate) fn len(&self) -> usize {
         self.clauses.len()
+    }
+
+    /// Iterates over the ids of all allocated clauses in allocation order.
+    pub(crate) fn ids(&self) -> impl Iterator<Item = ClauseId> {
+        (0..self.clauses.len()).map(ClauseId)
     }
 
     pub(crate) fn add(&mut self, clause: &[Lit]) -> ClauseId {

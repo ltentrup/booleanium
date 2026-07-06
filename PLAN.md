@@ -71,10 +71,16 @@ increasing order of ambition:
 
 ### 2. Certificates
 
-* **Skolem function extraction** for SAT results: the data is already there —
-  per-variable implication clauses plus decision defaults, in trail order.
-  Emit as AIGER or as a QDIMACS-model-like format, and verify in tests by
-  substituting into the matrix (a stronger oracle than result comparison).
+* **Skolem function verification — done**
+  (`IncDet::verify_skolem_functions`, CLI `--certify`): every assigned
+  variable has the uniform function "assigned polarity iff one of its
+  implication clauses fires", the trail provides a topological order, and
+  a SAT check refutes the existence of a universal assignment falsifying
+  the matrix under these functions. The differential fuzz harness verifies
+  the functions of every satisfiable result, and all satisfiable instances
+  of the CADET suite certify.
+* **Skolem function output**: emit the verified functions in a standard
+  format (AIGER) instead of only checking them internally.
 * **QRAT / clausal proofs** for UNSAT results: the `qrat` module (currently
   commented out in `lib.rs`) was started for this; learned clauses are
   resolvents, so logging them in order should yield checkable proofs.
