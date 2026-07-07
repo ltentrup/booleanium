@@ -101,6 +101,7 @@ impl IncDet {
     pub(crate) fn analyze(&mut self, conflict: &Conflict) -> Result<DecLvl, ()> {
         self.conflict_analysis.reset();
         self.vsids.bump(conflict.var);
+        self.clause_activity.decay();
 
         // start with the nucleus (-l, l)
         for implication in &self.graph[conflict.var.negative()] {
@@ -108,7 +109,7 @@ impl IncDet {
             if other.iter().any(|l| conflict.assignment.contains(l)) {
                 continue;
             }
-            // dbg!(implication);
+            self.clause_activity.bump(implication.clause);
             for &lit in other.iter().filter(filter_lit(conflict.var.negative())) {
                 self.conflict_analysis.add_literal(
                     &self.vars,
@@ -126,7 +127,7 @@ impl IncDet {
             if other.iter().any(|l| conflict.assignment.contains(l)) {
                 continue;
             }
-            // dbg!(implication);
+            self.clause_activity.bump(implication.clause);
             for &lit in other.iter().filter(filter_lit(conflict.var.positive())) {
                 self.conflict_analysis.add_literal(
                     &self.vars,
@@ -169,7 +170,7 @@ impl IncDet {
                     continue;
                 }
                 trace!("{lit} reason {reason}");
-                // dbg!(implication);
+                self.clause_activity.bump(implication.clause);
                 self.conflict_analysis.current_level_count -= 1;
                 self.conflict_analysis.clause.retain(|l| l.var() != lit.var());
                 for l in reason.iter().filter(filter_var(lit.var())) {

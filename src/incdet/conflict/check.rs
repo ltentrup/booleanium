@@ -68,10 +68,13 @@ impl<S: SatSolver> ConflictCheck<S> {
     }
 
     pub(crate) fn backtrack_to(&mut self, lvl: DecLvl) {
-        // backtracking to `lvl` means that we keep all entries with level <= `lvl`
-        self.assumptions.split_off(&lvl.successor()).values().for_each(|&assumption_lit| {
-            self.sat_solver.add_clause(&[!assumption_lit]);
-        });
+        // Backtracking to `lvl` keeps all entries with level <= `lvl`. The
+        // dropped guards are not retired with unit clauses: a re-populated
+        // level gets a fresh guard, so the dropped guards are never assumed
+        // again and their clauses stay inert until the next solver reboot
+        // sheds them (eager units would make the backend re-simplify its
+        // whole clause database on every backtrack).
+        self.assumptions.split_off(&lvl.successor());
     }
 
     fn add_definition_clause(&mut self, lvl: DecLvl, clause: &[S::Lit]) {

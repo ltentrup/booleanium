@@ -106,6 +106,17 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   (they are matrix-implied, so the universal player wins by picking the
   cube).
 
+  Such backtracks land below the case assumptions, so assumptions are
+  *sticky*: they stay committed until their case closes and are
+  re-assumed once propagation settles (abandoning a case would be
+  pointless anyway — the universal player chooses the case, so every
+  case must be won; a genuinely lost case surfaces as a global
+  refutation through the all-universal-clause rule or a root conflict).
+  Re-assuming also re-queues only the determinacy checks that can
+  actually change: the check is local to a variable's implication
+  clauses, so only variables whose implications mention the assumed
+  variable are affected.
+
 ### 1. Algorithm: beyond 2QBF
 
 `_solve` currently rejects prefixes with more than two blocks. Options, in
@@ -215,29 +226,46 @@ Remaining performance work:
   move watched literals; storing the two watched literals per clause would
   make this O(1). Not measurable on current benchmarks, worth revisiting
   with clause databases that have longer clauses.
-* **Clause database management — partially done**
+* **Clause database management — done**
   (`Options::clause_deletion`, default on): every 2000 learnt clauses the
-  longer half of those not currently registered as implications (tracked
-  by lock reference counts in the allocator) is deleted. No regression on
-  the benchmark suite, and long-running instances keep a bounded clause
-  database. The residual progressive slowdown on the two suite timeouts
-  lives in the *incremental conflict-check solver*, which cannot shed
-  retired clauses; this is now addressed by a periodic **solver reboot**
-  that rebuilds the incremental solver by replaying the trail definitions
-  (and CEGAR exclusions) every 4096 global checks. Remaining refinement:
-  activity/LBD-based deletion instead of length.
+  less active half of those not currently registered as implications
+  (tracked by lock reference counts in the allocator) is deleted. Clause
+  activities are bumped for every reason clause used during conflict
+  analysis with a geometric per-conflict decay (MiniSat-style); activity
+  ties are broken towards deleting longer clauses, which subsumes the
+  earlier length-based policy for never-used clauses. Bench-neutral
+  (within the run-to-run noise), and long-running instances keep a
+  bounded clause database. The residual progressive slowdown on the
+  suite timeouts lives in the *incremental conflict-check solver*, which
+  cannot shed retired clauses; this is addressed by a periodic **solver
+  reboot** that rebuilds the incremental solver by replaying the trail
+  definitions (and handled-case exclusions) every 512 global checks.
+* **Eager clause retirement removed — 2.4x on the benchmark suite**:
+  stack sampling on `adder2` showed two thirds of the time inside the
+  incremental conflict check, dominated by the backend's unit
+  simplification. Every check used to retire its per-check clauses with
+  a fresh unit clause, and every backtrack retired the dropped level
+  guards the same way — each unit making varisat re-simplify its whole
+  clause database. Both are now left inert behind their (never assumed
+  again) guards until the reboot sheds them, and single-implication
+  polarities skip the per-check clause entirely by passing the fire
+  arbiter as an assumption. Benchmark aggregate 1.2s → 0.5s; after this
+  the conflict check is genuinely solving-bound (the samples sit in the
+  backend's CDCL loop, no simplification overhead left).
 * **Benchmarking on real instances**: the solver is validated against the
   CADET integration-test suite (117 QDIMACS instances with known results):
   83 correct, 0 wrong, 0 panics, 1 timeout at 30s (`adder2.qdimacs`,
   UNSAT), 33 unsupported (more than one quantifier alternation).
-  `adder2` also resists the interleaved case splits: progress logging
-  shows the case assumptions never stack — conflicts whose learnt clause
-  bottoms out at root-assigned existentials must backtrack to the root
-  (see the case-split section), which prunes the assumption before a
-  second one can be made. The CADET-style refinement would be to keep the
-  case active and instead resolve such a clause against the functions of
-  its assigned existentials until it asserts something inside the case
-  (or refutes the case outright). Getting this suite to run also required QDIMACS
+  Case assumptions are kept **sticky** for `adder2`-style instances:
+  conflicts whose learnt clause bottoms out at root-assigned existentials
+  must backtrack to the root (see the case-split section), which used to
+  prune the assumption before a second one could stack. Assumptions are
+  now committed until their case closes and re-assumed once propagation
+  settles after such a backtrack — on `adder2` the case depth then grows
+  past 6 and multi-literal cubes actually close, but the instance still
+  times out: the domain of 96 universal inputs is too large to carve by
+  cases, and the refutation-by-learning path grinds at the conflict
+  rate discussed below. Getting this suite to run also required QDIMACS
   free-variable support and header tolerance. QBFEVAL 2QBF tracks would
   give a competitive comparison against CADET/DepQBF.
 * **The two timeout instances are search-bound**: stack sampling first
@@ -247,7 +275,12 @@ Remaining performance work:
   `cryptominisat` feature, and root-level definitions are now added as
   raw unguarded clauses so the backend can detect structure (both
   fuzz-validated; no regression for the default varisat backend). Neither
-  helped: progress logging shows `adder2` grinding at ~250 conflicts/s
+  helped, and a re-test after the eager-retirement removal (when the
+  check became solving-bound and the query pattern moved to assumptions)
+  confirmed the negative: CryptoMiniSat reaches ~6k conflicts per minute
+  on `adder2` against varisat's ~9k — the workload is many small
+  incremental queries, where per-solve overhead outweighs XOR reasoning.
+  Progress logging shows `adder2` grinding
   with only 209 of 515 variables initially deterministic — consistent
   with a one-sided (Plaisted–Greenbaum-style) clause encoding, where
   gate variables have implications in only one polarity and incremental
@@ -260,10 +293,13 @@ Remaining performance work:
   every determinacy check processes (the gap between 1024-conflict
   milestones grows 4s → 13s within 30s of solving), which makes
   **learnt-clause deletion** the highest-leverage remaining fix for these
-  instances.
-* **Conflict-check model reuse**: `Conflict::assignment` is a `HashSet<Lit>`
-  rebuilt per conflict; a `VarVec`-based assignment would avoid hashing in
-  the hot path of conflict analysis.
+  instances (since done, see above).
+* **Conflict-check model reuse — deprioritized by profile**:
+  `Conflict::assignment` is a `HashSet<Lit>` rebuilt per conflict. Stack
+  sampling after the eager-retirement removal shows the time in the
+  backend's CDCL loop, not in model extraction or hashing, so this
+  refactor would not be measurable; revisit only if a profile ever shows
+  it.
 
 ### 4. Robustness / cleanup
 

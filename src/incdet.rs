@@ -27,6 +27,7 @@ use std::{
 };
 use tracing::{debug, error, info, trace};
 
+pub(crate) mod activity;
 pub(crate) mod casesplit;
 pub(crate) mod cegar;
 pub(crate) mod certify;
@@ -143,6 +144,8 @@ pub struct IncDet {
     watches: WatchList,
     graph: ImplGraph,
     conflict_analysis: ConflictAnalysis,
+    /// activities of learnt clauses for the deletion policy
+    clause_activity: activity::ClauseActivity,
     conflict_check: ConflictCheck<ConflictSolver>,
     dec_lvls: VarVec<Option<DecLvl>>,
     vsids: Vsids,
@@ -736,23 +739,26 @@ impl IncDet {
         }
     }
 
-    /// Deletes the longer half of the learnt clauses that are neither
-    /// registered as implication clauses nor binary.
+    /// Deletes the less active half of the learnt clauses that are neither
+    /// registered as implication clauses nor binary (activity ties are
+    /// broken towards deleting longer clauses).
     fn reduce_learnts(&mut self) {
-        let mut candidates: Vec<ClauseId> = self
+        let mut candidates: Vec<(f64, usize, ClauseId)> = self
             .learnts
             .iter()
             .copied()
             .filter(|&cid| !self.allocator.is_locked(cid) && self.allocator[cid].lits().len() > 2)
+            .map(|cid| (self.clause_activity.get(cid), self.allocator[cid].lits().len(), cid))
             .collect();
-        candidates.sort_by_key(|&cid| std::cmp::Reverse(self.allocator[cid].lits().len()));
+        candidates.sort_by(|(a1, len1, _), (a2, len2, _)| a1.total_cmp(a2).then(len2.cmp(len1)));
         candidates.truncate(candidates.len() / 2);
         if candidates.is_empty() {
             return;
         }
-        let deleted: HashSet<ClauseId> = candidates.into_iter().collect();
+        let deleted: HashSet<ClauseId> = candidates.into_iter().map(|(_, _, cid)| cid).collect();
         for &cid in &deleted {
             self.allocator.delete(cid);
+            self.clause_activity.remove(cid);
         }
         self.learnts.retain(|cid| !deleted.contains(cid));
         self.clauses.retain(|cid| !deleted.contains(cid));
