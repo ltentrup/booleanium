@@ -114,7 +114,7 @@ const REDUCTION_INCREMENT: usize = 2000;
 
 /// Number of global conflict checks after which the incremental
 /// conflict-check solver is rebooted from the live state.
-const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 4096;
+const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 512;
 
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
@@ -438,6 +438,9 @@ impl IncDet {
             }
             if initial.take().is_some() {
                 info!("number of initial deterministic vars: {}", self.trail.len());
+            }
+            if self.options.case_splits && self.reassume_cases() {
+                continue;
             }
             if self.options.clause_deletion && self.learnts.len() >= next_reduction {
                 self.reduce_learnts();

@@ -131,7 +131,7 @@ impl<S: SatSolver> ConflictCheck<S> {
         self.sat_solver.add_clause(&encoded);
     }
 
-    fn solve(&mut self, incremental_var: S::Lit) -> Option<HashSet<Lit>> {
+    fn solve(&mut self, check_assumptions: &[S::Lit]) -> Option<HashSet<Lit>> {
         if !self
             .sat_solver
             .solve_with_assumptions(
@@ -139,7 +139,7 @@ impl<S: SatSolver> ConflictCheck<S> {
                     .assumptions
                     .values()
                     .copied()
-                    .chain(std::iter::once(incremental_var))
+                    .chain(check_assumptions.iter().copied())
                     .collect::<Vec<_>>(),
             )
             .unwrap()
@@ -293,20 +293,34 @@ impl IncDet {
     }
 
     fn is_conflicted_incremental(&mut self, var: Var) -> Option<HashSet<Lit>> {
-        let incremental_var = self.conflict_check.sat_solver.add_variable();
+        // The check asks for a model where both polarities fire: the firing
+        // condition of a polarity is a disjunction over the fire arbiters of
+        // its implications. A single arbiter is passed as an assumption
+        // directly; a larger disjunction needs a per-check guarded clause.
+        // Per-check clauses are *not* retired eagerly — a unit clause per
+        // check makes the backend re-simplify its whole clause database on
+        // every check — they stay inert behind the never-again-assumed
+        // guard until the next solver reboot sheds them.
+        let mut assumptions = Vec::new();
+        let mut guard = None;
         for lit in [Lit::positive(var), Lit::negative(var)] {
-            let mut build = vec![!incremental_var];
-            for cid in self.skolem[lit].implications() {
-                let arbiter = self.conflict_check.fire_arbiter(cid, lit, &self.allocator[cid]);
-                build.push(!arbiter);
+            let arbiters: Vec<_> = self.skolem[lit]
+                .implications()
+                .map(|cid| self.conflict_check.fire_arbiter(cid, lit, &self.allocator[cid]))
+                .collect();
+            if let [arbiter] = arbiters[..] {
+                assumptions.push(!arbiter);
+            } else {
+                let guard =
+                    *guard.get_or_insert_with(|| self.conflict_check.sat_solver.add_variable());
+                let mut build = vec![!guard];
+                build.extend(arbiters.into_iter().map(|arbiter| !arbiter));
+                self.conflict_check.sat_solver.add_clause(&build);
             }
-            self.conflict_check.sat_solver.add_clause(&build);
         }
+        assumptions.extend(guard);
         // if the formula is satisfiable, there is a conflict
-        let result = self.conflict_check.solve(incremental_var);
-        // permanently retire the per-check clauses
-        self.conflict_check.sat_solver.add_clause(&[!incremental_var]);
-        let result = result?;
+        let result = self.conflict_check.solve(&assumptions)?;
         let assign =
             result.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ");
         debug!("conflicting assignment: {}", assign);

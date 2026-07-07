@@ -70,6 +70,12 @@ pub(crate) struct CaseSplits {
     /// The active case assumptions with the decision level *below* each
     /// assumption (the level to backtrack to when closing).
     active: Vec<(Lit, DecLvl)>,
+    /// The assumptions committed until their case closes. Conflicts may
+    /// backtrack below an assumption and prune it from `active`; committed
+    /// assumptions are re-assumed once propagation settles, so cases stay
+    /// open across conflicts (they cannot be abandoned anyway: the
+    /// universal player chooses the case, so every case must be won).
+    committed: Vec<Lit>,
     /// SAT solver over the universal variables holding the negation of
     /// every handled cube; models witness the remaining domain.
     domain: Option<DomainSolver>,
@@ -138,8 +144,23 @@ impl IncDet {
         // in the domain model
         let value = model.get(&var).copied().unwrap_or(true);
         let lit = if value { Lit::positive(var) } else { Lit::negative(var) };
+        self.casesplits.committed.push(lit);
         self.assume_universal(lit);
         CaseAction::Assumed
+    }
+
+    /// Re-establishes the next committed case assumption that a conflict
+    /// backtrack pruned from the active list. Returns `true` if an
+    /// assumption was re-assumed (propagation must run before the next
+    /// one).
+    pub(crate) fn reassume_cases(&mut self) -> bool {
+        let Some(&lit) = self.casesplits.committed.get(self.casesplits.active.len()) else {
+            return false;
+        };
+        debug_assert!(!self.assignment.is_assigned(lit.var()));
+        self.stats.cases.reassumed += 1;
+        self.assume_universal(lit);
+        true
     }
 
     /// Assumes a universal literal: the variable becomes a constant at a
@@ -157,15 +178,25 @@ impl IncDet {
         self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
         self.conflict_check_assume(lit);
         self.casesplits.active.push((lit, below));
-        // determinacy may improve within the restricted domain
+        // Determinacy may improve within the restricted domain, but the
+        // determinacy check is local to a variable's implication clauses
+        // (simplified by constants), so only variables whose implications
+        // mention the assumed variable can change.
         for (var, data) in self.vars.iter() {
             if data.scope.is_some()
                 && data.is_existential(&self.prefix)
                 && !self.assignment.is_assigned(var)
             {
-                let implications =
-                    self.skolem[Lit::positive(var)].len() + self.skolem[Lit::negative(var)].len();
-                if implications > 0 {
+                let mentions_assumption = |l: Lit| {
+                    self.skolem[l]
+                        .implications()
+                        .any(|cid| self.allocator[cid].iter().any(|c| c.var() == lit.var()))
+                };
+                if mentions_assumption(Lit::positive(var))
+                    || mentions_assumption(Lit::negative(var))
+                {
+                    let implications = self.skolem[Lit::positive(var)].len()
+                        + self.skolem[Lit::negative(var)].len();
                     self.propagation.add_and_set(var, implications);
                 }
             }
@@ -188,6 +219,7 @@ impl IncDet {
         let functions = self.snapshot_functions();
         self.exclude_cube(&cube);
         self.handled_cases.push(HandledCase::Closed { cube, functions });
+        self.casesplits.committed.clear();
         self.backtrack_to(below);
         debug_assert!(self.casesplits.active.is_empty());
     }

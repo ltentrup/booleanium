@@ -17,6 +17,7 @@ pub(crate) struct CegarStats {
 #[derive(Debug, Default)]
 pub(crate) struct CaseStats {
     pub(crate) assumptions: u32,
+    pub(crate) reassumed: u32,
     pub(crate) closed: u32,
 }
 
