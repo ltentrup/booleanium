@@ -38,15 +38,20 @@ impl IncDet {
         for (region, case) in self.handled_cases.iter().enumerate() {
             let valid = match case {
                 HandledCase::Response { cube, response } => {
-                    // the constant response holds on the full cube: every
-                    // original clause needs a support among the cube and
-                    // response literals
-                    let supports: std::collections::HashSet<Lit> =
-                        cube.iter().chain(response.iter()).copied().collect();
-                    self.allocator
-                        .ids()
-                        .take(self.original_clause_count)
-                        .all(|cid| self.allocator[cid].iter().any(|l| supports.contains(l)))
+                    // the response constants cover the variables that were
+                    // not root-level assigned when the case was recorded;
+                    // the (permanent) root-level functions cover the rest,
+                    // and the cube constrains their outputs (frontier
+                    // literals)
+                    let exclude: std::collections::HashSet<crate::literal::Var> =
+                        response.iter().map(|l| l.var()).collect();
+                    let mut functions = self.snapshot_root_functions(&exclude);
+                    functions.extend(response.iter().map(|&lit| SnapshotFunction {
+                        lit,
+                        constant: true,
+                        implications: vec![],
+                    }));
+                    self.verify_region(&functions, cube, region)
                 }
                 HandledCase::Closed { cube, functions } => {
                     self.verify_region(functions, cube, region)

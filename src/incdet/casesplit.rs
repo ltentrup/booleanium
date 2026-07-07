@@ -250,13 +250,62 @@ impl IncDet {
         functions
     }
 
-    /// Records a cube as handled in every conflict-search structure.
+    /// Snapshots the Skolem functions of the root-level assigned
+    /// existential variables in trail order, excluding `exclude`. Used to
+    /// certify CEGAR responses: the response constants cover exactly the
+    /// variables that were not root-level assigned when the case was
+    /// recorded, and they override any function those variables acquired
+    /// later.
+    pub(crate) fn snapshot_root_functions(
+        &self,
+        exclude: &std::collections::HashSet<Var>,
+    ) -> Vec<SnapshotFunction> {
+        let mut functions = Vec::new();
+        for &lit in self.trail.iter() {
+            let var = lit.var();
+            if self.dec_lvls[var] != Some(DecLvl::ROOT) || exclude.contains(&var) {
+                continue;
+            }
+            let data = &self.vars[var];
+            if data.scope.is_some() && data.is_universal(&self.prefix) {
+                continue;
+            }
+            match self.assignment[var].expect("trail variables are assigned") {
+                Value::True | Value::False => {
+                    functions.push(SnapshotFunction { lit, constant: true, implications: vec![] });
+                }
+                Value::PositiveImplications | Value::NegativeImplications => {
+                    let implications = self.skolem[lit]
+                        .implications()
+                        .map(|cid| self.allocator[cid].lits().to_vec())
+                        .collect();
+                    functions.push(SnapshotFunction { lit, constant: false, implications });
+                }
+            }
+        }
+        functions
+    }
+
+    /// Records a cube as handled in every conflict-search structure. The
+    /// domain solver has no function definitions, so only all-universal
+    /// cubes are added there; skipping frontier cubes is conservative (the
+    /// domain solver then under-approximates the covered domain).
     pub(crate) fn exclude_cube(&mut self, cube: &[Lit]) {
         self.conflict_check_exclude_cube(cube);
+        if !self.cube_is_universal(cube) {
+            return;
+        }
         if let Some(domain) = &mut self.casesplits.domain {
             let excluded: Vec<_> = cube.iter().map(|&l| domain.0.lookup(!l)).collect();
             domain.0.add_clause(&excluded);
         }
+    }
+
+    fn cube_is_universal(&self, cube: &[Lit]) -> bool {
+        cube.iter().all(|l| {
+            let data = &self.vars[l.var()];
+            data.scope.is_some() && data.is_universal(&self.prefix)
+        })
     }
 
     fn ensure_domain_solver(&mut self) {
@@ -267,6 +316,9 @@ impl IncDet {
         let mut domain = LookupSolver::<Varisat>::default();
         domain.set_var_count(self.vars.get_var_count());
         for case in &self.handled_cases {
+            if !self.cube_is_universal(case.cube()) {
+                continue;
+            }
             let excluded: Vec<_> = case.cube().iter().map(|&l| domain.lookup(!l)).collect();
             domain.add_clause(&excluded);
         }

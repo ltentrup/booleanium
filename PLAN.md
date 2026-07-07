@@ -70,11 +70,35 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   178 universal variables (`stmt27rrr.qdimacs`), while the combination
   keeps both the pruning and the refutation progress. An effectiveness
   gate (exponential moving average of cube sizes) stops CEGAR rounds when
-  cubes degenerate, which happens on `adder2.qdimacs` — constant
-  responses do not generalize across carry chains. Effect on the hard
-  random benchmark instances: 10–300x faster (e.g. `random-12-90-330-4`
-  88s → 0.3s); the certified fuzz harness validates recorded cases in
-  every satisfiable result.
+  cubes degenerate. Effect on the hard random benchmark instances:
+  10–300x faster (e.g. `random-12-90-330-4` 88s → 0.3s); the certified
+  fuzz harness validates recorded cases in every satisfiable result.
+* **Frontier CEGAR — done** (the piece that solves `adder2.qdimacs`,
+  studied from CADET's `cegar.c`, which solves it with 120 conflicts in
+  0.1s — with case splits *off*): cubes over the universal inputs cannot
+  generalize across carry chains, so CEGAR used to degenerate on adder
+  circuits and the gate shut it down. Following CADET, everything is
+  rephrased in terms of the deterministic *frontier*: a clause is
+  *settled* if it is an implication clause of a root-level assigned
+  variable (the root functions satisfy it everywhere); the *frontier*
+  consists of the universal variables and root-level existential
+  variables occurring in unsettled clauses (35 variables on `adder2`
+  against 96 universal inputs). When the universal cube of a round
+  degenerates (above the effectiveness fraction), the response is
+  re-solved with the conflicting assignment's frontier values pinned and
+  generalized to a cube *over frontier literals* — a cube over derived
+  signals covers exponentially many inputs at once. Responses then only
+  need to cover the non-frontier variables; the root-level functions are
+  recorded implicitly, and certification verifies each recorded case as
+  a region (root functions plus response constants, SAT-checked) instead
+  of the earlier syntactic support check. Frontier cubes are excluded
+  from the conflict checks like any handled case (the check solver knows
+  the function definitions); the case-split domain solver only receives
+  all-universal cubes, which is conservative. The universal-cube path is
+  attempted first and kept when it generalizes, so the hard random
+  instances keep their old behavior (bench-neutral), while `adder2` goes
+  from a 30s+ timeout to 0.2s — the full supported CADET suite now
+  passes with **84 of 84 correct, no timeouts**.
 * **Interleaved case splits — done** (`Options::case_splits`, default on
   with a stall threshold of 5000 conflicts, CLI `--case-split-threshold`;
   replaces the v1 restart-from-scratch recursion): once the search
@@ -254,21 +278,18 @@ Remaining performance work:
   backend's CDCL loop, no simplification overhead left).
 * **Benchmarking on real instances**: the solver is validated against the
   CADET integration-test suite (117 QDIMACS instances with known results):
-  83 correct, 0 wrong, 0 panics, 1 timeout at 30s (`adder2.qdimacs`,
-  UNSAT), 33 unsupported (more than one quantifier alternation).
-  Case assumptions are kept **sticky** for `adder2`-style instances:
-  conflicts whose learnt clause bottoms out at root-assigned existentials
-  must backtrack to the root (see the case-split section), which used to
-  prune the assumption before a second one could stack. Assumptions are
-  now committed until their case closes and re-assumed once propagation
-  settles after such a backtrack — on `adder2` the case depth then grows
-  past 6 and multi-literal cubes actually close, but the instance still
-  times out: the domain of 96 universal inputs is too large to carve by
-  cases, and the refutation-by-learning path grinds at the conflict
-  rate discussed below. Getting this suite to run also required QDIMACS
-  free-variable support and header tolerance. QBFEVAL 2QBF tracks would
-  give a competitive comparison against CADET/DepQBF.
-* **The two timeout instances are search-bound**: stack sampling first
+  **84 correct, 0 wrong, 0 panics, 0 timeouts** at 30s since frontier
+  CEGAR (see above), 33 unsupported (more than one quantifier
+  alternation). Case assumptions are kept **sticky**: conflicts whose
+  learnt clause bottoms out at root-assigned existentials must backtrack
+  to the root (see the case-split section), which used to prune the
+  assumption before a second one could stack; assumptions are now
+  committed until their case closes and re-assumed once propagation
+  settles after such a backtrack. Getting this suite to run also required
+  QDIMACS free-variable support and header tolerance. QBFEVAL 2QBF tracks
+  would give a competitive comparison against CADET/DepQBF.
+* **The (former) timeout instances, and what actually fixed them**: stack
+  sampling first
   suggested XOR-hard conflict checks, so the optional CryptoMiniSat
   backend was made buildable (git binding plus C++14 flags in
   `.cargo/config.toml`), wired in as the conflict-check solver behind the
@@ -291,9 +312,15 @@ Remaining performance work:
   an order of magnitude. Progress logging further shows a **progressive
   slowdown** as learnt clauses accumulate in the implication sets that
   every determinacy check processes (the gap between 1024-conflict
-  milestones grows 4s → 13s within 30s of solving), which makes
-  **learnt-clause deletion** the highest-leverage remaining fix for these
-  instances (since done, see above).
+  milestones grows 4s → 13s within 30s of solving), which made
+  **learnt-clause deletion** look like the highest-leverage fix (since
+  done, see above). In the end none of the per-conflict work was the
+  answer for `adder2`: what CADET does differently is not searching
+  faster but searching *exponentially less*, via frontier CEGAR (see the
+  algorithm section) — a comparison run of CADET needs 120 conflicts
+  where the grind needed tens of thousands. The moral for future
+  bottlenecks: compare the *number* of conflicts against CADET before
+  optimizing their cost.
 * **Conflict-check model reuse — deprioritized by profile**:
   `Conflict::assignment` is a `HashSet<Lit>` rebuilt per conflict. Stack
   sampling after the eager-retirement removal shows the time in the
