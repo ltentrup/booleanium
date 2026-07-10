@@ -34,6 +34,7 @@ pub(crate) mod certify;
 pub(crate) mod conflict;
 pub(crate) mod determinacy;
 pub(crate) mod graph;
+pub mod model;
 pub(crate) mod propagation;
 pub(crate) mod skolem;
 pub(crate) mod stats;
@@ -419,6 +420,18 @@ impl IncDet {
                 }
             }
         }
+    }
+
+    /// The clauses learnt during solving, in DIMACS numbering. Learnt
+    /// clauses are resolvents of the matrix, so they remain valid for any
+    /// extension of the matrix (used by the incremental solver to carry
+    /// learning across solves).
+    #[must_use]
+    pub fn learnt_clauses(&self) -> Vec<Vec<i32>> {
+        self.learnts
+            .iter()
+            .map(|&cid| self.allocator[cid].lits().iter().map(|l| l.to_dimacs()).collect())
+            .collect()
     }
 
     /// Solves the QBF using incremental determinization.

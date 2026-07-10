@@ -60,7 +60,22 @@ adopted equivalent. For booleanium the natural contract is:
     push / pop / add-clause / add-definition / solve(assumptions)
       -> verdict + Skolem functions valid for the current stack
 
-Mapping onto the existing machinery, and what breaks:
+**Status: the baseline exists** (`src/incremental.rs`): an assertion
+stack of frames with `push`/`pop`/`add_clause`/`define_and`/`solve`/
+`solve_with_assumptions`, piecewise Skolem model extraction
+(`src/incdet/model.rs`, with a pointwise evaluator and SMT-LIB
+emission), and *learnt-clause carrying* as the incrementality
+mechanism: learnt clauses are resolvents of the matrix they were learnt
+under, so they stay valid for every extension; each is tagged with the
+stack depth it was learnt at and dropped when that depth pops.
+Assumptions are a temporary frame, so assumption-derived clauses are
+retracted automatically. Every solve currently rebuilds the core solver
+from the stack (plus carried clauses) — correct by construction, and
+validated by a differential proptest that runs random
+push/pop/add/solve sessions against the brute-force oracle, certifies
+every satisfiable answer, and evaluates the extracted model on every
+universal point against the matrix. The open work below is about
+*performance*, not the contract:
 
 * Decision levels and the guarded conflict-check clauses are already a
   push/pop mechanism (level-tagged implications, per-level assumption
@@ -81,11 +96,30 @@ Mapping onto the existing machinery, and what breaks:
   per case — the CEGAR response solver knows which clauses supported a
   cube.) This is the difference between "restart per query" and a truly
   incremental games loop.
+* Concretely next, in-place *monotone* continuation: between solves
+  that only added clauses, keep the live solver — retain the root
+  trail (root assignments stay forced under a superset matrix), learnt
+  clauses, and VSIDS, but invalidate handled cases and their
+  conflict-check exclusions (a recorded response need not satisfy new
+  clauses) and re-queue determinacy. The blocker is bookkeeping:
+  `original_clause_count` is a prefix index today and must become an
+  explicit set once originals arrive after learnt clauses; the
+  `_add_clause` load path assumes an unassigned world. Measure against
+  the carrying baseline on an unrolling workload before committing.
 
 ## RQ3 — SMT-LIB as the surface language
 
-Even restricted to the Boolean/BV fragment, SMT-LIB answers both format
-and interface at once:
+**Status: a Boolean-fragment frontend exists** (`src/smtlib.rs`,
+auto-detected by the CLI): `declare-const`/`declare-fun` (nullary
+Bool), `define-fun` as the definition-level input, assertions over
+`and`/`or`/`not`/`=>`/`=`/`xor`/`ite` with hash-consed Tseitin gates,
+`(assert (forall (...) (exists (...) body)))`, `push`/`pop`/
+`check-sat`/`check-sat-assuming`, and `get-model` printing the
+piecewise Skolem functions as `define-fun`s parameterized by the
+universal variables. Free constants are solved in the innermost block
+(truth-equivalent as long as they do not occur *under* a forall, which
+is rejected — that shape needs three blocks, see below). Remaining
+notes:
 
 * `define-fun` ↔ pre-determinized variable (RQ1's API, standardized);
   `push`/`pop`/`check-sat-assuming` ↔ RQ2; `get-model` returning
@@ -101,6 +135,18 @@ and interface at once:
 * Open question: how much of full Bool/BV ∀∃-SMT is reachable before
   theories (bit-blasting BV eagerly keeps everything Boolean but risks
   re-losing word-level structure — the same story one level up).
+* The emitted models are validated indirectly (the pointwise evaluator
+  they mirror is checked against the matrix exhaustively in the fuzz
+  harness); running an external SMT solver over `get-model` output as a
+  CI check would close the remaining gap, but no such solver is
+  available in this environment.
+* **The 3-block gap that matters for synthesis**: the natural bounded
+  synthesis shape is ∃ parameters ∀ inputs ∃ gates(determined), which
+  the 2QBF core rejects as three blocks even though the innermost block
+  is deterministic by construction. Supporting "∃∀∃ with a defined
+  third block" is the highest-value core extension for the SYNTCOMP
+  direction: the inner block never needs decisions, only
+  determinization — the machinery is arguably already there.
 
 ## RQ4 — Theories: lifting ID to ∃∀-SMT
 

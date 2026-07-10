@@ -197,6 +197,33 @@ increasing order of ambition:
   building block for two-player games — are collected in
   **`RESEARCH.md`**.
 
+### 1c. Incremental API and SMT-LIB frontend
+
+* **Incremental solving API — done, baseline** (`src/incremental.rs`):
+  an assertion stack of frames (`push`/`pop`/`add_clause`/`define_and`/
+  `solve`/`solve_with_assumptions`) over the ∀∃ core, with
+  *learnt-clause carrying* as the incrementality mechanism — learnt
+  clauses are resolvents of the matrix they were learnt under, tagged
+  with their stack depth and dropped when that depth pops. Piecewise
+  Skolem models are extracted from satisfiable results
+  (`src/incdet/model.rs`): a pointwise evaluator and an SMT-LIB
+  `define-fun` emitter over the region structure of the certificate.
+  Validated by a differential proptest running random
+  push/pop/add/solve sessions against the brute-force oracle,
+  certifying every satisfiable answer, and evaluating the model on
+  every universal point against the matrix (including with aggressive
+  case-split thresholds so closed-case regions are exercised).
+* **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
+  auto-detected by the CLI): declarations, `define-fun` definitions
+  (the definition-level input path), assertions over the usual Boolean
+  operators with hash-consed Tseitin gates, `(forall (…) (exists (…)))`
+  assertions, `push`/`pop`/`check-sat`/`check-sat-assuming`, and
+  `get-model` printing the Skolem functions as `define-fun`s
+  parameterized by the universal variables. Free constants under a
+  forall are rejected (three quantifier blocks); see `RESEARCH.md` for
+  the ∃∀∃-with-determined-inner-block extension that the SYNTCOMP
+  direction needs, and for the in-place incrementality upgrade path.
+
 ### 2. Certificates
 
 * **Skolem function verification — done**

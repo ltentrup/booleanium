@@ -19,8 +19,10 @@ pub mod qdimacs;
 pub mod cli;
 mod datastructure;
 pub mod incdet;
+pub mod incremental;
 mod quantifier;
 mod sat;
+pub mod smtlib;
 
 // Re-export
 pub use quantifier::QuantTy;

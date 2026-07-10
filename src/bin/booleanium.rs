@@ -2,7 +2,7 @@ use booleanium::{
     aiger,
     incdet::{IncDet, Options},
     qdimacs::{ExtendedParseError, QdimacsParser},
-    SolverResult,
+    smtlib, SolverResult,
 };
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
@@ -78,6 +78,14 @@ fn main() -> Result<SolverResult> {
             buffer
         }
     };
+    let first = contents.iter().find(|c| !c.is_ascii_whitespace()).copied();
+    if first == Some(b'(') || first == Some(b';') {
+        // SMT-LIB script input
+        let text = std::str::from_utf8(&contents).into_diagnostic()?;
+        let mut frontend = smtlib::Frontend::new(args.options());
+        print!("{}", frontend.run(text));
+        return Ok(frontend.last_result().unwrap_or(SolverResult::Unknown));
+    }
     let mut solver = IncDet::with_options(args.options());
     if contents.starts_with(b"aag ") {
         // ASCII AIGER circuit input (QAIGER convention)
