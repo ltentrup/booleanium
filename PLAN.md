@@ -335,6 +335,42 @@ Remaining performance work:
   accepted against the aggregate win). CADET's Jeroslow-Wang phase
   (active only after 3 restarts) was inspected but not adopted; its
   pre-restart constant default-true is what solves most of its suite.
+* **QBFEVAL'17 2QBF track evaluation** (385 competition instances, up to
+  2.5M clauses; corpus mirrored in the `arey0pushpa/synthetic_qbf_formulas`
+  GitHub repository — qbflib.org is offline and the JKU mirror is outside
+  this environment's network policy): at a 10s timeout on 4 cores,
+  booleanium solves 134 of 384, a locally built CADET 207. **Zero verdict
+  disagreements** on the 119+ instances both solve, and zero abnormal
+  exits — real-instance differential evidence on top of the fuzzing.
+  Eleven instances are solved by booleanium but not CADET. The gap is
+  concentrated in families: `stmt` (38 CADET-only before the pure-literal
+  rule below), `sortnetsort` (9), `rankfunc` (8), and the `*-fixpoint`
+  families.
+* **Pure-literal rule — done** (motivated by the `stmt` family: CADET
+  solves `stmt27_93_98` in 44ms with 280 pure variables cascading into
+  1679 constant propagations and an interface of *three* variables): a
+  literal is pure if every original clause containing it is either
+  registered as one of its own implication clauses or satisfied by a
+  constant; the variable can then take the minimal function "literal iff
+  one of its implications fires" without loss (clauses of the pure
+  literal are satisfied by construction, every other clause profits from
+  the opposite literal holding maximally, and any winning strategy can be
+  rewritten accordingly). With no implications at all this is the classic
+  pure-literal rule and yields a *constant*, which cascades. Purity is
+  re-checked event-driven (implication registered, clause satisfied by a
+  constant, assignments unwound) via static occurrence lists, and pure
+  assignments take precedence over decisions. The certified fuzz harness
+  caught one soundness bug during development — backtracking fed unwound
+  *universal* case assumptions into the pure queue, and the rule assigned
+  a universal as a constant. Results: `stmt27_93_98` timeout → 1.5s,
+  `stmt53_296_346` timeout → 4s, five `sortnetsort` instances unlocked
+  (previously all CADET-only); net +4 on the QBFEVAL'17 track at 10s
+  (130 → 134) with a few marginal instances shuffling across the timeout
+  cliff in both directions, and no change on the CADET suite (84 of 84
+  certified) or the random benchmarks. Remaining refinement: CADET's
+  *enhanced* purity (disregarding clauses that are blocked by the
+  literal), which its stats suggest is what carries the remaining `stmt`
+  stragglers.
 * **The (former) timeout instances, and what actually fixed them**: stack
   sampling first
   suggested XOR-hard conflict checks, so the optional CryptoMiniSat

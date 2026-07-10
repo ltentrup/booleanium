@@ -14,7 +14,7 @@ use self::{
 };
 use crate::{
     clause::alloc::{Allocator, ClauseId},
-    datastructure::{heap::VarHeap, VarVec},
+    datastructure::{heap::VarHeap, LitVec, VarVec},
     incdet::graph::Impl,
     literal::{filter_var, Lit, LitSlice, Var},
     qdimacs::FromQdimacs,
@@ -152,6 +152,14 @@ pub struct IncDet {
     /// number of matrix clauses present when solving started; clauses
     /// beyond this index are learnt
     original_clause_count: usize,
+    /// for every literal, the original clauses containing it (static; used
+    /// by the pure-literal rule)
+    occurrences: LitVec<Vec<ClauseId>>,
+    /// variables whose clauses changed state (an implication was
+    /// registered, or a constant satisfied a clause), queued for a
+    /// pure-literal check
+    pure_queue: VecDeque<Var>,
+    pure_queued: HashSet<Var>,
     /// learnt clauses that are candidates for deletion
     learnts: Vec<ClauseId>,
     /// state of the CEGAR extension
@@ -185,6 +193,16 @@ struct Scope {
 pub(crate) struct Conflict {
     var: Var,
     assignment: HashSet<Lit>,
+}
+
+/// Result of one pure-literal propagation step.
+enum PureStep {
+    /// No pure literal in the queue.
+    Nothing,
+    /// A pure literal was assigned.
+    Progress,
+    /// The pure candidate is conflicted.
+    Conflict(Conflict),
 }
 
 impl FromQdimacs for IncDet {
@@ -238,6 +256,7 @@ impl IncDet {
         self.watches.set_var_count(count);
         self.graph.set_var_count(count);
         self.dec_lvls.set_var_count(count);
+        self.occurrences.set_var_count(count);
         self.vsids.set_var_count(count);
         self.conflict_check.set_var_count(count);
         self.propagation.set_var_count(count);
@@ -411,8 +430,24 @@ impl IncDet {
         result
     }
 
+    // the main solver loop reads best as one piece
+    #[allow(clippy::too_many_lines)]
     fn _solve(&mut self) -> SolverResult {
         self.original_clause_count = self.allocator.len();
+        for cid in self.allocator.ids().take(self.original_clause_count) {
+            for &lit in self.allocator[cid].iter() {
+                self.occurrences[lit].push(cid);
+            }
+        }
+        let candidates: Vec<Var> = self
+            .vars
+            .iter()
+            .filter(|(_, data)| data.scope.is_some() && data.is_existential(&self.prefix))
+            .map(|(var, _)| var)
+            .collect();
+        for var in candidates {
+            self.queue_pure_check(var);
+        }
         // the outermost scope may be an empty placeholder for free variables
         let blocks = self.prefix.iter().filter(|scope| !scope.variables.is_empty()).count();
         if blocks > 2 {
@@ -478,6 +513,20 @@ impl IncDet {
                 self.backtrack_to(DecLvl::ROOT);
                 continue;
             }
+            // Pure literals are assigned before decisions: their minimal
+            // function is optimal, so assigning it loses nothing (see
+            // `pure_literal`).
+            match self.pure_literal_step() {
+                PureStep::Progress => continue,
+                PureStep::Conflict(conflict) => {
+                    if let Some(result) = self.resolve_conflict(&conflict) {
+                        return result;
+                    }
+                    conflicts_since_restart += 1;
+                    continue;
+                }
+                PureStep::Nothing => {}
+            }
             let Some(var) = self.next_decision_variable() else {
                 if self.casesplits_active() {
                     // all existential variables are assigned within the
@@ -489,6 +538,7 @@ impl IncDet {
             };
             self.stats.global.decisions += 1;
             assert!(!self.assignment.is_assigned(var));
+
             // Note: deciding the polarity with the *non-empty* implication
             // set when the other side is empty (a "one-sided function rule"
             // yielding the natural gate function of one-sidedly encoded
@@ -554,6 +604,80 @@ impl IncDet {
 
     pub(crate) fn next_decision_variable(&self) -> Option<Var> {
         self.vsids.peek()
+    }
+
+    fn queue_pure_check(&mut self, var: Var) {
+        if self.pure_queued.insert(var) {
+            self.pure_queue.push_back(var);
+        }
+    }
+
+    /// Pops pure-check candidates until one is pure, returning its pure
+    /// literal.
+    fn pop_pure_literal(&mut self) -> Option<(Var, Lit)> {
+        while let Some(var) = self.pure_queue.pop_front() {
+            self.pure_queued.remove(&var);
+            if self.assignment.is_assigned(var) {
+                continue;
+            }
+            let data = &self.vars[var];
+            debug_assert!(data.scope.is_some() && data.is_existential(&self.prefix));
+            if data.scope.is_none() || data.is_universal(&self.prefix) {
+                continue;
+            }
+            if let Some(lit) = self.pure_literal(var) {
+                return Some((var, lit));
+            }
+        }
+        None
+    }
+
+    /// Assigns the next pure literal from the queue, if any.
+    fn pure_literal_step(&mut self) -> PureStep {
+        let Some((var, lit)) = self.pop_pure_literal() else {
+            return PureStep::Nothing;
+        };
+        self.stats.skolem.pure_vars += 1;
+        if self.skolem[lit].len() == 0 {
+            // no implications at all: the function is the constant ¬lit
+            // (the classic pure-literal rule), which cascades through the
+            // constant propagation
+            match self.propagate_constant(!lit) {
+                Some(conflict) => PureStep::Conflict(conflict),
+                None => PureStep::Progress,
+            }
+        } else if let Some(assignment) = self.is_conflicted(var) {
+            trace!("pure {} is conflicted", var);
+            PureStep::Conflict(Conflict { var, assignment })
+        } else {
+            trace!("assigning pure literal {lit}");
+            self.assign_and_propagate(lit, true, false);
+            PureStep::Progress
+        }
+    }
+
+    /// The pure-literal rule: `lit` is pure if every original clause
+    /// containing it is either registered as an implication clause for
+    /// `lit` or satisfied by a constant. The variable can then take the
+    /// minimal function "lit iff one of its implications fires" without
+    /// loss: the clauses containing `lit` are satisfied by construction,
+    /// every other clause profits from `¬lit` holding as often as
+    /// possible, and clauses without the variable are unaffected — any
+    /// winning strategy can be rewritten to this function.
+    fn pure_literal(&self, var: Var) -> Option<Lit> {
+        for lit in [Lit::positive(var), Lit::negative(var)] {
+            let implications: HashSet<ClauseId> = self.skolem[lit].implications().collect();
+            let pure = self.occurrences[lit].iter().all(|&cid| {
+                implications.contains(&cid)
+                    || self.allocator[cid]
+                        .iter()
+                        .any(|&l| self.assignment.constant_value(l) == Some(true))
+            });
+            if pure {
+                return Some(lit);
+            }
+        }
+        None
     }
 
     fn propagate(&mut self) -> Option<Conflict> {
@@ -628,6 +752,22 @@ impl IncDet {
             return Some(Conflict { var, assignment });
         }
         self.assign_and_propagate(lit, false, true);
+        // the clauses satisfied by the constant no longer block purity of
+        // their other variables
+        for idx in 0..self.occurrences[lit].len() {
+            let cid = self.occurrences[lit][idx];
+            for i in 0..self.allocator[cid].lits().len() {
+                let other = self.allocator[cid].lits()[i].var();
+                let data = &self.vars[other];
+                if data.scope.is_some()
+                    && data.is_existential(&self.prefix)
+                    && !self.assignment.is_assigned(other)
+                    && self.pure_queued.insert(other)
+                {
+                    self.pure_queue.push_back(other);
+                }
+            }
+        }
         None
     }
 
@@ -708,6 +848,9 @@ impl IncDet {
                     self.constant_propagation.push_back(lit);
                 }
                 self.skolem[lit].add_implication(watch.clause, self.trail.decision_level());
+                if self.pure_queued.insert(lit.var()) {
+                    self.pure_queue.push_back(lit.var());
+                }
                 locked.push(watch.clause);
                 self.propagation
                     .add_and_set(lit.var(), self.skolem[lit].len() + self.skolem[!lit].len());
@@ -745,9 +888,14 @@ impl IncDet {
         self.graph.backtrack_to(lvl);
         self.conflict_check.backtrack_to(lvl);
         // Unassigned variables that still have implication clauses may still
-        // be uniquely determined, so their determinacy checks are re-queued.
+        // be uniquely determined, so their determinacy checks are re-queued;
+        // they are also pure-literal candidates again.
         for var in unassigned {
             self.requeue_determinacy_check(var);
+            let data = &self.vars[var];
+            if data.scope.is_some() && data.is_existential(&self.prefix) {
+                self.queue_pure_check(var);
+            }
         }
     }
 

@@ -33,6 +33,7 @@ pub(crate) struct GlobalStats {
 
 #[derive(Debug, Default)]
 pub(crate) struct SkolemStats {
+    pub(crate) pure_vars: u32,
     pub(crate) local_det_checks: u32,
     pub(crate) local_conflict_checks: u32,
     pub(crate) global_conflict_checks: u32,
