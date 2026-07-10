@@ -178,6 +178,25 @@ increasing order of ambition:
   reduction with respect to scopes (the `_add_clause` reduction already
   handles part of this).
 
+### 1b. Input languages
+
+* **QAIGER (circuit) input — done** (`src/aiger.rs`, auto-detected by
+  the `aag` header): 2QBF instances given as combinational AIGER
+  circuits, following CADET's convention (inputs named with the prefix
+  `"2 "` are controllable/existential, other inputs and latches are
+  universal, gates become existential variables with two-sided Tseitin
+  definitions, the output is asserted). This is the definition-level
+  input path: nothing is lost to one-sided CNF encodings, and the
+  effect is drastic — `beem.qaig` (18k gates) solves with zero
+  decisions and one conflict, and all nine QAIGER instances of the
+  CADET suite solve in ≤ 0.8s, certified, raising the suite to **93 of
+  93 supported instances correct**. Validated additionally by a
+  differential proptest over random circuits against the brute-force
+  oracle. The larger questions this opens — QCIR, an incremental
+  (QIPASIR-style or SMT-LIB) interface, theories, and positioning as a
+  building block for two-player games — are collected in
+  **`RESEARCH.md`**.
+
 ### 2. Certificates
 
 * **Skolem function verification — done**

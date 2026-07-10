@@ -1,4 +1,5 @@
 use booleanium::{
+    aiger,
     incdet::{IncDet, Options},
     qdimacs::{ExtendedParseError, QdimacsParser},
     SolverResult,
@@ -11,7 +12,8 @@ use std::{io::Cursor, io::Read, path::PathBuf};
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Path to a QDIMACS file; reads from stdin if omitted.
+    /// Path to a QDIMACS or ASCII AIGER (QAIGER) file; reads from stdin
+    /// if omitted.
     file: Option<PathBuf>,
 
     /// Disable eager propagation of constant Skolem functions.
@@ -76,11 +78,17 @@ fn main() -> Result<SolverResult> {
             buffer
         }
     };
-    let reader = Cursor::new(&contents);
-
     let mut solver = IncDet::with_options(args.options());
-    if let Err(err) = QdimacsParser::new(reader).parse_into(&mut solver) {
-        Err(ExtendedParseError { source_code: contents, related: vec![err] })?;
+    if contents.starts_with(b"aag ") {
+        // ASCII AIGER circuit input (QAIGER convention)
+        let text = std::str::from_utf8(&contents).into_diagnostic()?;
+        let qcnf = aiger::parse_qaiger(text).into_diagnostic()?;
+        solver = IncDet::from_qcnf_with_options(&qcnf, args.options());
+    } else {
+        let reader = Cursor::new(&contents);
+        if let Err(err) = QdimacsParser::new(reader).parse_into(&mut solver) {
+            Err(ExtendedParseError { source_code: contents, related: vec![err] })?;
+        }
     }
 
     let result = solver.solve();

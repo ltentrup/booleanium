@@ -9,6 +9,7 @@ use std::{
     process::{ExitCode, Termination},
 };
 
+pub mod aiger;
 #[macro_use]
 pub mod qcnf;
 mod clause;
