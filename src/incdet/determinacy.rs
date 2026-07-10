@@ -22,10 +22,24 @@ use tracing::trace;
 /// back to a real SAT solver.
 const DPLL_BUDGET: u32 = 10_000;
 
+/// Result of the determinacy check.
+pub(crate) enum Determinacy {
+    /// An implication of the literal fires unconditionally: the variable
+    /// has the constant Skolem function of the literal's polarity.
+    /// Constants cascade — they satisfy and shorten clauses in every
+    /// downstream check — so they are propagated as constants instead of
+    /// generic deterministic functions.
+    Constant(Lit),
+    /// The implications force a unique value under every assignment.
+    Deterministic,
+    /// The variable is not determined by its implications.
+    Undetermined,
+}
+
 impl IncDet {
     /// Checks whether the implication clauses of `var` force a unique value
     /// under every assignment of the remaining variables.
-    pub(crate) fn has_unique_consequence(&mut self, var: Var) -> bool {
+    pub(crate) fn has_unique_consequence(&mut self, var: Var) -> Determinacy {
         self.stats.skolem.local_det_checks += 1;
         // collect the implication clauses without `var`, simplified by the
         // constant assignments
@@ -49,20 +63,25 @@ impl IncDet {
                     .collect();
                 if simplified.is_empty() {
                     // the implication fires unconditionally
-                    return true;
+                    return Determinacy::Constant(lit);
                 }
                 clauses.push(simplified);
             }
         }
         if clauses.is_empty() {
-            return false;
+            return Determinacy::Undetermined;
         }
         let mut budget = DPLL_BUDGET;
-        if let Some(satisfiable) = dpll(clauses.clone(), &mut budget) {
+        let deterministic = if let Some(satisfiable) = dpll(clauses.clone(), &mut budget) {
             !satisfiable
         } else {
             trace!("determinacy check for {var} exceeded the DPLL budget");
             !solve_with_sat_solver::<Varisat>(&clauses)
+        };
+        if deterministic {
+            Determinacy::Deterministic
+        } else {
+            Determinacy::Undetermined
         }
     }
 }

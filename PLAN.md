@@ -99,6 +99,27 @@ Determinization for 2QBF", Rabe, Tentrup, Rasmussen, Seshia)
   instances keep their old behavior (bench-neutral), while `adder2` goes
   from a 30s+ timeout to 0.2s — the full supported CADET suite now
   passes with **84 of 84 correct, no timeouts**.
+
+  Certifying the *real* suite instances (the runner now passes
+  `--certify`; the fuzz harness alone had missed this for 280k cases)
+  exposed one soundness bug in the frontier-case certificates: the
+  response used to cover the variables outside the *interface*, but a
+  variable that is root-level assigned with all its clauses settled is
+  outside the interface too, and overriding its load-bearing function
+  with a response constant broke its settled clauses elsewhere in the
+  region (`bug10rr.qdimacs`). The response now covers exactly the
+  variables that were not root-level assigned when the response solver
+  was built. Two follow-up experiments were rejected by measurement:
+  carving *multiple* cases per conflict before learning (CADET does up
+  to 50 rounds per learnt clause) made the suite an order of magnitude
+  slower — without interleaved learning, near-identical cubes flood the
+  conflict check with exclusion clauses; and flipping the decision
+  polarity to CADET's default-true convention timed `bug10rr` out
+  entirely. The CEGAR response query now sorts its assumptions: the
+  backend's search is sensitive to assumption order, and feeding it an
+  unordered set made whole-suite runs a lottery (the same binary
+  fluctuated between 0.7s and 99s on the random benchmarks; runs are
+  deterministic now).
 * **Interleaved case splits — done** (`Options::case_splits`, default on
   with a stall threshold of 5000 conflicts, CLI `--case-split-threshold`;
   replaces the v1 restart-from-scratch recursion): once the search
@@ -287,7 +308,17 @@ Remaining performance work:
   committed until their case closes and re-assumed once propagation
   settles after such a backtrack. Getting this suite to run also required
   QDIMACS free-variable support and header tolerance. QBFEVAL 2QBF tracks
-  would give a competitive comparison against CADET/DepQBF.
+  would give a competitive comparison against CADET/DepQBF. A direct
+  per-instance timing comparison against a locally built CADET over the
+  suite: 4.2s vs 1.3s aggregate (same order of magnitude, no outliers
+  beyond `bug10rr.qdimacs` at 722ms vs 21ms — there CADET finishes with
+  147 decisions and a single conflict where booleanium needs 441
+  CEGAR cases; initial propagation is identical, so the gap is decision
+  heuristics, an accepted trade-off after the rejected experiments
+  above). Unconditionally firing implications found by the determinacy
+  check are now propagated as *constants* rather than generic functions,
+  so they cascade (satisfy and shorten clauses) in every downstream
+  check.
 * **The (former) timeout instances, and what actually fixed them**: stack
   sampling first
   suggested XOR-hard conflict checks, so the optional CryptoMiniSat

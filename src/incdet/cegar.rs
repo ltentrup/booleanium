@@ -47,7 +47,7 @@ use crate::{
     SolverResult,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
 /// Weight of the newest cube size in the exponential moving average.
 const CUBE_SIZE_EMA_WEIGHT: f64 = 0.1;
@@ -91,17 +91,19 @@ struct ExistsSolver {
     /// The frontier: universal and root-level assigned existential
     /// variables occurring in the unsettled clauses.
     interface: Vec<Var>,
-    /// The frontier as a set, for classifying response variables. The
-    /// response must cover exactly the variables outside *this* frontier
-    /// (not the current root level): the solver may be stale, and a
-    /// variable that was root-assigned after the last rebuild is treated
-    /// as a response variable whose constant overrides its function.
-    interface_set: HashSet<Var>,
+    /// The variables that were root-level assigned when the solver was
+    /// built. A frontier-cube response must cover exactly the variables
+    /// outside this set: root-level functions are recorded implicitly —
+    /// including those of settled-only variables outside the interface,
+    /// whose functions still carry their settled clauses — while a
+    /// variable root-assigned after the last rebuild is treated as a
+    /// response variable whose constant overrides its later function.
+    root_vars: HashSet<Var>,
     /// Number of root-level assignments when the solver was built; the
     /// solver is rebuilt when the root level has grown substantially since
     /// (root assignments are permanent, so it never shrinks). Rebuilding
     /// on every growth is wasted work on instances that backtrack to the
-    /// root frequently; a stale frontier stays sound via `interface_set`.
+    /// root frequently; a stale frontier stays sound via `root_vars`.
     root_assignments: usize,
     /// Number of universal variables of the instance.
     universal_count: usize,
@@ -124,6 +126,11 @@ pub(crate) enum CegarOutcome {
 
 impl IncDet {
     /// Resolves a conflict either by a CEGAR round or by clause learning.
+    /// Carving several cases per conflict before learning (as CADET does,
+    /// up to 50 rounds per learnt clause) was tried and made everything
+    /// worse by an order of magnitude — without the interleaved learning,
+    /// near-identical cubes flood the conflict check with exclusion
+    /// clauses.
     pub(crate) fn resolve_conflict(&mut self, conflict: &Conflict) -> Option<SolverResult> {
         if self.options.cegar && self.cegar_worthwhile() {
             match self.cegar_round(&conflict.assignment) {
@@ -182,15 +189,19 @@ impl IncDet {
         let exists = self.cegar.solver.as_mut().expect("solver was just created");
 
         // ask for an existential response to the universal part of the
-        // conflicting assignment
-        let assumptions: Vec<_> = conflicting
+        // conflicting assignment (sorted: the backend's search is sensitive
+        // to the assumption order, and the conflicting assignment is an
+        // unordered set)
+        let mut universal_part: Vec<Lit> = conflicting
             .iter()
             .filter(|l| {
                 let data = &self.vars[l.var()];
                 data.scope.is_some() && data.is_universal(&self.prefix)
             })
-            .map(|&l| exists.solver.lookup(l))
+            .copied()
             .collect();
+        universal_part.sort_unstable();
+        let assumptions: Vec<_> = universal_part.iter().map(|&l| exists.solver.lookup(l)).collect();
         if !exists.solver.solve_with_assumptions(&assumptions).unwrap() {
             return CegarOutcome::Unsatisfiable;
         }
@@ -234,7 +245,7 @@ impl IncDet {
             frontier = frontier_cube.len() < universal_cube.len();
             cube = if frontier { frontier_cube } else { universal_cube };
         }
-        trace!(
+        debug!(
             "CEGAR {} cube: {:?}",
             if frontier { "frontier" } else { "universal" },
             cube.iter().map(ToString::to_string).collect::<Vec<_>>()
@@ -257,7 +268,7 @@ impl IncDet {
                 let data = &self.vars[l.var()];
                 data.scope.is_some()
                     && data.is_existential(&self.prefix)
-                    && (!frontier || !exists.interface_set.contains(&l.var()))
+                    && (!frontier || !exists.root_vars.contains(&l.var()))
             })
             .copied()
             .collect();
@@ -358,8 +369,13 @@ impl IncDet {
     /// the full matrix, together with the frontier and the occurrence
     /// lists used for cube minimization.
     fn ensure_exists_solver(&mut self) {
-        let root_assignments =
-            self.trail.iter().filter(|l| self.dec_lvls[l.var()] == Some(DecLvl::ROOT)).count();
+        let root_vars: HashSet<Var> = self
+            .trail
+            .iter()
+            .filter(|l| self.dec_lvls[l.var()] == Some(DecLvl::ROOT))
+            .map(|l| l.var())
+            .collect();
+        let root_assignments = root_vars.len();
         if let Some(exists) = &self.cegar.solver {
             if root_assignments < exists.root_assignments + REBUILD_ROOT_GROWTH {
                 return;
@@ -425,14 +441,13 @@ impl IncDet {
             unsettled.len(),
             self.original_clause_count
         );
-        let interface_set: HashSet<Var> = interface.iter().copied().collect();
         self.cegar.solver = Some(ExistsSolver {
             solver,
             unsettled,
             occurrences,
             universal_occurrences,
             interface: interface.into_iter().collect(),
-            interface_set,
+            root_vars,
             root_assignments,
             universal_count,
         });

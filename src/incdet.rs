@@ -559,9 +559,19 @@ impl IncDet {
             if self.assignment.is_assigned(var) {
                 continue;
             }
-            if !self.has_unique_consequence(var) {
-                debug_assert!(!self.propagation.contained(var));
-                continue;
+            match self.has_unique_consequence(var) {
+                determinacy::Determinacy::Undetermined => {
+                    debug_assert!(!self.propagation.contained(var));
+                    continue;
+                }
+                determinacy::Determinacy::Constant(lit) => {
+                    trace!("{} is forced constant", var);
+                    if let Some(conflict) = self.propagate_constant(lit) {
+                        return Some(conflict);
+                    }
+                    continue;
+                }
+                determinacy::Determinacy::Deterministic => {}
             }
             trace!("{} has unique consquence", var);
             if let Some(assignment) = self.is_conflicted(var) {

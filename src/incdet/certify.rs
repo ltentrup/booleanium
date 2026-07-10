@@ -135,6 +135,15 @@ impl IncDet {
                     let clause = &self.allocator[cid];
                     if clause.iter().all(|l| assignment.contains(&!*l)) {
                         debug!("falsified original clause: {clause}");
+                        for &l in clause.iter() {
+                            let covered = functions.iter().find(|f| f.lit.var() == l.var());
+                            debug!(
+                                "  var {} dec_lvl={:?} function={:?}",
+                                l.var(),
+                                self.dec_lvls[l.var()],
+                                covered.map(|f| (f.lit, f.constant, f.implications.len()))
+                            );
+                        }
                     }
                 }
                 let lits: Vec<String> = assignment.iter().map(ToString::to_string).collect();
