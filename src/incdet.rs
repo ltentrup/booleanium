@@ -495,11 +495,23 @@ impl IncDet {
             // circuits) was benchmarked and rejected: it did not help the
             // circuit instances and slowed random instances by an order of
             // magnitude.
-            let neg_count = self.skolem[Lit::negative(var)].lit_count(&self.allocator);
-            let pos_count = self.skolem[Lit::positive(var)].lit_count(&self.allocator);
-            let decision =
-                if neg_count <= pos_count { Lit::negative(var) } else { Lit::positive(var) };
-            trace!("decide {decision} (neg: {neg_count}, pos: {pos_count} implication literals)");
+            // Phase choice: follow the most recently recorded CEGAR
+            // response where it assigns the variable (the response is a
+            // winning move for the current search region, so deciding
+            // consistently with it avoids re-conflicting there), and
+            // default the variable to true otherwise. The trail literal is
+            // the *negation* of the intended default: a decided literal
+            // holds only when one of its implications fires. Measured
+            // alternatives (each worse in suite aggregate): the structural
+            // rule alone (assign the side with fewer implication literals
+            // — the previous default, 1.6x slower), the structural rule as
+            // the fallback instead of default-true, default-true alone,
+            // and gating the response phase on implication counts.
+            let decision = match self.cegar.response_phase(var) {
+                Some(false) => Lit::positive(var),
+                Some(true) | None => Lit::negative(var),
+            };
+            trace!("decide {decision}");
             // check if the decision leads to a conflict
             if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);

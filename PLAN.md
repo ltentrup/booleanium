@@ -310,15 +310,31 @@ Remaining performance work:
   QDIMACS free-variable support and header tolerance. QBFEVAL 2QBF tracks
   would give a competitive comparison against CADET/DepQBF. A direct
   per-instance timing comparison against a locally built CADET over the
-  suite: 4.2s vs 1.3s aggregate (same order of magnitude, no outliers
-  beyond `bug10rr.qdimacs` at 722ms vs 21ms — there CADET finishes with
-  147 decisions and a single conflict where booleanium needs 441
-  CEGAR cases; initial propagation is identical, so the gap is decision
-  heuristics, an accepted trade-off after the rejected experiments
-  above). Unconditionally firing implications found by the determinacy
-  check are now propagated as *constants* rather than generic functions,
-  so they cascade (satisfy and shorten clauses) in every downstream
-  check.
+  suite stood at 4.2s vs 1.3s aggregate, with `bug10rr.qdimacs` as the
+  outlier (722ms vs 21ms: CADET finished with 147 decisions and a single
+  conflict where booleanium needed 441 CEGAR cases; initial propagation
+  is identical, so the gap was decision *phase*). Unconditionally firing
+  implications found by the determinacy check are now propagated as
+  *constants* rather than generic functions, so they cascade (satisfy
+  and shorten clauses) in every downstream check.
+* **Response-guided decision phase — done, 1.6x on the suite aggregate**
+  (2.6s vs the 4.2s above; bug10rr 722ms → 30ms, on par with CADET, and
+  `test_sat.qdimacs` now beats CADET 5ms vs 615ms): decisions follow the
+  most recently recorded CEGAR response where it assigns the variable —
+  the response is a winning existential move for the current search
+  region, so deciding consistently with it avoids re-conflicting there —
+  and default the variable to *true* otherwise (the trail literal is the
+  negation of the intended default, since a decided literal holds only
+  when one of its implications fires). The heuristic space here is
+  non-linear: the previous structural rule (assign the side with fewer
+  implication literals), constant default-true alone, response phase
+  with the structural rule as fallback, and implication-count-gated
+  variants were each measured and are all worse in aggregate — the last
+  two each blew a different instance up by 10-60x — while this
+  combination dominates everywhere except `adder2` (127ms → 559ms,
+  accepted against the aggregate win). CADET's Jeroslow-Wang phase
+  (active only after 3 restarts) was inspected but not adopted; its
+  pre-restart constant default-true is what solves most of its suite.
 * **The (former) timeout instances, and what actually fixed them**: stack
   sampling first
   suggested XOR-hard conflict checks, so the optional CryptoMiniSat

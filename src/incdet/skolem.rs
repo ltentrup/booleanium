@@ -1,8 +1,4 @@
-use crate::{
-    clause::alloc::{Allocator, ClauseId},
-    datastructure::LitVec,
-    incdet::propagation::trail::DecLvl,
-};
+use crate::{clause::alloc::ClauseId, datastructure::LitVec, incdet::propagation::trail::DecLvl};
 use std::collections::BTreeMap;
 
 pub(crate) type Skolem = LitVec<Implications>;
@@ -27,10 +23,6 @@ impl Implications {
 
     pub(crate) fn len(&self) -> usize {
         self.count
-    }
-
-    pub(crate) fn lit_count(&self, alloc: &Allocator) -> usize {
-        self.implications().map(|c| alloc[c].lits().len()).sum()
     }
 
     fn backtrack_to<F>(&mut self, lvl: DecLvl, removed_callback: &mut F)

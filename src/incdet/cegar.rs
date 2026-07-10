@@ -72,6 +72,18 @@ pub(crate) struct Cegar {
     /// Exponential moving average of the recorded cube sizes.
     cube_size_ema: f64,
     rounds: u32,
+    /// The most recently recorded response: a winning move for the current
+    /// search region, used as the decision phase. Replaced wholesale each
+    /// round — accumulating stale phases from older regions misguides
+    /// refutation searches.
+    latest_response: HashMap<Var, bool>,
+}
+
+impl Cegar {
+    /// The polarity the latest recorded response assigned to `var`.
+    pub(crate) fn response_phase(&self, var: Var) -> Option<bool> {
+        self.latest_response.get(&var).copied()
+    }
 }
 
 struct ExistsSolver {
@@ -272,6 +284,7 @@ impl IncDet {
             })
             .copied()
             .collect();
+        self.cegar.latest_response = response.iter().map(|l| (l.var(), l.is_positive())).collect();
         let satisfiable = cube.is_empty();
         self.stats.cegar.cases += 1;
         self.exclude_cube(&cube);
