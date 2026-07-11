@@ -148,6 +148,7 @@ impl IncDet {
             match self.cegar_round(&conflict.assignment) {
                 CegarOutcome::Unsatisfiable => {
                     info!("CEGAR: conflicting frontier assignment has no response");
+                    self.record_unsat_witness(&conflict.assignment);
                     return Some(SolverResult::Unsatisfiable);
                 }
                 CegarOutcome::Satisfiable => {

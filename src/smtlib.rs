@@ -10,12 +10,25 @@
 //! Skolem functions of the existentials as `define-fun`s parameterized by
 //! the universal variables.
 //!
-//! Free constants are existential. Since the solver core is 2QBF, a free
-//! constant may not occur *under* a `forall` (that would need three
-//! quantifier blocks: ∃ constants ∀ universals ∃ inner). Free constants
-//! and quantified assertions can coexist as long as they do not mix: the
-//! constants are then solved in the innermost existential block, which is
-//! truth-equivalent.
+//! Since the solver core is 2QBF, the frontend supports two quantifier
+//! structures and infers which one a session uses from its assertions:
+//!
+//! - **∀∃** (Skolem function synthesis): no free constant occurs under a
+//!   `forall`. Free constants are solved in the innermost existential
+//!   block (truth-equivalent), and `get-model` prints piecewise Skolem
+//!   functions of the existentials parameterized by the universals.
+//! - **∃∀** (constant synthesis): free constants occur under `forall`
+//!   binders, with no `exists` binders. The frontend solves the
+//!   *negation*: the gate definitions are self-dual, so only the
+//!   assertion roots flip — the internal instance is `∀ constants
+//!   ∃ binders, gates: ¬(∧ roots)` — and the verdict is inverted. On
+//!   `sat`, `get-model` prints the constant values recovered from the
+//!   verified winning universal move of the negation. This is the shape
+//!   a synthesis tool needs (∃ strategy bits ∀ inputs: specification).
+//!
+//! The structure is fixed by the first quantified assertion (or the
+//! first check, defaulting to ∀∃); mixing both shapes in one session
+//! would need three quantifier blocks and is rejected.
 
 use crate::{incdet::Options, incremental::IncrementalSolver, SolverResult};
 use std::collections::HashMap;
@@ -115,8 +128,10 @@ enum Binding {
     Universal(i32),
     /// an existential variable bound by an exists (under a forall)
     Inner(i32),
-    /// a defined symbol (gate literal)
-    Defined(i32),
+    /// a defined symbol (gate literal), flagged if its body referenced a
+    /// free constant (using it under a forall then counts as using a
+    /// constant there)
+    Defined(i32, bool),
 }
 
 impl Binding {
@@ -125,9 +140,21 @@ impl Binding {
             Binding::Constant(l)
             | Binding::Universal(l)
             | Binding::Inner(l)
-            | Binding::Defined(l) => l,
+            | Binding::Defined(l, _) => l,
         }
     }
+}
+
+/// The quantifier structure of a session, inferred from its assertions.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
+    /// no quantified assertion or check yet; assertion roots stay pending
+    Undecided,
+    /// ∀∃: forall binders universal, free constants existential
+    ForallExists,
+    /// ∃∀: free constants universal, forall binders existential; solved
+    /// as the negation with the verdict inverted
+    ExistsForall,
 }
 
 /// One frame of surface-level state, kept in sync with the solver's
@@ -136,6 +163,12 @@ impl Binding {
 struct SurfaceFrame {
     symbols: Vec<(String, Binding)>,
     gates: Vec<((String, Vec<i32>), i32)>,
+    /// assertion root literals not materialized as unit clauses: pending
+    /// while the quantifier structure is undecided, and the conjuncts of
+    /// the surface formula in ∃∀ mode
+    asserts: Vec<i32>,
+    /// free constants declared in this frame
+    constants: Vec<u32>,
 }
 
 pub struct Frontend {
@@ -144,6 +177,13 @@ pub struct Frontend {
     /// user-visible names for the model, by variable
     names: HashMap<i32, String>,
     true_lit: Option<i32>,
+    mode: Mode,
+    /// scratch flag: set during expression translation when a free
+    /// constant (or a defined symbol referencing one) is used
+    used_constant: bool,
+    /// in ∃∀ mode: the constant values of the last sat check, from the
+    /// verified winning universal move of the internal negation
+    witness: Option<Vec<i32>>,
     last: Option<SolverResult>,
 }
 
@@ -155,6 +195,9 @@ impl Frontend {
             frames: vec![SurfaceFrame::default()],
             names: HashMap::new(),
             true_lit: None,
+            mode: Mode::Undecided,
+            used_constant: false,
+            witness: None,
             last: None,
         }
     }
@@ -172,7 +215,9 @@ impl Frontend {
     }
 
     fn declare(&mut self, name: &str, binding: Binding) {
-        self.names.insert(binding.lit().abs(), name.to_string());
+        // a defined symbol can alias an existing variable's literal; the
+        // variable keeps its original name in models
+        self.names.entry(binding.lit().abs()).or_insert_with(|| name.to_string());
         self.frames
             .last_mut()
             .expect("base frame exists")
@@ -238,11 +283,19 @@ impl Frontend {
                     let binding = self
                         .lookup(name, locals)
                         .ok_or_else(|| format!("unknown symbol {name}"))?;
-                    if quantified && matches!(binding, Binding::Constant(_)) {
-                        return Err(format!(
-                            "free constant {name} under a forall needs three quantifier \
-                             blocks; declare it inside the exists instead"
-                        ));
+                    let is_constant = match binding {
+                        Binding::Constant(_) => true,
+                        Binding::Defined(_, uses_constant) => uses_constant,
+                        Binding::Universal(_) | Binding::Inner(_) => false,
+                    };
+                    if is_constant {
+                        self.used_constant = true;
+                        if quantified && self.mode == Mode::ForallExists {
+                            return Err(format!(
+                                "free constant {name} under a forall cannot be mixed with \
+                                 earlier ∀∃ assertions (three quantifier blocks)"
+                            ));
+                        }
                     }
                     Ok(binding.lit())
                 }
@@ -323,11 +376,16 @@ impl Frontend {
         }
     }
 
+    /// Parses a binding list, allocating fresh variables and pushing them
+    /// onto `locals` and `vars`. The variables are *not* yet declared to
+    /// the solver: their quantifier depends on the assertion's shape (∀∃
+    /// vs ∃∀), which is only known after translating the body.
     fn bind_quantifier(
         &mut self,
         bindings: &SExpr,
         universal: bool,
         locals: &mut Vec<(String, Binding)>,
+        vars: &mut Vec<u32>,
     ) -> Result<(), String> {
         let SExpr::List(pairs) = bindings else {
             return Err("expected a binding list".to_string());
@@ -344,30 +402,53 @@ impl Frontend {
             }
             let var = self.solver.fresh_var();
             let lit = i32::try_from(var).expect("fits");
-            let binding = if universal {
-                self.solver.declare_universal(var);
-                Binding::Universal(lit)
-            } else {
-                self.solver.declare_existential(var);
-                Binding::Inner(lit)
-            };
+            let binding = if universal { Binding::Universal(lit) } else { Binding::Inner(lit) };
             self.names.insert(lit, name.clone());
             locals.push((name.clone(), binding));
+            vars.push(var);
         }
         Ok(())
+    }
+
+    /// Fixes the session's quantifier structure as ∀∃ and materializes
+    /// the pending assertion roots as unit clauses, each in the frame its
+    /// assertion belongs to.
+    fn fix_forall_exists(&mut self) {
+        debug_assert_eq!(self.mode, Mode::Undecided);
+        self.mode = Mode::ForallExists;
+        for depth in 0..self.frames.len() {
+            let roots = std::mem::take(&mut self.frames[depth].asserts);
+            for root in roots {
+                self.solver.add_clause_at(depth, &[root]);
+            }
+        }
+    }
+
+    /// Fixes the session's quantifier structure as ∃∀: the free constants
+    /// become the universal block of the internal negation.
+    fn fix_exists_forall(&mut self) {
+        debug_assert_eq!(self.mode, Mode::Undecided);
+        self.mode = Mode::ExistsForall;
+        for frame in &self.frames {
+            for &var in &frame.constants {
+                self.solver.redeclare_universal(var);
+            }
+        }
     }
 
     fn assert(&mut self, expr: &SExpr) -> Result<(), String> {
         let mut locals = Vec::new();
         // (forall (...) body) and (forall (...) (exists (...) body))
         let mut body = expr;
+        let mut forall_vars = Vec::new();
+        let mut exists_vars = Vec::new();
         let mut quantified = false;
         if let SExpr::List(items) = body {
             if items.first().and_then(SExpr::atom) == Some("forall") {
                 if items.len() != 3 {
                     return Err("forall takes a binding list and a body".to_string());
                 }
-                self.bind_quantifier(&items[1], true, &mut locals)?;
+                self.bind_quantifier(&items[1], true, &mut locals, &mut forall_vars)?;
                 body = &items[2];
                 quantified = true;
                 if let SExpr::List(items) = body {
@@ -375,24 +456,122 @@ impl Frontend {
                         if items.len() != 3 {
                             return Err("exists takes a binding list and a body".to_string());
                         }
-                        self.bind_quantifier(&items[1], false, &mut locals)?;
+                        self.bind_quantifier(&items[1], false, &mut locals, &mut exists_vars)?;
                         body = &items[2];
                     }
                 }
             }
         }
+        self.used_constant = false;
         let lit = self.expr(body, &mut locals, quantified)?;
-        self.solver.add_clause(&[lit]);
+        if quantified {
+            if self.used_constant || self.mode == Mode::ExistsForall {
+                // ∃∀ shape: in the internal negation the forall binders
+                // are inner existentials
+                if !exists_vars.is_empty() {
+                    return Err("free constants or earlier ∃∀ assertions cannot be \
+                                combined with an exists under a forall (three \
+                                quantifier blocks)"
+                        .to_string());
+                }
+                if self.mode == Mode::Undecided {
+                    self.fix_exists_forall();
+                }
+                for var in forall_vars {
+                    self.solver.declare_existential(var);
+                }
+            } else {
+                if self.mode == Mode::Undecided {
+                    self.fix_forall_exists();
+                }
+                for var in forall_vars {
+                    self.solver.declare_universal(var);
+                }
+                for var in exists_vars {
+                    self.solver.declare_existential(var);
+                }
+            }
+        }
+        // the assertion root: a unit clause in ∀∃ mode, a pending
+        // conjunct otherwise
+        if self.mode == Mode::ForallExists {
+            self.solver.add_clause(&[lit]);
+        } else {
+            self.frames.last_mut().expect("base frame exists").asserts.push(lit);
+        }
         Ok(())
     }
 
     fn get_model(&self) -> Result<String, String> {
+        if self.mode == Mode::ExistsForall {
+            if self.last != Some(SolverResult::Satisfiable) {
+                return Err("no model available; the last check-sat was not sat".to_string());
+            }
+            // the winning universal move of the internal negation is a
+            // partial assignment no extension of which has a response, so
+            // unmentioned constants can take any value
+            let witness = self
+                .witness
+                .as_ref()
+                .ok_or("no model available; no winning move passed verification")?;
+            let mut out = String::from("(\n");
+            for frame in &self.frames {
+                for &var in &frame.constants {
+                    let var = i32::try_from(var).expect("fits");
+                    let name = self.names.get(&var).cloned().unwrap_or_else(|| format!("_c{var}"));
+                    let value = witness.contains(&var);
+                    let _ = writeln!(out, "  (define-fun {name} () Bool {value})");
+                }
+            }
+            out.push_str(")\n");
+            return Ok(out);
+        }
         let model = self
             .solver
             .skolem_model()
             .ok_or("no model available; the last check-sat was not sat")?;
         let names = self.names.clone();
         Ok(model.to_smtlib(&move |var: i32| names.get(&var).cloned()))
+    }
+
+    /// Runs a check under extra assumption roots, dispatching on the
+    /// session's quantifier structure, and returns the surface verdict.
+    fn check(&mut self, extra: &[i32]) -> SolverResult {
+        if self.mode == Mode::Undecided {
+            // no quantified assertion so far: a propositional (∃-only)
+            // session, solved as ∀∃ with an empty universal block
+            self.fix_forall_exists();
+        }
+        let result = if self.mode == Mode::ExistsForall {
+            // solve the negation ∀ constants ∃ binders, gates: ¬(∧ roots)
+            // and invert the verdict. The disjunction of the negated
+            // roots weakens whenever an assertion is added, so it must
+            // stay a temporary clause: carried learnt clauses must never
+            // resolve against it.
+            let clause: Vec<i32> = self
+                .frames
+                .iter()
+                .flat_map(|f| f.asserts.iter())
+                .chain(extra.iter())
+                .map(|&l| -l)
+                .collect();
+            let internal = self.solver.solve_with_clauses(&[clause]);
+            self.witness = match internal {
+                SolverResult::Unsatisfiable => self.solver.universal_witness(),
+                _ => None,
+            };
+            match internal {
+                SolverResult::Satisfiable => SolverResult::Unsatisfiable,
+                SolverResult::Unsatisfiable => SolverResult::Satisfiable,
+                SolverResult::Unknown => SolverResult::Unknown,
+            }
+        } else if extra.is_empty() {
+            self.solver.solve()
+        } else {
+            self.solver.solve_with_assumptions(extra)
+        };
+        self.last = Some(result);
+        result
     }
 
     #[allow(clippy::too_many_lines)]
@@ -419,7 +598,12 @@ impl Frontend {
                     return Err(format!("{head}: only nullary Bool symbols are supported"));
                 }
                 let var = self.solver.fresh_var();
-                self.solver.declare_existential(var);
+                if self.mode == Mode::ExistsForall {
+                    self.solver.declare_universal(var);
+                } else {
+                    self.solver.declare_existential(var);
+                }
+                self.frames.last_mut().expect("base frame exists").constants.push(var);
                 self.declare(name, Binding::Constant(i32::try_from(var).expect("fits")));
             }
             "define-fun" => {
@@ -433,8 +617,9 @@ impl Frontend {
                     );
                 }
                 let mut locals = Vec::new();
+                self.used_constant = false;
                 let lit = self.expr(body, &mut locals, false)?;
-                self.declare(name, Binding::Defined(lit));
+                self.declare(name, Binding::Defined(lit, self.used_constant));
             }
             "assert" => {
                 let [expr] = args else {
@@ -461,36 +646,22 @@ impl Frontend {
                 }
             }
             "check-sat" => {
-                let result = self.solver.solve();
-                self.last = Some(result);
+                let result = self.check(&[]);
                 let _ = writeln!(out, "{}", verdict(result));
             }
             "check-sat-assuming" => {
                 let [SExpr::List(assumptions)] = args else {
                     return Err("check-sat-assuming takes a literal list".to_string());
                 };
-                self.solver.push();
-                self.frames.push(SurfaceFrame::default());
-                let mut failed = None;
+                // gates created for assumption expressions stay in the
+                // current frame; their definitions are harmless and get
+                // reused through hash-consing
+                let mut extra = Vec::new();
                 for a in assumptions {
                     let mut locals = Vec::new();
-                    match self.expr(a, &mut locals, false) {
-                        Ok(lit) => self.solver.add_clause(&[lit]),
-                        Err(e) => {
-                            failed = Some(e);
-                            break;
-                        }
-                    }
+                    extra.push(self.expr(a, &mut locals, false)?);
                 }
-                let result = if failed.is_none() { Some(self.solver.solve()) } else { None };
-                // keep the model of the assumption query, like the backend
-                let _ = self.solver.pop();
-                self.frames.pop();
-                if let Some(e) = failed {
-                    return Err(e);
-                }
-                let result = result.expect("solved");
-                self.last = Some(result);
+                let result = self.check(&extra);
                 let _ = writeln!(out, "{}", verdict(result));
             }
             "get-model" => {
@@ -545,6 +716,7 @@ fn verdict(result: SolverResult) -> &'static str {
 #[cfg(test)]
 mod test {
     use super::*;
+    use proptest::prelude::*;
 
     fn run(source: &str) -> String {
         Frontend::new(Options::default()).run(source)
@@ -601,12 +773,101 @@ mod test {
     }
 
     #[test]
-    fn free_constant_under_forall_rejected() {
+    fn exists_forall_synthesis() {
+        let source = "
+            (declare-const p Bool)
+            (assert (forall ((u Bool)) (or p u)))
+            (check-sat)
+            (get-model)";
+        let out = run(source);
+        assert!(out.starts_with("sat\n"), "{out}");
+        assert!(out.contains("(define-fun p () Bool true)"), "{out}");
+    }
+
+    #[test]
+    fn exists_forall_unsat() {
+        let source = "
+            (declare-const p Bool)
+            (assert (forall ((u Bool)) (= p u)))
+            (check-sat)";
+        assert_eq!(run(source), "unsat\n");
+    }
+
+    #[test]
+    fn exists_forall_pending_asserts() {
+        // the propositional assertion made before the structure is known
+        // joins the ∃∀ conjunction
+        let source = "
+            (declare-const p Bool)
+            (declare-const q Bool)
+            (assert (not q))
+            (assert (forall ((u Bool)) (or p q u)))
+            (check-sat)
+            (get-model)";
+        let out = run(source);
+        assert!(out.starts_with("sat\n"), "{out}");
+        assert!(out.contains("(define-fun p () Bool true)"), "{out}");
+        assert!(out.contains("(define-fun q () Bool false)"), "{out}");
+    }
+
+    #[test]
+    fn exists_forall_push_pop() {
+        let source = "
+            (declare-const p Bool)
+            (assert (forall ((u Bool)) (or p u)))
+            (check-sat)
+            (push 1)
+            (assert (not p))
+            (check-sat)
+            (pop 1)
+            (check-sat)";
+        assert_eq!(run(source), "sat\nunsat\nsat\n");
+    }
+
+    #[test]
+    fn exists_forall_assuming() {
+        let source = "
+            (declare-const p Bool)
+            (assert (forall ((u Bool)) (or p u)))
+            (check-sat-assuming ((not p)))
+            (check-sat)";
+        assert_eq!(run(source), "unsat\nsat\n");
+    }
+
+    #[test]
+    fn defined_symbol_carries_constants() {
+        // f references the constant p, so using f under a forall makes
+        // the session ∃∀
+        let source = "
+            (declare-const p Bool)
+            (define-fun f () Bool (not p))
+            (assert (forall ((u Bool)) (or (not f) u)))
+            (check-sat)
+            (get-model)";
+        let out = run(source);
+        assert!(out.starts_with("sat\n"), "{out}");
+        assert!(out.contains("(define-fun p () Bool true)"), "{out}");
+    }
+
+    #[test]
+    fn mixed_quantifier_shapes_rejected() {
+        // a ∀∃ assertion fixes the structure; a later constant under a
+        // forall would need three quantifier blocks
         let source = "
             (declare-const x Bool)
+            (assert (forall ((u Bool)) (exists ((e Bool)) (= e u))))
             (assert (forall ((u Bool)) (or x u)))
             (check-sat)";
-        assert!(run(source).starts_with("(error"));
+        assert!(run(source).contains("(error"), "{}", run(source));
+    }
+
+    #[test]
+    fn exists_forall_with_inner_exists_rejected() {
+        let source = "
+            (declare-const x Bool)
+            (assert (forall ((u Bool)) (exists ((e Bool)) (and x (= e u)))))
+            (check-sat)";
+        assert!(run(source).contains("(error"), "{}", run(source));
     }
 
     #[test]
@@ -620,5 +881,136 @@ mod test {
         assert!(out.starts_with("sat\n"), "{out}");
         assert!(out.contains("(define-fun e "), "{out}");
         assert_eq!(out.matches('(').count(), out.matches(')').count(), "{out}");
+    }
+
+    /// Brute-force oracle for ∃ constants ∀ universals: matrix. Variables
+    /// `1..=constants` are the constants, the rest the universals.
+    fn exists_forall_oracle(constants: u32, universals: u32, clauses: &[Vec<i32>]) -> bool {
+        (0..1u32 << constants).any(|p| {
+            (0..1u32 << universals).all(|u| {
+                clauses.iter().all(|clause| {
+                    clause.iter().any(|&l| {
+                        let var = l.unsigned_abs();
+                        let value = if var <= constants {
+                            p & (1 << (var - 1)) != 0
+                        } else {
+                            u & (1 << (var - constants - 1)) != 0
+                        };
+                        (l > 0) == value
+                    })
+                })
+            })
+        })
+    }
+
+    fn exists_forall_script(constants: u32, universals: u32, clauses: &[Vec<i32>]) -> String {
+        let mut s = String::new();
+        for p in 1..=constants {
+            let _ = writeln!(s, "(declare-const p{p} Bool)");
+        }
+        let binders: String =
+            (1..=universals).map(|u| format!("(u{u} Bool)")).collect::<Vec<_>>().join(" ");
+        let clause = |c: &Vec<i32>| -> String {
+            let lits: Vec<String> = c
+                .iter()
+                .map(|&l| {
+                    let var = l.unsigned_abs();
+                    let base = if var <= constants {
+                        format!("p{var}")
+                    } else {
+                        format!("u{}", var - constants)
+                    };
+                    if l < 0 {
+                        format!("(not {base})")
+                    } else {
+                        base
+                    }
+                })
+                .collect();
+            format!("(or {})", lits.join(" "))
+        };
+        // the tautology mentions a constant, pinning the ∃∀ structure
+        // even when no generated clause references one
+        let conjuncts: Vec<String> = std::iter::once("(or p1 (not p1))".to_string())
+            .chain(clauses.iter().map(clause))
+            .collect();
+        let _ = writeln!(s, "(assert (forall ({binders}) (and {})))", conjuncts.join(" "));
+        s.push_str("(check-sat)\n(get-model)\n");
+        s
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+        /// Random ∃∀ instances against the enumeration oracle; on sat,
+        /// the synthesized constants must satisfy the matrix for every
+        /// universal assignment.
+        #[test]
+        fn differential_exists_forall(
+            constants in 1u32..=3,
+            universals in 1u32..=3,
+            clauses in proptest::collection::vec(
+                proptest::collection::vec(
+                    (-6i32..=6).prop_filter("nonzero", |l| *l != 0),
+                    1..=4,
+                ),
+                1..=8,
+            ),
+        ) {
+            let bound = constants + universals;
+            let clauses: Vec<Vec<i32>> = clauses
+                .iter()
+                .map(|c| {
+                    c.iter()
+                        .map(|&l| {
+                            let m = i32::try_from((l.unsigned_abs() - 1) % bound + 1)
+                                .expect("fits");
+                            if l < 0 { -m } else { m }
+                        })
+                        .collect()
+                })
+                .collect();
+            let expected = exists_forall_oracle(constants, universals, &clauses);
+            let script = exists_forall_script(constants, universals, &clauses);
+            let out = Frontend::new(Options::default()).run(&script);
+            let verdict = out.lines().next().unwrap_or("");
+            prop_assert_eq!(
+                verdict,
+                if expected { "sat" } else { "unsat" },
+                "script:\n{}\nout:\n{}",
+                &script,
+                &out
+            );
+            // a missing model (unverifiable winning move) is reported as
+            // an error and tolerated; a printed model must be correct
+            if expected && !out.contains("(error") {
+                let values: Vec<bool> = (1..=constants)
+                    .map(|p| {
+                        assert!(
+                            out.contains(&format!("(define-fun p{p} () Bool ")),
+                            "constant p{p} missing from the model:\n{out}"
+                        );
+                        out.contains(&format!("(define-fun p{p} () Bool true)"))
+                    })
+                    .collect();
+                for u in 0..1u32 << universals {
+                    for clause in &clauses {
+                        prop_assert!(
+                            clause.iter().any(|&l| {
+                                let var = l.unsigned_abs();
+                                let value = if var <= constants {
+                                    values[usize::try_from(var).expect("fits") - 1]
+                                } else {
+                                    u & (1 << (var - constants - 1)) != 0
+                                };
+                                (l > 0) == value
+                            }),
+                            "synthesized constants falsify the matrix; script:\n{}\nout:\n{}",
+                            &script,
+                            &out
+                        );
+                    }
+                }
+            }
+        }
     }
 }

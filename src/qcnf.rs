@@ -48,6 +48,40 @@ impl QCNF {
     pub(crate) fn is_2qbf(&self) -> bool {
         matches!(&self.prefix[..], &[(QuantTy::Forall, _), (QuantTy::Exists, _)])
     }
+
+    /// Checks a winning move of the universal player: under every
+    /// extension of the (partial) universal assignment `witness`, no
+    /// assignment of the remaining variables satisfies the matrix. Only
+    /// usable for tiny instances (test oracle).
+    #[cfg(test)]
+    pub(crate) fn is_winning_universal_move(&self, witness: &[i32]) -> bool {
+        use crate::literal::Lit;
+        let witness: Vec<Lit> = witness.iter().map(|&l| Lit::from_dimacs(l)).collect();
+        // enumerate all assignments of every variable of the matrix; the
+        // witness must block all of them
+        let mut vars: Vec<Var> = self.matrix.iter().flatten().map(|l| l.var()).collect();
+        vars.sort_unstable();
+        vars.dedup();
+        let n = vars.len();
+        assert!(n <= 20, "oracle only for tiny instances");
+        'outer: for point in 0u32..(1 << n) {
+            let truth = |l: Lit| -> bool {
+                let idx = vars.binary_search(&l.var()).expect("var collected");
+                let value = point & (1 << idx) != 0;
+                value == l.is_positive()
+            };
+            for &w in &witness {
+                if !truth(w) {
+                    continue 'outer;
+                }
+            }
+            if self.matrix.iter().all(|c| c.iter().any(|&l| truth(l))) {
+                // a satisfying extension exists: not a winning move
+                return false;
+            }
+        }
+        true
+    }
 }
 
 impl FromQdimacs for QCNF {

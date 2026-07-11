@@ -172,6 +172,11 @@ pub struct IncDet {
     handled_cases: Vec<casesplit::HandledCase>,
     /// set to true if the empty clause was added
     conflicted: bool,
+    /// a winning move for the universal player, recorded when
+    /// unsatisfiability is concluded: a partial universal assignment such
+    /// that no extension has an existential response (valid for prefixes
+    /// with the universal block first)
+    unsat_witness: Option<Vec<Lit>>,
     stats: Statistics,
 }
 
@@ -346,9 +351,13 @@ impl IncDet {
             // remove universal literals that are bound after every existential variable
             lits.retain(|lit| self.vars[lit.var()].scope() <= max_scope);
         } else {
-            // no existential variables
-            tracing::warn!("empty clause was added, instance is unsatisfiable");
+            // No existential variables: the clause consists of universal
+            // literals only (possibly none), so the universal player wins
+            // by falsifying it. The clause is matrix-implied (an original
+            // clause or a learnt resolvent), so this is a winning move.
+            tracing::warn!("clause without existential literals, instance is unsatisfiable");
             self.conflicted = true;
+            self.unsat_witness = Some(lits.iter().map(|&l| !l).collect());
         }
 
         let clause_id = self.allocator.add(&lits);
@@ -434,6 +443,50 @@ impl IncDet {
             .collect()
     }
 
+    /// Records the universal part of a conflicting assignment as the
+    /// winning move of the universal player.
+    pub(crate) fn record_unsat_witness(&mut self, conflicting: &HashSet<Lit>) {
+        let witness = conflicting
+            .iter()
+            .filter(|l| {
+                let data = &self.vars[l.var()];
+                data.scope.is_some() && data.is_universal(&self.prefix)
+            })
+            .copied()
+            .collect();
+        self.unsat_witness = Some(witness);
+    }
+
+    /// A winning move for the universal player of an unsatisfiable
+    /// instance: a partial assignment of the universal variables (DIMACS
+    /// literals) such that no extension admits an existential response.
+    /// Only meaningful for prefixes with the universal block first (for
+    /// ∃∀ prefixes the universal player needs a strategy, not a move).
+    ///
+    /// The recorded candidate is heuristic — pure-literal assignments are
+    /// winnability-preserving *choices* rather than pointwise-forced
+    /// values, so a conflict derived through them proves
+    /// unsatisfiability without its assignment necessarily being
+    /// unanswerable — and is therefore verified with one SAT call before
+    /// being exposed.
+    #[must_use]
+    pub fn unsat_witness(&self) -> Option<Vec<i32>> {
+        use crate::sat::{LookupSolver, SatSolver};
+        let witness = self.unsat_witness.as_ref()?;
+        let mut solver = LookupSolver::<crate::sat::varisat::Varisat>::default();
+        solver.set_var_count(self.vars.get_var_count());
+        for cid in self.allocator.ids().take(self.original_clause_count) {
+            let clause: Vec<_> = self.allocator[cid].iter().map(|&l| solver.lookup(l)).collect();
+            solver.add_clause(&clause);
+        }
+        let assumptions: Vec<_> = witness.iter().map(|&l| solver.lookup(l)).collect();
+        if solver.solve_with_assumptions(&assumptions).unwrap() {
+            debug!("recorded universal witness is answerable, discarding");
+            return None;
+        }
+        Some(witness.iter().map(|l| l.to_dimacs()).collect())
+    }
+
     /// Solves the QBF using incremental determinization.
     pub fn solve(&mut self) -> SolverResult {
         let instant = Instant::now();
@@ -468,6 +521,8 @@ impl IncDet {
             return SolverResult::Unknown;
         }
         if self.conflicted {
+            // witness recorded when the offending clause was added
+            debug_assert!(self.unsat_witness.is_some());
             return SolverResult::Unsatisfiable;
         }
         self.build_watchlist();
@@ -962,11 +1017,29 @@ impl IncDet {
             );
         }
         if self.trail.decision_level().is_root() {
+            // at the root all functions are forced, so the conflicting
+            // assignment is a winning universal move
+            self.record_unsat_witness(&conflict.assignment);
             return Some(SolverResult::Unsatisfiable);
         }
         let Ok(backtrack_to) = self.analyze(conflict) else {
-                    return Some( SolverResult::Unsatisfiable);
-                };
+            // The analysis clause is matrix-implied and all its existential
+            // literals are falsified by the (forced) root-level functions,
+            // so any universal assignment falsifying its universal literals
+            // is a winning move.
+            let witness = self
+                .conflict_analysis
+                .clause()
+                .iter()
+                .filter(|l| {
+                    let data = &self.vars[l.var()];
+                    data.scope.is_some() && data.is_universal(&self.prefix)
+                })
+                .map(|&l| !l)
+                .collect();
+            self.unsat_witness = Some(witness);
+            return Some(SolverResult::Unsatisfiable);
+        };
         debug!("conflict analysis: backtrack to {backtrack_to:?}");
         self.backtrack_to(backtrack_to);
         let clause = self.conflict_analysis.clause().to_owned();
@@ -974,7 +1047,9 @@ impl IncDet {
         self.stats.global.added_clauses += 1;
         if self.conflicted {
             // the learnt clause contained only universal literals (e.g. the
-            // negation of a case assumption) and reduced to the empty clause
+            // negation of a case assumption); the witness falsifying it was
+            // recorded when the clause was added
+            debug_assert!(self.unsat_witness.is_some());
             return Some(SolverResult::Unsatisfiable);
         }
         // the learnt clause constrains the conflicted variable further, so it

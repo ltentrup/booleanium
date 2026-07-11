@@ -20,6 +20,18 @@ mod fuzz {
                 "invalid Skolem functions for instance:\n{}",
                 qcnf
             );
+        } else if qcnf.is_2qbf() {
+            // an exposed universal move must win under every extension
+            // (the candidate is verified inside `unsat_witness`, so an
+            // answerable candidate comes back as None)
+            if let Some(witness) = solver.unsat_witness() {
+                prop_assert!(
+                    qcnf.is_winning_universal_move(&witness),
+                    "invalid universal witness {:?} for instance:\n{}",
+                    witness,
+                    qcnf
+                );
+            }
         }
         Ok(())
     }

@@ -219,10 +219,31 @@ increasing order of ambition:
   operators with hash-consed Tseitin gates, `(forall (…) (exists (…)))`
   assertions, `push`/`pop`/`check-sat`/`check-sat-assuming`, and
   `get-model` printing the Skolem functions as `define-fun`s
-  parameterized by the universal variables. Free constants under a
-  forall are rejected (three quantifier blocks); see `RESEARCH.md` for
-  the ∃∀∃-with-determined-inner-block extension that the SYNTCOMP
-  direction needs, and for the in-place incrementality upgrade path.
+  parameterized by the universal variables. See `RESEARCH.md` for the
+  in-place incrementality upgrade path.
+* **∃∀ synthesis mode — done** (the SYNTCOMP-critical shape ∃ strategy
+  bits ∀ inputs ∃ gates-determined-by-both): free constants under
+  `forall` binders switch the frontend to solving the *negation* —
+  gate definitions are self-dual, so only the assertion roots flip
+  (`∀ constants ∃ binders, gates: ¬(∧ roots)`) — with the verdict
+  inverted. The synthesized constant values are the negation's **UNSAT
+  witness**: the core records the universal part of the conflicting
+  assignment at every unsatisfiability site (`IncDet::unsat_witness`,
+  `IncrementalSolver::universal_witness`). Because pure-literal
+  assignments are winnability-preserving *choices* rather than
+  pointwise-forced values, the recorded candidate is heuristic and is
+  **verified with one SAT call** before being exposed; an unverifiable
+  candidate yields `sat` without a model (`get-model` errors) rather
+  than a wrong model. The quantifier structure of a session is fixed
+  by its first quantified assertion (or first check, defaulting to
+  ∀∃); assertion roots stay *pending* until then — in ∃∀ mode they
+  form a disjunction that weakens with every new assertion, so each
+  check solves it as a temporary clause
+  (`IncrementalSolver::solve_with_clauses`) that carried learnt
+  clauses can never resolve against. Validated by a 20k-case
+  differential proptest against an enumeration oracle that also checks
+  every printed model against the matrix on all universal points, plus
+  the core fuzz asserting witness validity on all UNSAT 2QBF cases.
 
 ### 2. Certificates
 

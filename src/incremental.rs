@@ -98,6 +98,36 @@ impl IncrementalSolver {
         self.frames.last_mut().expect("base frame exists").clauses.push(lits.to_vec());
     }
 
+    /// Adds a clause to the frame at stack depth `depth` instead of the
+    /// top frame. Frontends use this to materialize assertions they had
+    /// deferred while the quantifier structure was still undetermined, in
+    /// the frame the assertion belongs to.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `depth` exceeds the current stack depth.
+    pub fn add_clause_at(&mut self, depth: usize, lits: &[i32]) {
+        for &l in lits {
+            self.note_var(l.unsigned_abs());
+        }
+        self.frames[depth].clauses.push(lits.to_vec());
+    }
+
+    /// Changes an existing existential declaration into a universal one,
+    /// in whatever frame it was declared. Frontends use this when the
+    /// intended quantifier of a symbol only becomes clear after its
+    /// declaration.
+    pub fn redeclare_universal(&mut self, var: u32) {
+        for frame in &mut self.frames {
+            if let Some(pos) = frame.existentials.iter().position(|&v| v == var) {
+                frame.existentials.remove(pos);
+                frame.universals.push(var);
+                self.last = None;
+                return;
+            }
+        }
+    }
+
     /// Adds the definition `var ↔ AND(lits)` to the current frame and
     /// declares `var` existential. This is the definition-level input
     /// path: the two-sided encoding keeps the variable deterministic by
@@ -175,9 +205,19 @@ impl IncrementalSolver {
     /// (temporary unit clauses, retracted afterwards together with
     /// everything learnt from them).
     pub fn solve_with_assumptions(&mut self, assumptions: &[i32]) -> SolverResult {
+        let clauses: Vec<Vec<i32>> = assumptions.iter().map(|&lit| vec![lit]).collect();
+        self.solve_with_clauses(&clauses)
+    }
+
+    /// Solves the assertion stack under temporary clauses, retracted
+    /// afterwards together with everything learnt from them. Unlike
+    /// [`IncrementalSolver::add_clause`], this supports clauses that do
+    /// not stay implied when the ambient formula changes (a later solve
+    /// must not resolve against them).
+    pub fn solve_with_clauses(&mut self, clauses: &[Vec<i32>]) -> SolverResult {
         self.push();
-        for &lit in assumptions {
-            self.add_clause(&[lit]);
+        for clause in clauses {
+            self.add_clause(clause);
         }
         let result = self.solve();
         let last = self.last.take();
@@ -208,6 +248,20 @@ impl IncrementalSolver {
     pub fn verify(&self) -> bool {
         matches!(&self.last, Some((SolverResult::Satisfiable, solver)) if solver.verify_skolem_functions())
     }
+
+    /// The verified winning move of the universal player for the most
+    /// recent unsatisfiable solve: a (partial) assignment of the
+    /// universal variables (DIMACS literals) such that no extension
+    /// admits an existential response. `None` if the last result was not
+    /// unsatisfiable or the recorded candidate did not pass verification
+    /// (see [`IncDet::unsat_witness`]).
+    #[must_use]
+    pub fn universal_witness(&self) -> Option<Vec<i32>> {
+        match &self.last {
+            Some((SolverResult::Unsatisfiable, solver)) => solver.unsat_witness(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +290,22 @@ mod test {
         // assumptions behave like a temporary frame
         assert_eq!(solver.solve_with_assumptions(&[2]), SolverResult::Unsatisfiable);
         assert_eq!(solver.solve(), SolverResult::Satisfiable);
+    }
+
+    #[test]
+    fn universal_witness_of_unsat() {
+        let mut solver = IncrementalSolver::default();
+        solver.declare_universal(1);
+        solver.declare_existential(2);
+        solver.add_clause(&[-1, 2]);
+        // no witness on satisfiable results
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert_eq!(solver.universal_witness(), None);
+        // now for u1 = true, neither value of e2 works
+        solver.add_clause(&[-1, -2]);
+        assert_eq!(solver.solve(), SolverResult::Unsatisfiable);
+        let witness = solver.universal_witness().expect("witness available");
+        assert_eq!(witness, vec![1]);
     }
 
     #[test]

@@ -117,8 +117,8 @@ Bool), `define-fun` as the definition-level input, assertions over
 `check-sat`/`check-sat-assuming`, and `get-model` printing the
 piecewise Skolem functions as `define-fun`s parameterized by the
 universal variables. Free constants are solved in the innermost block
-(truth-equivalent as long as they do not occur *under* a forall, which
-is rejected — that shape needs three blocks, see below). Remaining
+(truth-equivalent) when they do not occur under a forall; when they
+do, the session is ∃∀ and solved by negation (see below). Remaining
 notes:
 
 * `define-fun` ↔ pre-determinized variable (RQ1's API, standardized);
@@ -140,13 +140,24 @@ notes:
   harness); running an external SMT solver over `get-model` output as a
   CI check would close the remaining gap, but no such solver is
   available in this environment.
-* **The 3-block gap that matters for synthesis**: the natural bounded
-  synthesis shape is ∃ parameters ∀ inputs ∃ gates(determined), which
-  the 2QBF core rejects as three blocks even though the innermost block
-  is deterministic by construction. Supporting "∃∀∃ with a defined
-  third block" is the highest-value core extension for the SYNTCOMP
-  direction: the inner block never needs decisions, only
-  determinization — the machinery is arguably already there.
+* **The 3-block gap that matters for synthesis — closed for the
+  determined case**: the natural bounded synthesis shape is
+  ∃ parameters ∀ inputs ∃ gates(determined). Because the inner block
+  is *defined* (two-sided gate encodings are self-dual), the shape is
+  solved by negation without any core extension: the frontend solves
+  `∀ parameters ∃ inputs, gates: ¬(∧ assertion roots)` and inverts the
+  verdict; the synthesized parameters are the negation's UNSAT witness
+  (the universal part of the final conflicting assignment, recorded at
+  every unsatisfiability site in the core). Only genuine ∃∀∃ — a free,
+  *underdetermined* inner block — remains out of scope and rejected.
+  Open engineering item: the recorded witness candidate is heuristic
+  (pure-literal assignments are winnability-preserving choices, not
+  pointwise-forced values), so it is verified with one SAT call before
+  exposure; if verification fails the answer is `sat` without a model.
+  A complete extraction fallback (e.g. solving the dual instance or a
+  CEGIS-style repair of the candidate) would close this; across 20k+
+  random ∃∀ instances the differential harness has not yet observed a
+  rejected candidate, so the gap is currently theoretical.
 
 ## RQ4 — Theories: lifting ID to ∃∀-SMT
 
