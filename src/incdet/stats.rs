@@ -28,6 +28,8 @@ pub(crate) struct GlobalStats {
     pub(crate) restarts: u32,
     pub(crate) added_clauses: u32,
     pub(crate) deleted_clauses: u32,
+    /// completed in-place monotone extensions
+    pub(crate) extensions: u32,
     pub(crate) solve_time: Duration,
 }
 

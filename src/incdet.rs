@@ -118,6 +118,11 @@ const REDUCTION_INCREMENT: usize = 2000;
 /// conflict-check solver is rebooted from the live state.
 const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 512;
 
+/// Number of handled cases beyond which a monotone extension gives up on
+/// re-verifying the retained regions (a rebuild is cheaper than the SAT
+/// calls).
+const MAX_REVERIFIED_CASES: usize = 64;
+
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
     loop {
@@ -150,9 +155,11 @@ pub struct IncDet {
     conflict_check: ConflictCheck<ConflictSolver>,
     dec_lvls: VarVec<Option<DecLvl>>,
     vsids: Vsids,
-    /// number of matrix clauses present when solving started; clauses
-    /// beyond this index are learnt
-    original_clause_count: usize,
+    /// the matrix clauses (as opposed to learnt resolvents): the clauses
+    /// present when solving started plus every clause added by a monotone
+    /// extension ([`IncDet::extend_and_resolve`]) — an explicit list, since
+    /// extension clauses arrive after learnt clauses in the allocator
+    originals: Vec<ClauseId>,
     /// for every literal, the original clauses containing it (static; used
     /// by the pure-literal rule)
     occurrences: LitVec<Vec<ClauseId>>,
@@ -161,6 +168,12 @@ pub struct IncDet {
     /// pure-literal check
     pure_queue: VecDeque<Var>,
     pure_queued: HashSet<Var>,
+    /// pure literals assigned at the root level. Root assignments are
+    /// permanent, and pure assignments are winnability-preserving
+    /// *choices* w.r.t. the matrix at assignment time — a later monotone
+    /// extension stays sound only while no added clause contains one of
+    /// these literals (see [`IncDet::extend_and_resolve`])
+    root_pure_lits: Vec<Lit>,
     /// learnt clauses that are candidates for deletion
     learnts: Vec<ClauseId>,
     /// state of the CEGAR extension
@@ -319,9 +332,12 @@ impl IncDet {
         }
     }
 
-    fn _add_clause(&mut self, lits: &[Lit]) {
-        debug!("Add clause: {}", LitSlice::from(lits));
-        // bind free variables to the outermost existential scope
+    /// Normalizes a clause for the matrix: binds free variables to the
+    /// outermost existential scope, sorts, deduplicates, drops tautologies
+    /// (`None`), and applies universal reduction. A clause without
+    /// existential literals concludes unsatisfiability (`conflicted` set,
+    /// witness recorded) and is returned as-is.
+    fn preprocess_clause(&mut self, lits: &[Lit]) -> Option<Vec<Lit>> {
         for lit in lits {
             let var = lit.var();
             if var.as_index() >= self.vars.get_var_count() {
@@ -338,7 +354,7 @@ impl IncDet {
             // Detected tautology clause, do not add to matrix.
             // Note: as literals are deduplicated and sorted by variable index,
             // literals of opposing signs have to be consecutive in the clause.
-            return;
+            return None;
         }
 
         // universal reduction
@@ -359,7 +375,14 @@ impl IncDet {
             self.conflicted = true;
             self.unsat_witness = Some(lits.iter().map(|&l| !l).collect());
         }
+        Some(lits)
+    }
 
+    fn _add_clause(&mut self, lits: &[Lit]) {
+        debug!("Add clause: {}", LitSlice::from(lits));
+        let Some(lits) = self.preprocess_clause(lits) else {
+            return;
+        };
         let clause_id = self.allocator.add(&lits);
 
         // check if there is only one existential variable
@@ -475,7 +498,7 @@ impl IncDet {
         let witness = self.unsat_witness.as_ref()?;
         let mut solver = LookupSolver::<crate::sat::varisat::Varisat>::default();
         solver.set_var_count(self.vars.get_var_count());
-        for cid in self.allocator.ids().take(self.original_clause_count) {
+        for &cid in &self.originals {
             let clause: Vec<_> = self.allocator[cid].iter().map(|&l| solver.lookup(l)).collect();
             solver.add_clause(&clause);
         }
@@ -487,6 +510,263 @@ impl IncDet {
         Some(witness.iter().map(|l| l.to_dimacs()).collect())
     }
 
+    /// Extends the loaded instance *in place* after a completed solve —
+    /// new variables in the existing scopes and new matrix clauses — and
+    /// re-solves. This is the monotone continuation of the incremental
+    /// API: root-level functions, learnt clauses, handled cases, variable
+    /// activities, and the incremental conflict-check state are all kept.
+    ///
+    /// What is kept stays sound under a matrix extension: root-level
+    /// functions and constants are implied by their implication clauses
+    /// (which remain part of the matrix), and learnt clauses are
+    /// resolvents. The two exceptions are re-checked explicitly and cause
+    /// a `None` return, upon which the caller must fall back to a fresh
+    /// solver:
+    ///
+    /// * root-level *pure-constant* assignments are winnability-preserving
+    ///   choices w.r.t. the matrix at assignment time; an added clause
+    ///   containing such a literal invalidates the choice,
+    /// * handled cases (CEGAR responses and closed case splits) promise
+    ///   that their recorded functions satisfy the matrix on their
+    ///   region; every retained case must also satisfy the added clauses,
+    ///   checked per case with the yet-unassigned variables treated
+    ///   adversarially (so later function assignments cannot break a
+    ///   passed check).
+    ///
+    /// `None` is also returned for prefix reshapes the in-place path does
+    /// not support (a first universal variable, a re-mentioned free
+    /// variable now declared, or more than two blocks); the fresh solver
+    /// handles those uniformly.
+    pub fn extend_and_resolve(
+        &mut self,
+        new_universals: &[u32],
+        new_existentials: &[u32],
+        clauses: &[Vec<i32>],
+    ) -> Option<SolverResult> {
+        if self.conflicted {
+            // adding clauses and variables keeps an unsatisfiable instance
+            // unsatisfiable, and the recorded winning move stays winning
+            return Some(SolverResult::Unsatisfiable);
+        }
+        self.extend_declarations(new_universals, new_existentials)?;
+
+        // normalize the clauses; this may bind further free variables to
+        // the outermost existential scope
+        let free_before = self.prefix.first().map_or(0, |s| s.variables.len());
+        let mut processed: Vec<Vec<Lit>> = Vec::new();
+        for clause in clauses {
+            let lits: Vec<Lit> = clause.iter().map(|&l| Lit::from_dimacs(l)).collect();
+            let Some(lits) = self.preprocess_clause(&lits) else {
+                continue;
+            };
+            if self.conflicted {
+                // all-universal clause: the witness was recorded by the
+                // preprocessing; keep the clause for witness verification
+                let cid = self.allocator.add(&lits);
+                self.originals.push(cid);
+                return Some(SolverResult::Unsatisfiable);
+            }
+            processed.push(lits);
+        }
+        let new_frees: Vec<Var> = self.prefix[0].variables[free_before..].to_vec();
+        for var in new_frees {
+            self.vsids.add(var);
+            self.queue_pure_check(var);
+        }
+        let blocks = self.prefix.iter().filter(|scope| !scope.variables.is_empty()).count();
+        if blocks > 2 {
+            return None;
+        }
+
+        if !self.trail.decision_level().is_root() {
+            self.backtrack_to(DecLvl::ROOT);
+        }
+        self.casesplits.clear_committed();
+
+        // Both the pure gate and the per-case checks below are SAT calls
+        // whose encodings include the handled-case exclusions, so give up
+        // early on states with many recorded cases rather than spend
+        // longer checking than a rebuild costs.
+        if !processed.is_empty() && self.handled_cases.len() > MAX_REVERIFIED_CASES {
+            debug!(
+                "monotone extension: {} handled cases exceed the re-verification budget",
+                self.handled_cases.len()
+            );
+            return None;
+        }
+
+        // The pure gate: root-level pure-constant assignments are
+        // winnability-preserving choices, and an added clause containing
+        // such a literal invalidates the rewrite argument behind them —
+        // unless the root functions entail the clause outright (with the
+        // yet-unassigned variables adversarial): then any winning
+        // strategy can still be rewritten onto the root functions without
+        // falsifying the clause. (Inside the handled regions the per-case
+        // re-verification below covers these clauses like any other.)
+        let pure: HashSet<Lit> = self.root_pure_lits.iter().copied().collect();
+        let touching: Vec<Vec<Lit>> = processed
+            .iter()
+            .filter(|lits| lits.iter().any(|l| pure.contains(l)))
+            .cloned()
+            .collect();
+        if !touching.is_empty() {
+            let functions = self.snapshot_functions();
+            if self
+                .region_counterexample(&functions, &[], self.handled_cases.len(), &touching)
+                .is_some()
+            {
+                debug!(
+                    "monotone extension: a new clause re-introduces a root pure literal \
+                     and is not entailed by the root functions"
+                );
+                return None;
+            }
+        }
+
+        // every retained region must satisfy the added clauses
+        if !processed.is_empty() {
+            for region in 0..self.handled_cases.len() {
+                if !self.case_valid_for(region, &processed) {
+                    debug!("monotone extension: handled case {region} fails on a new clause");
+                    return None;
+                }
+            }
+        }
+
+        for lits in &processed {
+            if let Some(result) = self.integrate_clause(lits) {
+                return Some(result);
+            }
+        }
+
+        // both hold matrix-derived state and are rebuilt lazily
+        self.cegar.invalidate_solver();
+        self.casesplits.invalidate_domain();
+        self.stats.global.extensions += 1;
+        debug!("monotone extension: continuing in place");
+        Some(self.search())
+    }
+
+    /// Declares new variables in the existing scopes for a monotone
+    /// extension: universals join the existing universal scope,
+    /// existentials the innermost existential scope. `None` when the
+    /// prefix cannot be extended in place (no universal scope exists yet,
+    /// or a variable is already bound).
+    fn extend_declarations(
+        &mut self,
+        new_universals: &[u32],
+        new_existentials: &[u32],
+    ) -> Option<()> {
+        let forall = self.prefix.iter().position(|s| s.quantifier == QuantTy::Forall);
+        if !new_universals.is_empty() && forall.is_none() {
+            return None;
+        }
+        let to_var =
+            |v: u32| -> Option<Var> { Some(Lit::from_dimacs(i32::try_from(v).ok()?).var()) };
+        let mut universal_vars = Vec::with_capacity(new_universals.len());
+        for &v in new_universals {
+            universal_vars.push(to_var(v)?);
+        }
+        let mut existential_vars = Vec::with_capacity(new_existentials.len());
+        for &v in new_existentials {
+            existential_vars.push(to_var(v)?);
+        }
+        for &var in universal_vars.iter().chain(&existential_vars) {
+            if var.as_index() < self.vars.get_var_count() && self.vars[var].scope.is_some() {
+                // already bound (e.g. mentioned in an earlier clause and
+                // bound as free): the quantifier cannot change in place
+                return None;
+            }
+        }
+        for &var in &universal_vars {
+            if var.as_index() >= self.vars.get_var_count() {
+                self.set_var_count(var.as_index() + 1);
+            }
+            let scope = forall.expect("checked above");
+            self.vars[var].scope = Some(ScopeId(scope));
+            self.prefix[scope].variables.push(var);
+        }
+        if !existential_vars.is_empty() {
+            self._quantify(QuantTy::Exists, &existential_vars);
+        }
+        for &var in &existential_vars {
+            self.vsids.add(var);
+            self.queue_pure_check(var);
+        }
+        Some(())
+    }
+
+    /// Integrates a normalized matrix clause into the live root-level
+    /// state, mirroring the load and propagation paths. Concludes
+    /// unsatisfiability if every existential literal of the clause is
+    /// (permanently) root-assigned and the root functions do not entail
+    /// the clause outside the handled regions.
+    fn integrate_clause(&mut self, lits: &[Lit]) -> Option<SolverResult> {
+        debug_assert!(self.trail.decision_level().is_root());
+        let cid = self.allocator.add(lits);
+        self.originals.push(cid);
+        for &lit in lits {
+            self.occurrences[lit].push(cid);
+        }
+        if lits.iter().any(|&l| self.assignment.constant_value(l) == Some(true)) {
+            // satisfied by a root constant: globally satisfied, inert
+            return None;
+        }
+        let unassigned: Vec<Lit> = lits
+            .iter()
+            .filter(|l| {
+                self.vars[l.var()].is_existential(&self.prefix)
+                    && !self.assignment.is_assigned(l.var())
+            })
+            .copied()
+            .collect();
+        match unassigned[..] {
+            [] => {
+                // every existential literal is root-assigned and those
+                // functions are permanent: the clause must be entailed by
+                // them outside the handled regions (inside, the per-case
+                // re-verification has already checked it)
+                let functions = self.snapshot_functions();
+                let clauses = vec![lits.to_vec()];
+                if let Some(witness) =
+                    self.region_counterexample(&functions, &[], self.handled_cases.len(), &clauses)
+                {
+                    self.unsat_witness = Some(witness);
+                    return Some(SolverResult::Unsatisfiable);
+                }
+            }
+            [lit] => {
+                // one unassigned existential left: the clause is an
+                // implication clause for it, as on the propagation path
+                self.skolem[lit].add_implication(cid, DecLvl::ROOT);
+                self.allocator.lock(cid);
+                self.graph[lit].push(Impl { clause: cid, dec_lvl: DecLvl::ROOT });
+                if self.options.constant_propagation
+                    && lits
+                        .iter()
+                        .filter(|&&l| l != lit)
+                        .all(|&l| self.assignment.constant_value(l) == Some(false))
+                {
+                    self.constant_propagation.push_back(lit);
+                }
+                self.propagation
+                    .add_and_set(lit.var(), self.skolem[lit].len() + self.skolem[!lit].len());
+                self.queue_pure_check(lit.var());
+            }
+            _ => {
+                self.clauses.push(cid);
+                self.watches.add_watch(unassigned[0], Watch { clause: cid });
+                self.watches.add_watch(unassigned[1], Watch { clause: cid });
+            }
+        }
+        None
+    }
+
+    /// Number of completed in-place monotone extensions.
+    pub(crate) fn extension_count(&self) -> u32 {
+        self.stats.global.extensions
+    }
+
     /// Solves the QBF using incremental determinization.
     pub fn solve(&mut self) -> SolverResult {
         let instant = Instant::now();
@@ -496,11 +776,12 @@ impl IncDet {
         result
     }
 
-    // the main solver loop reads best as one piece
-    #[allow(clippy::too_many_lines)]
+    /// Loads the initial state and runs the search. Must only be called
+    /// once per solver; continuations after monotone extensions go through
+    /// [`IncDet::extend_and_resolve`].
     fn _solve(&mut self) -> SolverResult {
-        self.original_clause_count = self.allocator.len();
-        for cid in self.allocator.ids().take(self.original_clause_count) {
+        self.originals = self.allocator.ids().take(self.allocator.len()).collect();
+        for &cid in &self.originals {
             for &lit in self.allocator[cid].iter() {
                 self.occurrences[lit].push(cid);
             }
@@ -527,12 +808,18 @@ impl IncDet {
         }
         self.build_watchlist();
         self.build_vsids_heap();
+        self.search()
+    }
+
+    // the main solver loop reads best as one piece
+    #[allow(clippy::too_many_lines)]
+    fn search(&mut self) -> SolverResult {
         let mut initial = Some(());
         let mut conflicts_since_restart = 0;
         let mut restart_number = 1;
-        let mut next_reduction = REDUCTION_INCREMENT;
-        let mut last_reboot = 0;
-        let mut conflicts_at_last_case = 0;
+        let mut next_reduction = self.learnts.len() + REDUCTION_INCREMENT;
+        let mut last_reboot = self.stats.skolem.global_conflict_checks;
+        let mut conflicts_at_last_case = self.stats.global.conflicts;
         loop {
             if let Some(conflict) = self.propagate() {
                 debug!("{conflict:?}");
@@ -710,6 +997,9 @@ impl IncDet {
             // no implications at all: the function is the constant ¬lit
             // (the classic pure-literal rule), which cascades through the
             // constant propagation
+            if self.trail.decision_level().is_root() {
+                self.root_pure_lits.push(lit);
+            }
             match self.propagate_constant(!lit) {
                 Some(conflict) => PureStep::Conflict(conflict),
                 None => PureStep::Progress,
@@ -718,6 +1008,9 @@ impl IncDet {
             trace!("pure {} is conflicted", var);
             PureStep::Conflict(Conflict { var, assignment })
         } else {
+            // assigned as a decision (a fresh level), so unlike the
+            // constant case this choice is unwound by backtracking and
+            // needs no extension gate
             trace!("assigning pure literal {lit}");
             self.assign_and_propagate(lit, true, false);
             PureStep::Progress

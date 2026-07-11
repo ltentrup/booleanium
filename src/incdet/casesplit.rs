@@ -83,6 +83,24 @@ pub(crate) struct CaseSplits {
     occurrences: Option<HashMap<Var, usize>>,
 }
 
+impl CaseSplits {
+    /// Drops the domain solver and the occurrence counts so the next case
+    /// split rebuilds them. Used by monotone extension: both depend on the
+    /// matrix and the universal variable set; the handled-case exclusions
+    /// are re-derived from the retained cases on rebuild.
+    pub(crate) fn invalidate_domain(&mut self) {
+        self.domain = None;
+        self.occurrences = None;
+    }
+
+    /// Abandons the committed case assumptions (search state, not derived
+    /// knowledge): a monotone extension resumes the search from the root
+    /// with a clean slate.
+    pub(crate) fn clear_committed(&mut self) {
+        self.committed.clear();
+    }
+}
+
 struct DomainSolver(LookupSolver<Varisat>);
 
 impl std::fmt::Debug for DomainSolver {
@@ -324,7 +342,7 @@ impl IncDet {
         }
         self.casesplits.domain = Some(DomainSolver(domain));
         let mut occurrences: HashMap<Var, usize> = HashMap::new();
-        for cid in self.allocator.ids().take(self.original_clause_count) {
+        for &cid in &self.originals {
             for l in self.allocator[cid].iter() {
                 let data = &self.vars[l.var()];
                 if data.scope.is_some() && data.is_universal(&self.prefix) {

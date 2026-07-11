@@ -84,6 +84,14 @@ impl Cegar {
     pub(crate) fn response_phase(&self, var: Var) -> Option<bool> {
         self.latest_response.get(&var).copied()
     }
+
+    /// Drops the response solver so the next round rebuilds it. Used by
+    /// monotone extension: the solver holds the full matrix and the
+    /// occurrence indices of the original clause list, both of which the
+    /// extension changes.
+    pub(crate) fn invalidate_solver(&mut self) {
+        self.solver = None;
+    }
 }
 
 struct ExistsSolver {
@@ -342,9 +350,9 @@ impl IncDet {
         let exists = self.cegar.solver.as_ref().expect("solver exists during round");
         // per original clause: whether an existential literal supports it,
         // and how many universal candidate literals support it
-        let mut existential_support = vec![false; self.original_clause_count];
-        let mut universal_supports = vec![0u32; self.original_clause_count];
-        for (idx, cid) in self.allocator.ids().take(self.original_clause_count).enumerate() {
+        let mut existential_support = vec![false; self.originals.len()];
+        let mut universal_supports = vec![0u32; self.originals.len()];
+        for (idx, &cid) in self.originals.iter().enumerate() {
             for &l in self.allocator[cid].iter() {
                 if !model.contains(&l) {
                     continue;
@@ -413,7 +421,7 @@ impl IncDet {
         let mut occurrences: HashMap<Lit, Vec<usize>> = HashMap::new();
         let mut universal_occurrences: BTreeMap<Lit, Vec<usize>> = BTreeMap::new();
         let mut interface: BTreeSet<Var> = BTreeSet::new();
-        for (orig_idx, cid) in self.allocator.ids().take(self.original_clause_count).enumerate() {
+        for (orig_idx, &cid) in self.originals.iter().enumerate() {
             let clause = &self.allocator[cid];
             let encoded: Vec<_> = clause.iter().map(|&l| solver.lookup(l)).collect();
             solver.add_clause(&encoded);
@@ -453,7 +461,7 @@ impl IncDet {
             "CEGAR frontier: {} interface variables, {} of {} clauses unsettled",
             interface.len(),
             unsettled.len(),
-            self.original_clause_count
+            self.originals.len()
         );
         self.cegar.solver = Some(ExistsSolver {
             solver,

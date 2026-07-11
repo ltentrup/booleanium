@@ -96,16 +96,28 @@ universal point against the matrix. The open work below is about
   per case — the CEGAR response solver knows which clauses supported a
   cube.) This is the difference between "restart per query" and a truly
   incremental games loop.
-* Concretely next, in-place *monotone* continuation: between solves
-  that only added clauses, keep the live solver — retain the root
-  trail (root assignments stay forced under a superset matrix), learnt
-  clauses, and VSIDS, but invalidate handled cases and their
-  conflict-check exclusions (a recorded response need not satisfy new
-  clauses) and re-queue determinacy. The blocker is bookkeeping:
-  `original_clause_count` is a prefix index today and must become an
-  explicit set once originals arrive after learnt clauses; the
-  `_add_clause` load path assumes an unassigned world. Measure against
-  the carrying baseline on an unrolling workload before committing.
+* **In-place monotone continuation — done** (see `PLAN.md` §1c for the
+  full design and measurements): the live solver continues across
+  add-only deltas, keeping root trail, learnt clauses, handled cases
+  (re-verified against exactly the added clauses), activities, and the
+  conflict check; parity unrolling goes quadratic → linear (75 ms →
+  1 ms at 200 steps) and monotone-UNSAT re-solves are free. Two
+  corrections to the plan sketched above, found during implementation:
+  root assignments are *not* all forced — root **pure-constant**
+  assignments are winnability-preserving choices, and survive an added
+  clause containing their literal only if the root functions entail
+  that clause with the unassigned variables treated adversarially; and
+  handled cases need not be discarded wholesale — the same adversarial
+  entailment check re-validates them per extension (budget-capped),
+  which keeps CEGAR/case-split work alive across solves.
+* Remaining gaps, in value order: temporary queries
+  (`solve_with_assumptions`/`solve_with_clauses`, i.e. the ∃∀
+  frontend's negation clause and `check-sat-assuming`) still bake
+  their clauses into the live solver and force a rebuild on the next
+  plain solve — retractable clause support (guard literals on the
+  *matrix* side, or a snapshot/undo of the root integration) would
+  make every frontend check incremental; and pop-retention per the
+  dependency-tracking question above.
 
 ## RQ3 — SMT-LIB as the surface language
 

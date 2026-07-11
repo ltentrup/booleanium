@@ -199,20 +199,53 @@ increasing order of ambition:
 
 ### 1c. Incremental API and SMT-LIB frontend
 
-* **Incremental solving API — done, baseline** (`src/incremental.rs`):
-  an assertion stack of frames (`push`/`pop`/`add_clause`/`define_and`/
+* **Incremental solving API — done** (`src/incremental.rs`): an
+  assertion stack of frames (`push`/`pop`/`add_clause`/`define_and`/
   `solve`/`solve_with_assumptions`) over the ∀∃ core, with
-  *learnt-clause carrying* as the incrementality mechanism — learnt
-  clauses are resolvents of the matrix they were learnt under, tagged
-  with their stack depth and dropped when that depth pops. Piecewise
-  Skolem models are extracted from satisfiable results
-  (`src/incdet/model.rs`): a pointwise evaluator and an SMT-LIB
-  `define-fun` emitter over the region structure of the certificate.
-  Validated by a differential proptest running random
-  push/pop/add/solve sessions against the brute-force oracle,
-  certifying every satisfiable answer, and evaluating the model on
-  every universal point against the matrix (including with aggressive
-  case-split thresholds so closed-case regions are exercised).
+  *learnt-clause carrying* — learnt clauses are resolvents of the
+  matrix they were learnt under, tagged with their stack depth and
+  dropped when that depth pops (deduplicated: the live solver reports
+  its whole learnt set per harvest). Piecewise Skolem models are
+  extracted from satisfiable results (`src/incdet/model.rs`): a
+  pointwise evaluator and an SMT-LIB `define-fun` emitter over the
+  region structure of the certificate. Validated by a differential
+  proptest running random push/pop/add/solve sessions against the
+  brute-force oracle, certifying every satisfiable answer, and
+  evaluating the model on every universal point against the matrix
+  (including with aggressive case-split thresholds so closed-case
+  regions are exercised, and with continuation both on and off).
+* **In-place monotone continuation — done, default on**
+  (`IncDet::extend_and_resolve`, `IncrementalSolver::set_continuation`):
+  between solves whose delta is monotone (only declarations and clause
+  additions — any pop or redeclaration falls back to rebuild), the live
+  solver is continued in place: the root-level trail, learnt clauses,
+  handled cases, variable activities, and the incremental conflict
+  check are all kept; the CEGAR response solver and the case-split
+  domain solver are invalidated and rebuilt lazily; new clauses are
+  integrated at the root mirroring the load/propagation paths (two
+  watches, an implication registration, or — with every existential
+  literal permanently root-assigned — a root-function entailment check
+  whose counterexample is an UNSAT witness). Soundness of retention:
+  root functions and constants are *implied* by their implication
+  clauses and survive any matrix extension; the two exceptions are
+  checked per extension and cause a rebuild when violated — root-level
+  **pure-constant choices** survive only if every added clause
+  containing their literal is entailed by the root functions
+  (unassigned variables adversarial), and every **handled case** must
+  satisfy the added clauses on its region (same adversarial check,
+  budget-capped at 64 cases — beyond that a rebuild is cheaper than
+  the SAT calls). `original_clause_count` became an explicit clause
+  list on this occasion (extension originals arrive after learnt
+  clauses, breaking the prefix-index assumption). Measured on
+  `bench_incremental`: BMC-style parity unrolling (new variables +
+  clauses per step, solve each step) drops from 75–90 ms to ~1 ms at
+  200 steps (quadratic → linear); monotone-UNSAT re-solves are free
+  (verdict shortcut); random clause-refinement chunks are a wash —
+  the retained pure choices and CEGAR cases genuinely die there, the
+  gates reject in microseconds, and remaining deltas are search-
+  trajectory variance. Not carried over a rebuild: nothing — learnt
+  clauses are harvested on success *and* failure (a rejected extension
+  integrates nothing, so the live solver's resolvents stay valid).
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean
