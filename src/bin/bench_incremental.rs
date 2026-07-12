@@ -64,6 +64,36 @@ fn parity_unrolling(solver: &mut IncrementalSolver, steps: u32, unsat: bool) -> 
     result
 }
 
+/// The parity unrolling with a temporary assumption query after every
+/// step (probing a candidate value, as a synthesis loop would): queries
+/// run on a throwaway solver, so the continuation of the plain solves
+/// must survive them.
+fn parity_unrolling_probed(solver: &mut IncrementalSolver, steps: u32) -> SolverResult {
+    let mut result = SolverResult::Unknown;
+    for i in 1..=steps {
+        let (u, x) = (2 * i - 1, 2 * i);
+        solver.declare_universal(u);
+        solver.declare_existential(x);
+        let (u, x) = (i32::try_from(u).unwrap(), i32::try_from(x).unwrap());
+        if i == 1 {
+            solver.add_clause(&[-u, x]);
+            solver.add_clause(&[u, -x]);
+        } else {
+            let xp = x - 2;
+            solver.add_clause(&[xp, u, -x]);
+            solver.add_clause(&[-xp, -u, -x]);
+            solver.add_clause(&[-xp, u, x]);
+            solver.add_clause(&[xp, -u, x]);
+        }
+        result = solver.solve();
+        assert_eq!(result, SolverResult::Satisfiable);
+        // probe: can the newest chain output be forced constant true?
+        let probe = solver.solve_with_assumptions(&[x]);
+        assert_eq!(probe, SolverResult::Unsatisfiable);
+    }
+    result
+}
+
 /// Declares a fixed 2QBF variable set and feeds a random matrix in
 /// chunks, re-solving after each chunk: the clause-refinement access
 /// pattern (e.g. counterexample-guided loops adding constraints).
@@ -137,6 +167,7 @@ fn main() {
     for n in [50, 100, 200] {
         run(&format!("parity-unroll-sat-{n}"), |solver| parity_unrolling(solver, n, false));
         run(&format!("parity-unroll-unsat-{n}"), |solver| parity_unrolling(solver, n, true));
+        run(&format!("parity-unroll-probed-{n}"), |solver| parity_unrolling_probed(solver, n));
     }
     for (k, m, c, chunks, seed) in
         [(10, 60, 220, 10, 1), (10, 60, 220, 10, 2), (12, 90, 330, 15, 1), (12, 90, 330, 15, 2)]

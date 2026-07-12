@@ -110,14 +110,26 @@ universal point against the matrix. The open work below is about
   handled cases need not be discarded wholesale — the same adversarial
   entailment check re-validates them per extension (budget-capped),
   which keeps CEGAR/case-split work alive across solves.
-* Remaining gaps, in value order: temporary queries
-  (`solve_with_assumptions`/`solve_with_clauses`, i.e. the ∃∀
-  frontend's negation clause and `check-sat-assuming`) still bake
-  their clauses into the live solver and force a rebuild on the next
-  plain solve — retractable clause support (guard literals on the
-  *matrix* side, or a snapshot/undo of the root integration) would
-  make every frontend check incremental; and pop-retention per the
-  dependency-tracking question above.
+* **Temporary queries no longer cost continuation — done**: a query
+  (`solve_with_assumptions`/`solve_with_clauses`, i.e.
+  `check-sat-assuming` and the ∃∀ frontend's negation clause) runs on
+  a throwaway solver built beside the continuation base and serves the
+  model calls until the next solve; the base stays untouched, so
+  interleaved probe queries keep the plain solves linear (probed
+  parity unrolling: every step continues in place). Likewise, a pop
+  of frames the base never solved (push/assert/pop scoping) no longer
+  invalidates anything: the base tracks per-frame *integrated sizes*,
+  frames are append-only, and the delta is derived at solve time.
+* Remaining gaps, in value order: the query solvers themselves are
+  still rebuilds — making them incremental needs *assumption-scoped
+  solving in the core* (assume literals at a pre-decision level,
+  answer for the assumed sub-domain only, retract without recording
+  exclusions; the universal case-assumption machinery is most of the
+  ingredients, existential assumptions want a guard-literal
+  convention). That is also what a QIPASIR-style interface would
+  expose, and it would make every ∃∀ `check-sat` incremental. And
+  pop-retention of *solved* state per the dependency-tracking question
+  above.
 
 ## RQ3 — SMT-LIB as the surface language
 

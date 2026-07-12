@@ -246,6 +246,23 @@ increasing order of ambition:
   trajectory variance. Not carried over a rebuild: nothing — learnt
   clauses are harvested on success *and* failure (a rejected extension
   integrates nothing, so the live solver's resolvents stay valid).
+* **Queries and scoped pops preserve the continuation — done**:
+  temporary queries (`solve_with_assumptions`/`solve_with_clauses` —
+  `check-sat-assuming`, the ∃∀ negation clause) run on a *throwaway
+  solver* beside the continuation base and serve the model calls until
+  the next solve, instead of baking their clauses into the live
+  solver; and the base records per-frame *integrated sizes* (frames
+  are append-only apart from whole-frame pops), so the delta of the
+  next solve is derived on demand and a pop of frames the base never
+  solved — the push/assert/pop scoping pattern — costs nothing. Only
+  popping an integrated frame or redeclaring a variable still forces a
+  rebuild (inherent to root permanence). Measured: probed parity
+  unrolling (an assumption query after every step) keeps all plain
+  solves in-place; the residual gap is the query rebuilds themselves,
+  which need assumption-scoped solving in the core (see
+  `RESEARCH.md`). The differential session fuzz gained
+  assumption-query actions, checked against the oracle with
+  certification and model evaluation under the assumptions.
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean

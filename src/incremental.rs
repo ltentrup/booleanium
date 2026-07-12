@@ -6,17 +6,27 @@
 //! a ∀∃ prefix, and extracts piecewise Skolem functions from satisfiable
 //! results.
 //!
-//! Incrementality (this is the correctness-first baseline; see
-//! `RESEARCH.md` for the planned in-place variant): every solve runs a
-//! fresh core solver over the current stack, but the clauses *learnt*
-//! during a solve are carried to future solves. Learnt clauses are
-//! resolvents of the matrix they were learnt under, so they remain valid
-//! for every extension of that matrix; each carried clause is therefore
-//! tagged with the stack depth at which it was learnt and dropped as soon
-//! as that depth is popped. Assumption-based solving
-//! ([`IncrementalSolver::solve_with_assumptions`]) is sugar for a push /
-//! unit clauses / solve / pop sequence, so clauses learnt under
-//! assumptions are dropped when the assumptions are retracted.
+//! Incrementality has three layers:
+//!
+//! * **In-place continuation** (default; see
+//!   [`IncDet::extend_and_resolve`]): while the stack changes stay
+//!   monotone — declarations and clause additions, including in frames
+//!   that are pushed and popped without a solve in between — a plain
+//!   solve continues the live solver of the previous solve instead of
+//!   rebuilding, keeping all derived state. Popping a frame the live
+//!   solver has integrated, or redeclaring a variable, falls back to a
+//!   rebuild.
+//! * **Learnt-clause carrying**: rebuilds are seeded with the clauses
+//!   learnt by earlier solves. Learnt clauses are resolvents of the
+//!   matrix they were learnt under, so they remain valid for every
+//!   extension of that matrix; each carried clause is tagged with the
+//!   stack depth at which it was harvested and dropped as soon as that
+//!   depth is popped.
+//! * **Temporary queries** ([`IncrementalSolver::solve_with_assumptions`]
+//!   / [`IncrementalSolver::solve_with_clauses`]): solved on a throwaway
+//!   solver beside the continuation base, so a query never costs future
+//!   incrementality; the query solver serves the model calls until the
+//!   next solve. Nothing learnt under temporary clauses is carried.
 
 use crate::{
     incdet::{model::SkolemModel, IncDet, Options},
@@ -33,20 +43,29 @@ struct Frame {
     clauses: Vec<Vec<i32>>,
 }
 
-/// The additions since the last solve, mirrored from the frames while the
-/// stack changes stay monotone (no pop, no redeclaration). Fed to
-/// [`IncDet::extend_and_resolve`] to continue the live solver in place.
-#[derive(Debug, Default)]
-struct Pending {
-    universals: Vec<u32>,
-    existentials: Vec<u32>,
-    clauses: Vec<Vec<i32>>,
+/// The continuation state of the last plain [`IncrementalSolver::solve`]:
+/// the live solver, its verdict, and how much of every stack frame it has
+/// integrated. Frames are append-only (apart from whole-frame pops and
+/// redeclarations, which invalidate the base), so the per-frame lengths
+/// identify the integrated prefix and everything beyond them is the delta
+/// of the next solve — including content of frames that were pushed and
+/// popped in between without ever being solved.
+#[derive(Debug)]
+struct Base {
+    result: SolverResult,
+    solver: IncDet,
+    /// per-frame `(universals, existentials, clauses)` lengths at the
+    /// time of integration
+    integrated: Vec<(usize, usize, usize)>,
 }
 
-impl Pending {
-    fn is_empty(&self) -> bool {
-        self.universals.is_empty() && self.existentials.is_empty() && self.clauses.is_empty()
-    }
+/// Which solver serves model queries for the most recent solve.
+#[derive(Debug, Clone, Copy)]
+enum Served {
+    /// the continuation base (a plain solve)
+    Base,
+    /// the throwaway solver of a temporary query
+    Query,
 }
 
 /// An incremental ∀∃ (2QBF) solver.
@@ -62,11 +81,15 @@ pub struct IncrementalSolver {
     /// dedup mirror of `learnt`: the live solver reports its whole learnt
     /// set on every harvest, and each clause is carried at most once
     carried: HashSet<Vec<i32>>,
-    /// the solver and result of the most recent solve, for model queries
-    last: Option<(SolverResult, IncDet)>,
-    /// additions since the last solve; `None` once a pop or a
-    /// redeclaration made the delta non-monotone
-    pending: Option<Pending>,
+    /// the continuation base: the live solver of the last plain solve
+    base: Option<Base>,
+    /// the solver of the most recent temporary query
+    /// ([`IncrementalSolver::solve_with_assumptions`] /
+    /// [`IncrementalSolver::solve_with_clauses`]), kept for model queries
+    query: Option<(SolverResult, IncDet)>,
+    /// which solver answers model queries; `None` after a stack change
+    /// that staled the models (pop, redeclaration)
+    last: Option<Served>,
     /// whether monotone deltas continue the live solver in place instead
     /// of rebuilding
     continuation: bool,
@@ -88,8 +111,9 @@ impl IncrementalSolver {
             frames: vec![Frame::default()],
             learnt: Vec::new(),
             carried: HashSet::new(),
+            base: None,
+            query: None,
             last: None,
-            pending: None,
             continuation: true,
             next_var: 1,
         }
@@ -118,18 +142,12 @@ impl IncrementalSolver {
     pub fn declare_universal(&mut self, var: u32) {
         self.note_var(var);
         self.frames.last_mut().expect("base frame exists").universals.push(var);
-        if let Some(pending) = &mut self.pending {
-            pending.universals.push(var);
-        }
     }
 
     /// Declares an existential variable in the current frame.
     pub fn declare_existential(&mut self, var: u32) {
         self.note_var(var);
         self.frames.last_mut().expect("base frame exists").existentials.push(var);
-        if let Some(pending) = &mut self.pending {
-            pending.existentials.push(var);
-        }
     }
 
     /// Adds a clause (DIMACS literals) to the current frame.
@@ -138,9 +156,6 @@ impl IncrementalSolver {
             self.note_var(l.unsigned_abs());
         }
         self.frames.last_mut().expect("base frame exists").clauses.push(lits.to_vec());
-        if let Some(pending) = &mut self.pending {
-            pending.clauses.push(lits.to_vec());
-        }
     }
 
     /// Adds a clause to the frame at stack depth `depth` instead of the
@@ -156,9 +171,6 @@ impl IncrementalSolver {
             self.note_var(l.unsigned_abs());
         }
         self.frames[depth].clauses.push(lits.to_vec());
-        if let Some(pending) = &mut self.pending {
-            pending.clauses.push(lits.to_vec());
-        }
     }
 
     /// Changes an existing existential declaration into a universal one,
@@ -170,9 +182,11 @@ impl IncrementalSolver {
             if let Some(pos) = frame.existentials.iter().position(|&v| v == var) {
                 frame.existentials.remove(pos);
                 frame.universals.push(var);
+                // an integrated frame was edited: the live solver no
+                // longer matches any prefix of the stack
+                self.base = None;
+                self.query = None;
                 self.last = None;
-                // not a monotone change: the variable's role flipped
-                self.pending = None;
                 return;
             }
         }
@@ -210,9 +224,16 @@ impl IncrementalSolver {
         let depth = self.frames.len() - 1;
         self.learnt.retain(|(d, _)| *d <= depth);
         self.carried = self.learnt.iter().map(|(_, c)| c.clone()).collect();
+        // the base survives a pop of frames it never integrated (a
+        // pushed-and-popped scope without a solve inside); popping an
+        // integrated frame retracts clauses the live solver holds
+        let integrated_popped =
+            self.base.as_ref().is_some_and(|base| self.frames.len() < base.integrated.len());
+        if integrated_popped {
+            self.base = None;
+        }
+        self.query = None;
         self.last = None;
-        // not a monotone change: clauses were retracted
-        self.pending = None;
         true
     }
 
@@ -222,9 +243,9 @@ impl IncrementalSolver {
         self.frames.len() - 1
     }
 
-    /// Builds the 2QBF instance for the current stack, including the
-    /// carried learnt clauses.
-    fn qcnf(&self) -> QCNF {
+    /// Builds the 2QBF instance for the current stack plus the given
+    /// extra clauses, including the carried learnt clauses.
+    fn qcnf_with(&self, extra: &[Vec<i32>]) -> QCNF {
         let universals: Vec<u32> =
             self.frames.iter().flat_map(|f| f.universals.iter().copied()).collect();
         let existentials: Vec<u32> =
@@ -234,6 +255,7 @@ impl IncrementalSolver {
             .iter()
             .flat_map(|f| f.clauses.iter().map(Vec::as_slice))
             .chain(self.learnt.iter().map(|(_, c)| c.as_slice()))
+            .chain(extra.iter().map(Vec::as_slice))
             .collect();
         let mut prefix: Vec<(QuantTy, &[u32])> = Vec::new();
         if !universals.is_empty() {
@@ -243,48 +265,79 @@ impl IncrementalSolver {
         QCNF::new(&prefix, &clauses)
     }
 
-    /// Solves the conjunction of the assertion stack. When the changes
-    /// since the last solve are monotone (only declarations and clause
-    /// additions) the live solver is continued in place; otherwise — and
-    /// whenever the in-place path reports that its retained state cannot
-    /// be soundly kept — a fresh solver is built from the stack plus the
+    /// Builds the 2QBF instance for the current stack, including the
     /// carried learnt clauses.
+    fn qcnf(&self) -> QCNF {
+        self.qcnf_with(&[])
+    }
+
+    /// The per-frame sizes of the current stack.
+    fn frame_sizes(&self) -> Vec<(usize, usize, usize)> {
+        self.frames
+            .iter()
+            .map(|f| (f.universals.len(), f.existentials.len(), f.clauses.len()))
+            .collect()
+    }
+
+    /// The stack content beyond the integrated per-frame sizes: the
+    /// monotone delta between the base solver and the current stack.
+    fn delta(&self, integrated: &[(usize, usize, usize)]) -> (Vec<u32>, Vec<u32>, Vec<Vec<i32>>) {
+        let mut universals = Vec::new();
+        let mut existentials = Vec::new();
+        let mut clauses = Vec::new();
+        for (i, frame) in self.frames.iter().enumerate() {
+            let (u, e, c) = integrated.get(i).copied().unwrap_or((0, 0, 0));
+            universals.extend_from_slice(&frame.universals[u..]);
+            existentials.extend_from_slice(&frame.existentials[e..]);
+            clauses.extend_from_slice(&frame.clauses[c..]);
+        }
+        (universals, existentials, clauses)
+    }
+
+    /// Solves the conjunction of the assertion stack. When the changes
+    /// since the last plain solve are monotone (only declarations and
+    /// clause additions, including inside frames that were pushed and
+    /// popped without a solve) the live solver is continued in place;
+    /// otherwise — and whenever the in-place path reports that its
+    /// retained state cannot be soundly kept — a fresh solver is built
+    /// from the stack plus the carried learnt clauses.
     pub fn solve(&mut self) -> SolverResult {
+        self.query = None;
         if self.continuation {
-            if let Some(pending) = self.pending.take() {
-                if let Some((result, mut solver)) = self.last.take() {
-                    match result {
-                        // adding clauses and variables keeps an
-                        // unsatisfiable instance unsatisfiable; the delta
-                        // keeps accumulating
-                        SolverResult::Unsatisfiable => {
-                            self.last = Some((result, solver));
-                            self.pending = Some(pending);
-                            return SolverResult::Unsatisfiable;
-                        }
-                        SolverResult::Satisfiable if pending.is_empty() => {
-                            self.last = Some((result, solver));
-                            self.pending = Some(pending);
-                            return SolverResult::Satisfiable;
-                        }
-                        SolverResult::Satisfiable => {
-                            let extended = solver.extend_and_resolve(
-                                &pending.universals,
-                                &pending.existentials,
-                                &pending.clauses,
-                            );
-                            // the live solver's learnt clauses are valid
-                            // resolvents of the current stack either way
-                            // (a rejected extension integrates nothing)
-                            self.harvest_learnt(&solver);
-                            if let Some(new_result) = extended {
-                                self.last = Some((new_result, solver));
-                                self.pending = Some(Pending::default());
-                                return new_result;
-                            }
-                        }
-                        SolverResult::Unknown => {}
+            if let Some(mut base) = self.base.take() {
+                let (universals, existentials, clauses) = self.delta(&base.integrated);
+                let unchanged =
+                    universals.is_empty() && existentials.is_empty() && clauses.is_empty();
+                match base.result {
+                    // adding clauses and variables keeps an unsatisfiable
+                    // instance unsatisfiable; the delta stays un-integrated
+                    SolverResult::Unsatisfiable => {
+                        self.base = Some(base);
+                        self.last = Some(Served::Base);
+                        return SolverResult::Unsatisfiable;
                     }
+                    SolverResult::Satisfiable if unchanged => {
+                        self.base = Some(base);
+                        self.last = Some(Served::Base);
+                        return SolverResult::Satisfiable;
+                    }
+                    SolverResult::Satisfiable => {
+                        let extended =
+                            base.solver.extend_and_resolve(&universals, &existentials, &clauses);
+                        // the live solver's learnt clauses are valid
+                        // resolvents of the current stack either way (a
+                        // rejected extension integrates nothing)
+                        self.harvest_learnt(&base.solver);
+                        if let Some(result) = extended {
+                            base.result = result;
+                            base.integrated = self.frame_sizes();
+                            self.base = Some(base);
+                            self.last = Some(Served::Base);
+                            return result;
+                        }
+                        // rejected: fall through to a rebuild
+                    }
+                    SolverResult::Unknown => {}
                 }
             }
         }
@@ -292,8 +345,8 @@ impl IncrementalSolver {
         let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
         let result = solver.solve();
         self.harvest_learnt(&solver);
-        self.last = Some((result, solver));
-        self.pending = Some(Pending::default());
+        self.base = Some(Base { result, solver, integrated: self.frame_sizes() });
+        self.last = Some(Served::Base);
         result
     }
 
@@ -318,35 +371,43 @@ impl IncrementalSolver {
         self.solve_with_clauses(&clauses)
     }
 
-    /// Solves the assertion stack under temporary clauses, retracted
-    /// afterwards together with everything learnt from them. Unlike
+    /// Solves the assertion stack under temporary clauses. Unlike
     /// [`IncrementalSolver::add_clause`], this supports clauses that do
     /// not stay implied when the ambient formula changes (a later solve
-    /// must not resolve against them).
+    /// must not resolve against them). The query runs on a throwaway
+    /// solver, so the continuation base of the plain solves stays
+    /// untouched; nothing learnt under the temporary clauses is carried.
     pub fn solve_with_clauses(&mut self, clauses: &[Vec<i32>]) -> SolverResult {
-        self.push();
-        for clause in clauses {
-            self.add_clause(clause);
-        }
-        let result = self.solve();
-        let last = self.last.take();
-        self.pop();
-        self.last = last;
+        let qcnf = self.qcnf_with(clauses);
+        let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
+        let result = solver.solve();
+        self.query = Some((result, solver));
+        self.last = Some(Served::Query);
         result
+    }
+
+    /// The result and solver of the most recent solve, if the stack has
+    /// not changed in a model-invalidating way since (pop,
+    /// redeclaration).
+    fn served(&self) -> Option<(SolverResult, &IncDet)> {
+        match self.last? {
+            Served::Base => self.base.as_ref().map(|b| (b.result, &b.solver)),
+            Served::Query => self.query.as_ref().map(|(r, s)| (*r, s)),
+        }
     }
 
     /// The result of the most recent solve, if the stack has not changed
     /// since.
     #[must_use]
     pub fn last_result(&self) -> Option<SolverResult> {
-        self.last.as_ref().map(|(r, _)| *r)
+        self.served().map(|(r, _)| r)
     }
 
     /// The piecewise Skolem model of the most recent solve. Only valid if
     /// the last result was [`SolverResult::Satisfiable`].
     #[must_use]
     pub fn skolem_model(&self) -> Option<SkolemModel> {
-        match &self.last {
+        match self.served() {
             Some((SolverResult::Satisfiable, solver)) => Some(solver.skolem_model()),
             _ => None,
         }
@@ -355,15 +416,15 @@ impl IncrementalSolver {
     /// Verifies the Skolem functions of the most recent satisfiable solve.
     #[must_use]
     pub fn verify(&self) -> bool {
-        matches!(&self.last, Some((SolverResult::Satisfiable, solver)) if solver.verify_skolem_functions())
+        matches!(self.served(), Some((SolverResult::Satisfiable, solver)) if solver.verify_skolem_functions())
     }
 
-    /// Number of in-place monotone extensions the live solver has
+    /// Number of in-place monotone extensions the continuation base has
     /// performed since its last rebuild (diagnostic for incremental
     /// workloads).
     #[must_use]
     pub fn extension_count(&self) -> u32 {
-        self.last.as_ref().map_or(0, |(_, solver)| solver.extension_count())
+        self.base.as_ref().map_or(0, |base| base.solver.extension_count())
     }
 
     /// The verified winning move of the universal player for the most
@@ -374,7 +435,7 @@ impl IncrementalSolver {
     /// (see [`IncDet::unsat_witness`]).
     #[must_use]
     pub fn universal_witness(&self) -> Option<Vec<i32>> {
-        match &self.last {
+        match self.served() {
             Some((SolverResult::Unsatisfiable, solver)) => solver.unsat_witness(),
             _ => None,
         }
@@ -456,6 +517,37 @@ mod test {
     }
 
     #[test]
+    fn queries_and_scoped_pops_keep_the_continuation() {
+        let mut solver = IncrementalSolver::default();
+        solver.declare_universal(1);
+        solver.declare_existential(2);
+        solver.add_clause(&[-1, 2]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        // a temporary query runs beside the base and serves the model
+        assert_eq!(solver.solve_with_assumptions(&[-2]), SolverResult::Unsatisfiable);
+        assert_eq!(solver.universal_witness(), Some(vec![1]));
+        assert_eq!(solver.solve_with_assumptions(&[2]), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        // a pushed-and-popped scope without a solve inside is invisible
+        solver.push();
+        solver.add_clause(&[-2]);
+        assert!(solver.pop());
+        // both left the base intact: the next solve continues in place
+        solver.add_clause(&[1, -2]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert_eq!(solver.extension_count(), 1, "the base was continued, not rebuilt");
+        assert!(solver.verify());
+        // popping a frame the base integrated forces a rebuild
+        solver.push();
+        solver.add_clause(&[1]);
+        assert_eq!(solver.solve(), SolverResult::Unsatisfiable);
+        assert!(solver.pop());
+        assert_eq!(solver.last_result(), None, "models are stale after a pop");
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert_eq!(solver.extension_count(), 0, "the base was rebuilt");
+    }
+
+    #[test]
     fn define_and_gates() {
         let mut solver = IncrementalSolver::default();
         solver.declare_universal(1);
@@ -502,7 +594,7 @@ mod test {
         }
         let mut depth = 0usize;
         for (action, clause) in script {
-            match action % 4 {
+            match action % 5 {
                 0 => {
                     solver.push();
                     depth += 1;
@@ -514,20 +606,36 @@ mod test {
                     assert_eq!(solver.depth(), depth);
                 }
                 2 => solver.add_clause(clause),
-                _ => {
+                3 => {
                     let result = solver.solve();
                     let expected = solver.qcnf().brute_force();
                     assert_eq!(result, expected, "verdict differs from the oracle");
                     if result == SolverResult::Satisfiable {
                         assert!(solver.verify(), "certificate invalid");
-                        check_model(&solver, universals);
+                        check_model(&solver, universals, &[]);
+                    }
+                }
+                _ => {
+                    // a temporary query: the clause literals as assumptions
+                    let assumptions: Vec<i32> =
+                        clause.iter().filter(|l| l.unsigned_abs() > universals).copied().collect();
+                    let result = solver.solve_with_assumptions(&assumptions);
+                    let mut qcnf = solver.qcnf();
+                    for &lit in &assumptions {
+                        qcnf.matrix.push(vec![crate::literal::Lit::from_dimacs(lit)]);
+                    }
+                    let expected = qcnf.brute_force();
+                    assert_eq!(result, expected, "query verdict differs from the oracle");
+                    if result == SolverResult::Satisfiable {
+                        assert!(solver.verify(), "query certificate invalid");
+                        check_model(&solver, universals, &assumptions);
                     }
                 }
             }
         }
     }
 
-    fn check_model(solver: &IncrementalSolver, universals: u32) {
+    fn check_model(solver: &IncrementalSolver, universals: u32, assumptions: &[i32]) {
         let model = solver.skolem_model().expect("satisfiable");
         let qcnf = solver.qcnf();
         for point in 0..(1u32 << universals) {
@@ -557,6 +665,9 @@ mod test {
                     clause.iter().any(|l| truth(l.to_dimacs())),
                     "model falsifies a clause at {assignment:?}"
                 );
+            }
+            for &lit in assumptions {
+                assert!(truth(lit), "model violates assumption {lit} at {assignment:?}");
             }
         }
     }
