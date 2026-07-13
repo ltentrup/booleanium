@@ -128,9 +128,13 @@ impl IncDet {
     /// remaining domain, or detect that the domain is fully handled.
     pub(crate) fn open_case(&mut self) -> CaseAction {
         self.ensure_domain_solver();
-        // the next assumption must lie in the remaining domain, and inside
-        // the active case
-        let active: Vec<Lit> = self.casesplits.active.iter().map(|&(lit, _)| lit).collect();
+        // The next assumption must lie in the remaining domain, inside the
+        // active case, and inside the domain restriction of an active
+        // query: outside the restriction there is nothing to cover, and
+        // an empty remaining domain then correctly means the *restricted*
+        // region is fully handled.
+        let mut active: Vec<Lit> = self.query_universal_cube();
+        active.extend(self.casesplits.active.iter().map(|&(lit, _)| lit));
         let domain = self.casesplits.domain.as_mut().expect("domain solver was just created");
         let assumptions: Vec<_> = active.iter().map(|&l| domain.0.lookup(l)).collect();
         if !domain.0.solve_with_assumptions(&assumptions).unwrap() {
@@ -233,7 +237,11 @@ impl IncDet {
     /// of the active assumptions. Records the case, excludes the cube, and
     /// backtracks below the assumptions.
     pub(crate) fn close_cases(&mut self) {
-        let cube: Vec<Lit> = self.casesplits.active.iter().map(|&(lit, _)| lit).collect();
+        // the functions were derived under the domain restriction of an
+        // active query, so the recorded case only covers (and excludes)
+        // the intersection with the query cube
+        let mut cube: Vec<Lit> = self.query_universal_cube();
+        cube.extend(self.casesplits.active.iter().map(|&(lit, _)| lit));
         let below = self.casesplits.active.first().expect("a case is active").1;
         info!(
             "closing case {:?} with {} handled cases",

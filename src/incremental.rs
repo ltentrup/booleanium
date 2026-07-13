@@ -35,6 +35,24 @@ use crate::{
 };
 use std::collections::HashSet;
 
+/// Restricts the universal domain of an instance to the given literals:
+/// clauses satisfied by a restriction literal are dropped, falsified
+/// literals are deleted, and the restricted variables leave the prefix
+/// (their value is fixed). Must not be called with contradictory
+/// restriction literals.
+fn restrict_universals(qcnf: &mut QCNF, restriction: &[i32]) {
+    for &raw in restriction {
+        let lit = crate::literal::Lit::from_dimacs(raw);
+        qcnf.matrix.retain(|clause| !clause.contains(&lit));
+        for clause in &mut qcnf.matrix {
+            clause.retain(|&l| l != !lit);
+        }
+        for (_, vars) in &mut qcnf.prefix {
+            vars.retain(|&v| v != lit.var());
+        }
+    }
+}
+
 /// One frame of the assertion stack.
 #[derive(Debug, Default, Clone)]
 struct Frame {
@@ -371,17 +389,30 @@ impl IncrementalSolver {
         }
     }
 
-    /// Solves the assertion stack under the given assumption literals
-    /// (temporary unit clauses, retracted afterwards).
+    /// Solves the assertion stack under the given assumption literals,
+    /// retracted afterwards. An *existential* assumption is a temporary
+    /// unit constraint (the variable's Skolem function must be the
+    /// assumed constant). A *universal* assumption restricts the
+    /// universal player's domain to the assumed polarity — the
+    /// "what if the environment plays u" probe of a games loop; an
+    /// unsatisfiable answer under a universal restriction therefore
+    /// implies the whole stack is unsatisfiable. Contradictory universal
+    /// assumptions denote an empty domain, over which the ∀-quantifier is
+    /// vacuously satisfied.
     ///
-    /// When the continuation base exists, the query first tries to run
-    /// *in place* on the live solver ([`IncDet::resolve_with_assumptions`]):
-    /// the stack is brought up to date with a plain solve, the literals
-    /// are assumed as retractable constants, and everything learnt or
+    /// The query first tries to run *in place* on the live solver
+    /// ([`IncDet::resolve_with_assumptions`]): the stack is brought up to
+    /// date with a plain solve, the literals are assumed as retractable
+    /// constants at query decision levels, and everything learnt or
     /// recorded during the query persists. When the in-place path
     /// declines (recorded cases predate the query, unsupported assumption
-    /// shapes), the query falls back to a throwaway solver.
+    /// shapes), the query falls back to a throwaway solver over the
+    /// restricted instance.
     pub fn solve_with_assumptions(&mut self, assumptions: &[i32]) -> SolverResult {
+        let universal_set: HashSet<u32> =
+            self.frames.iter().flat_map(|f| f.universals.iter().copied()).collect();
+        let (universal, existential): (Vec<i32>, Vec<i32>) =
+            assumptions.iter().partition(|l| universal_set.contains(&l.unsigned_abs()));
         if self.continuation {
             // bring the base up to date with the stack (establishing it
             // on the first query); when nothing changed the query manages
@@ -397,8 +428,12 @@ impl IncrementalSolver {
                 self.solve()
             };
             match result {
-                // an unsatisfiable stack answers any query
-                SolverResult::Unsatisfiable => {
+                // An unsatisfiable stack answers queries that only
+                // strengthen it. A universal assumption *weakens* the
+                // obligation instead — the universal player's winning
+                // move may lie outside the restriction — so those fall
+                // through to the restricted throwaway solve.
+                SolverResult::Unsatisfiable if universal.is_empty() => {
                     self.query = None;
                     self.last = Some(Served::BaseQuery(SolverResult::Unsatisfiable));
                     return SolverResult::Unsatisfiable;
@@ -417,11 +452,27 @@ impl IncrementalSolver {
                         }
                     }
                 }
-                SolverResult::Unknown => {}
+                SolverResult::Unsatisfiable | SolverResult::Unknown => {}
             }
         }
-        let clauses: Vec<Vec<i32>> = assumptions.iter().map(|&lit| vec![lit]).collect();
-        self.solve_with_clauses(&clauses)
+        // throwaway fallback: existential assumptions become temporary
+        // unit clauses; universal assumptions substitute their constant
+        // into the instance (a unit clause would instead let the
+        // universal player falsify it)
+        let contradictory = universal.iter().any(|&l| universal.contains(&-l));
+        let units: Vec<Vec<i32>> = existential.iter().map(|&lit| vec![lit]).collect();
+        let mut qcnf = self.qcnf_with(&units);
+        if contradictory {
+            // an empty restricted domain: vacuously satisfiable
+            qcnf = QCNF::new(&[(QuantTy::Exists, &[])], &[]);
+        } else {
+            restrict_universals(&mut qcnf, &universal);
+        }
+        let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
+        let result = solver.solve();
+        self.query = Some((result, solver));
+        self.last = Some(Served::Query);
+        result
     }
 
     /// Solves the assertion stack under temporary clauses. Unlike
@@ -627,6 +678,34 @@ mod test {
     }
 
     #[test]
+    fn universal_assumption_queries() {
+        let mut solver = IncrementalSolver::default();
+        solver.declare_universal(1);
+        solver.declare_existential(2);
+        // e2 must equal u1
+        solver.add_clause(&[-1, 2]);
+        solver.add_clause(&[1, -2]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        // restricting the domain keeps satisfiability; the model and
+        // certificate are scoped to the restriction
+        assert_eq!(solver.solve_with_assumptions(&[1]), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        let model = solver.skolem_model().expect("satisfiable");
+        assert!(model.evaluate(&[1])[&2]);
+        // mixed: inside u1 the requirement e2 = false is unsatisfiable...
+        assert_eq!(solver.solve_with_assumptions(&[1, -2]), SolverResult::Unsatisfiable);
+        assert_eq!(solver.universal_witness(), Some(vec![1]));
+        // ...but outside the restriction it is satisfiable
+        assert_eq!(solver.solve_with_assumptions(&[-1, -2]), SolverResult::Satisfiable);
+        // an unsatisfiable stack can still be winnable on a sub-domain
+        solver.add_clause(&[1]);
+        assert_eq!(solver.solve(), SolverResult::Unsatisfiable);
+        assert_eq!(solver.solve_with_assumptions(&[1]), SolverResult::Satisfiable);
+        // contradictory restrictions: an empty domain, vacuously sat
+        assert_eq!(solver.solve_with_assumptions(&[1, -1]), SolverResult::Satisfiable);
+    }
+
+    #[test]
     fn define_and_gates() {
         let mut solver = IncrementalSolver::default();
         solver.declare_universal(1);
@@ -696,13 +775,26 @@ mod test {
                 }
                 _ => {
                     // a temporary query: the clause literals as assumptions
-                    let assumptions: Vec<i32> =
-                        clause.iter().filter(|l| l.unsigned_abs() > universals).copied().collect();
+                    // (universal literals restrict the domain)
+                    let assumptions = clause.clone();
                     let result = solver.solve_with_assumptions(&assumptions);
+                    let universal_part: Vec<i32> = assumptions
+                        .iter()
+                        .filter(|l| l.unsigned_abs() <= universals)
+                        .copied()
+                        .collect();
+                    if universal_part.iter().any(|&l| universal_part.contains(&-l)) {
+                        // an empty restricted domain is vacuously satisfiable
+                        assert_eq!(result, SolverResult::Satisfiable);
+                        continue;
+                    }
                     let mut qcnf = solver.qcnf();
                     for &lit in &assumptions {
-                        qcnf.matrix.push(vec![crate::literal::Lit::from_dimacs(lit)]);
+                        if lit.unsigned_abs() > universals {
+                            qcnf.matrix.push(vec![crate::literal::Lit::from_dimacs(lit)]);
+                        }
                     }
+                    restrict_universals(&mut qcnf, &universal_part);
                     let expected = qcnf.brute_force();
                     assert_eq!(result, expected, "query verdict differs from the oracle");
                     if result == SolverResult::Satisfiable {
@@ -729,6 +821,14 @@ mod test {
                     }
                 })
                 .collect();
+            // universal assumptions restrict the domain: the model only
+            // covers points extending them
+            if assumptions
+                .iter()
+                .any(|&l| l.unsigned_abs() <= universals && !assignment.contains(&l))
+            {
+                continue;
+            }
             let values = model.evaluate(&assignment);
             let truth = |l: i32| -> bool {
                 let var = l.unsigned_abs();

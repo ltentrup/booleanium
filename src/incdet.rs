@@ -702,8 +702,38 @@ impl IncDet {
     /// into a state it cannot attribute.
     pub fn resolve_with_assumptions(&mut self, assumptions: &[i32]) -> Option<SolverResult> {
         self.query_assumptions.clear();
+        // Partition: universal assumptions restrict the domain and must
+        // be in force before any existential assumption is judged — a
+        // verdict derived at a point outside the restriction would be
+        // about a game the query never plays.
+        let mut universal: Vec<Lit> = Vec::new();
+        let mut existential: Vec<Lit> = Vec::new();
+        for &raw in assumptions {
+            let lit = Lit::from_dimacs(raw);
+            let var = lit.var();
+            if var.as_index() >= self.vars.get_var_count() || self.vars[var].scope.is_none() {
+                return None;
+            }
+            if self.vars[var].is_universal(&self.prefix) {
+                // contradictory restrictions leave an empty domain, over
+                // which the ∀-quantifier is vacuously satisfied
+                if universal.contains(&!lit) {
+                    return Some(SolverResult::Satisfiable);
+                }
+                if !universal.contains(&lit) {
+                    universal.push(lit);
+                }
+            } else if !existential.contains(&lit) {
+                existential.push(lit);
+            }
+        }
         if self.conflicted {
-            return Some(SolverResult::Unsatisfiable);
+            // the falsifying universal assignment of the offending clause
+            // may lie outside a domain restriction
+            if universal.is_empty() {
+                return Some(SolverResult::Unsatisfiable);
+            }
+            return None;
         }
         if !self.fast_query_available() {
             return None;
@@ -712,21 +742,15 @@ impl IncDet {
             self.backtrack_to(DecLvl::ROOT);
         }
         self.casesplits.clear_committed();
-        let mut to_assume: Vec<Lit> = Vec::new();
-        for &raw in assumptions {
-            let lit = Lit::from_dimacs(raw);
+        debug_assert!(
+            universal.iter().all(|l| !self.assignment.is_assigned(l.var())),
+            "universal variables are unassigned at the root"
+        );
+        let mut to_assume: Vec<Lit> = universal.clone();
+        for &lit in &existential {
             let var = lit.var();
-            if var.as_index() >= self.vars.get_var_count() || self.vars[var].scope.is_none() {
-                return None;
-            }
-            if self.vars[var].is_universal(&self.prefix) {
-                return None;
-            }
-            if to_assume.contains(&!lit) {
+            if existential.contains(&!lit) {
                 return Some(SolverResult::Unsatisfiable);
-            }
-            if to_assume.contains(&lit) {
-                continue;
             }
             if self.assignment.is_assigned(var) {
                 match self.assignment.constant_value(lit) {
@@ -737,16 +761,19 @@ impl IncDet {
                             // choice, not forced: no verdict follows
                             return None;
                         }
+                        // the constant holds on every point, in
+                        // particular inside the restriction
                         return Some(SolverResult::Unsatisfiable);
                     }
                     None => {
-                        // root functions are implied, so the assumption
+                        // Root functions are implied, so the assumption
                         // holds iff the function is constantly the
-                        // assumed polarity; a counterexample is a winning
-                        // universal move for the query
+                        // assumed polarity *inside the restriction*
+                        // (its cube scopes the check); a counterexample
+                        // is a winning universal move for the query.
                         let functions = self.snapshot_functions();
                         if let Some(witness) =
-                            self.region_counterexample(&functions, &[], 0, &[vec![lit]])
+                            self.region_counterexample(&functions, &universal, 0, &[vec![lit]])
                         {
                             // keep the assumptions for the witness
                             // verification context
@@ -796,6 +823,19 @@ impl IncDet {
         for i in 0..self.query_assumptions.len() {
             let lit = self.query_assumptions[i];
             let var = lit.var();
+            if self.vars[var].is_universal(&self.prefix) {
+                if self.assignment.is_assigned(var) {
+                    if self.assignment.constant_value(lit) == Some(true) {
+                        continue;
+                    }
+                    // cases only assume unassigned variables, so nothing
+                    // else can take the opposite polarity
+                    debug_assert!(false, "query universal assumed opposite");
+                    return QueryStep::Abort;
+                }
+                self.assume_query_universal(lit);
+                return QueryStep::Assumed;
+            }
             if self.assignment.is_assigned(var) {
                 match self.assignment.constant_value(lit) {
                     Some(true) => continue,
@@ -824,6 +864,34 @@ impl IncDet {
             return QueryStep::Assumed;
         }
         QueryStep::Nothing
+    }
+
+    /// Assumes a universal literal for a query: the domain restriction
+    /// analog of a case assumption, but *not* registered as a case — the
+    /// restricted region must not be recorded or excluded when the query
+    /// retracts. Cases opened during the query stack on top (the query
+    /// levels stay below them), and cases closed during the query record
+    /// the query cube as part of their own.
+    fn assume_query_universal(&mut self, lit: Lit) {
+        debug!("query: restricting to {lit}");
+        self.trail.add_decision(lit);
+        self.assignment.assign_constant(lit);
+        self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
+        self.conflict_check_assume(lit);
+        self.requeue_mentioning(lit.var());
+    }
+
+    /// The universal literals of the active query assumptions: the cube
+    /// of the domain restriction.
+    pub(crate) fn query_universal_cube(&self) -> Vec<Lit> {
+        self.query_assumptions
+            .iter()
+            .filter(|l| {
+                let data = &self.vars[l.var()];
+                data.scope.is_some() && data.is_universal(&self.prefix)
+            })
+            .copied()
+            .collect()
     }
 
     /// Assumes an existential literal as a constant at a fresh decision

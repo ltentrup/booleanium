@@ -62,9 +62,13 @@ impl IncDet {
                 return false;
             }
         }
-        // the final solver state covers everything outside the handled cubes
+        // The final solver state covers everything outside the handled
+        // cubes — within the domain restriction of an active query, whose
+        // cube scopes the certificate: an assumption-query state only
+        // claims the restricted region.
         let functions = self.snapshot_functions();
-        self.verify_region(&functions, &[], self.handled_cases.len())
+        let cube = self.query_universal_cube();
+        self.verify_region(&functions, &cube, self.handled_cases.len())
     }
 
     /// Checks a handled case against the given clauses (instead of the

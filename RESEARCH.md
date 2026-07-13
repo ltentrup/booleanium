@@ -177,11 +177,29 @@ universal point against the matrix. The open work below is about
   *above* the root (possible while the variable is transiently
   unassigned between a backtrack and its re-assumption) depend on
   revisable search state and abort to the throwaway fallback.
-* Remaining gaps: universal assumptions (the case machinery is most of
-  it), keeping recorded cases usable across queries (per-case
-  compatibility checks instead of the empty-cases precondition), and
-  pop-retention of *solved* state per the dependency-tracking question
-  above.
+* **Universal assumptions — done**: a universal assumption literal
+  restricts the universal player's domain — the "what if the
+  environment plays u" probe of a games loop. On the fast path the
+  literal is assumed like a case assumption but *not* registered as a
+  case (nothing is recorded or excluded for the restriction itself);
+  cases closed during such a query record the query cube as part of
+  their own, the case-split domain search stays inside the
+  restriction (so an empty remaining domain correctly means the
+  *restricted* region is covered), and the final certificate region is
+  scoped by the query cube. Restrictions are assumed *before* the
+  existential assumptions and scope their entailment/violation checks
+  — a verdict derived at a point outside the restriction would be
+  about a game the query never plays; the fuzz caught exactly this as
+  the "unsatisfiable stack answers any query" shortcut firing under a
+  restriction (restricting *weakens* the obligation, so a globally
+  lost game can be winnable on a sub-domain). The throwaway fallback
+  substitutes the restriction into the instance (a unit clause would
+  instead let the universal player falsify it), and contradictory
+  restrictions denote an empty domain, vacuously satisfiable.
+* Remaining gaps: keeping recorded cases usable across queries
+  (per-case compatibility checks instead of the empty-cases
+  precondition), and pop-retention of *solved* state per the
+  dependency-tracking question above.
 
 ## RQ3 — SMT-LIB as the surface language
 
