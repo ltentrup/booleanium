@@ -746,6 +746,18 @@ impl IncDet {
             universal.iter().all(|l| !self.assignment.is_assigned(l.var())),
             "universal variables are unassigned at the root"
         );
+        // Recorded cases count as covered regions for the query too, so
+        // their strategies must honor the assumed existential constants
+        // on the restricted parts of their regions. (A restriction alone
+        // needs no checks: the recorded strategies satisfy the matrix.)
+        if !existential.is_empty() {
+            for region in 0..self.handled_cases.len() {
+                if !self.case_compatible(region, &universal, &existential) {
+                    debug!("query: handled case {region} is incompatible with the assumptions");
+                    return None;
+                }
+            }
+        }
         let mut to_assume: Vec<Lit> = universal.clone();
         for &lit in &existential {
             let var = lit.var();
@@ -772,9 +784,12 @@ impl IncDet {
                         // (its cube scopes the check); a counterexample
                         // is a winning universal move for the query.
                         let functions = self.snapshot_functions();
-                        if let Some(witness) =
-                            self.region_counterexample(&functions, &universal, 0, &[vec![lit]])
-                        {
+                        if let Some(witness) = self.region_counterexample(
+                            &functions,
+                            &universal,
+                            self.handled_cases.len(),
+                            &[vec![lit]],
+                        ) {
                             // keep the assumptions for the witness
                             // verification context
                             self.query_assumptions = to_assume;
@@ -809,13 +824,14 @@ impl IncDet {
     }
 
     /// Whether the in-place assumption query path is available: it
-    /// declines outright when recorded cases predate the query (their
-    /// strategies need not respect the assumptions) or the incremental
-    /// conflict check is disabled. Callers can pre-check this to know
-    /// whether an attempt may mutate the solver state.
+    /// declines outright when the incremental conflict check is disabled
+    /// or too many recorded cases predate the query (each must be checked
+    /// for compatibility with the assumptions, a SAT call per case).
+    /// Callers can pre-check this to know whether an attempt may mutate
+    /// the solver state.
     #[must_use]
     pub fn fast_query_available(&self) -> bool {
-        self.options.incremental_conflict_check && self.handled_cases.is_empty()
+        self.options.incremental_conflict_check && self.handled_cases.len() <= MAX_REVERIFIED_CASES
     }
 
     /// Establishes the next query assumption that is not yet in force.

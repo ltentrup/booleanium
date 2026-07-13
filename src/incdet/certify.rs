@@ -71,15 +71,11 @@ impl IncDet {
         self.verify_region(&functions, &cube, self.handled_cases.len())
     }
 
-    /// Checks a handled case against the given clauses (instead of the
-    /// full matrix): used by monotone extension to re-verify retained
-    /// regions against exactly the added clauses. Variables without a
-    /// function in the region are unconstrained in the check, i.e.
-    /// treated adversarially, so a pass is robust against whatever
-    /// functions the continued search assigns them later.
-    pub(crate) fn case_valid_for(&self, region: usize, clauses: &[Vec<Lit>]) -> bool {
-        let case = &self.handled_cases[region];
-        let functions = match case {
+    /// The strategy of a handled case as a function chain: the response
+    /// constants over the root snapshot for CEGAR cases, the recorded
+    /// snapshot for closed case splits.
+    pub(crate) fn case_functions(&self, region: usize) -> Vec<SnapshotFunction> {
+        match &self.handled_cases[region] {
             HandledCase::Response { cube: _, response } => {
                 let exclude: std::collections::HashSet<crate::literal::Var> =
                     response.iter().map(|l| l.var()).collect();
@@ -91,19 +87,52 @@ impl IncDet {
                 }));
                 functions
             }
-            HandledCase::Closed { cube: _, functions } => {
-                let mut copied = Vec::new();
-                for f in functions {
-                    copied.push(SnapshotFunction {
-                        lit: f.lit,
-                        constant: f.constant,
-                        implications: f.implications.clone(),
-                    });
-                }
-                copied
-            }
-        };
+            HandledCase::Closed { cube: _, functions } => functions
+                .iter()
+                .map(|f| SnapshotFunction {
+                    lit: f.lit,
+                    constant: f.constant,
+                    implications: f.implications.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Checks a handled case against the given clauses (instead of the
+    /// full matrix): used by monotone extension to re-verify retained
+    /// regions against exactly the added clauses. Variables without a
+    /// function in the region are unconstrained in the check, i.e.
+    /// treated adversarially, so a pass is robust against whatever
+    /// functions the continued search assigns them later.
+    pub(crate) fn case_valid_for(&self, region: usize, clauses: &[Vec<Lit>]) -> bool {
+        let functions = self.case_functions(region);
+        let case = &self.handled_cases[region];
         self.region_counterexample(&functions, case.cube(), region, clauses).is_none()
+    }
+
+    /// Checks whether a handled case is *compatible* with an assumption
+    /// query: on the part of its region that intersects the domain
+    /// restriction, the recorded strategy must give every assumed
+    /// existential constant (the region counts as covered for the query,
+    /// so its strategy has to honor the assumptions there). Regions
+    /// disjoint from the restriction are trivially compatible.
+    pub(crate) fn case_compatible(
+        &self,
+        region: usize,
+        restriction: &[Lit],
+        existential: &[Lit],
+    ) -> bool {
+        let case = &self.handled_cases[region];
+        if case.cube().iter().any(|l| restriction.contains(&!*l)) {
+            // the region lies outside the restricted domain
+            return true;
+        }
+        let functions = self.case_functions(region);
+        let mut cube = case.cube().to_vec();
+        let missing: Vec<Lit> = restriction.iter().filter(|l| !cube.contains(l)).copied().collect();
+        cube.extend(missing);
+        let units: Vec<Vec<Lit>> = existential.iter().map(|&l| vec![l]).collect();
+        self.region_counterexample(&functions, &cube, region, &units).is_none()
     }
 
     /// Searches for a universal assignment that extends `cube`, avoids the

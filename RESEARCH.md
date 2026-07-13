@@ -196,10 +196,35 @@ universal point against the matrix. The open work below is about
   substitutes the restriction into the instance (a unit clause would
   instead let the universal player falsify it), and contradictory
   restrictions denote an empty domain, vacuously satisfiable.
-* Remaining gaps: keeping recorded cases usable across queries
-  (per-case compatibility checks instead of the empty-cases
-  precondition), and pop-retention of *solved* state per the
-  dependency-tracking question above.
+* **Recorded cases stay usable across queries — done**: the fast query
+  path no longer requires an empty case list. A recorded region counts
+  as covered for the query, so its recorded strategy must honor the
+  assumed existential constants on the part of its region that
+  intersects the domain restriction — checked with one SAT call per
+  case (`case_compatible`, sharing the certify encodings), skipped
+  entirely for restriction-only queries (recorded strategies satisfy
+  the matrix, which is all a restriction asks) and for regions whose
+  cube contradicts the restriction. The entry entailment checks
+  exclude the handled cubes (inside them the compatible region
+  strategies govern). The soundness bedrock is pointwise forcing:
+  unique-consequence functions constrain *every* matrix model at a
+  point, so a verified response can never contradict a root-forced
+  function on its region — which is why the root-constant and
+  violation verdicts stay final with cases retained. Fast-path hits in
+  the differential fuzz went from 20 to 88 per 256 sessions (half of
+  which run with continuation disabled).
+* Remaining gap: pop-retention of *solved* state per the
+  dependency-tracking question above. The tractable slice mapped out
+  so far: retain the base across a pop of solved frames when the
+  popped originals (and the live solver's learnt clauses, which may
+  resolve against them) are all unlocked after a backtrack to root —
+  i.e. not registered as root implications — by deleting them like
+  learnt clauses and rebooting the conflict check; recorded cases
+  survive (their strategies satisfy a superset of the shrunk matrix)
+  and root pure choices survive (purity is monotone under clause
+  removal). The blocker is bookkeeping: originals need per-frame depth
+  tags through the build and extension paths, which the flat
+  QCNF-based construction currently erases.
 
 ## RQ3 — SMT-LIB as the surface language
 
