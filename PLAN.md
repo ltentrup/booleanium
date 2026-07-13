@@ -256,13 +256,39 @@ increasing order of ambition:
   next solve is derived on demand and a pop of frames the base never
   solved — the push/assert/pop scoping pattern — costs nothing. Only
   popping an integrated frame or redeclaring a variable still forces a
-  rebuild (inherent to root permanence). Measured: probed parity
-  unrolling (an assumption query after every step) keeps all plain
-  solves in-place; the residual gap is the query rebuilds themselves,
-  which need assumption-scoped solving in the core (see
-  `RESEARCH.md`). The differential session fuzz gained
-  assumption-query actions, checked against the oracle with
+  rebuild (inherent to root permanence). The differential session fuzz
+  gained assumption-query actions, checked against the oracle with
   certification and model evaluation under the assumptions.
+* **In-place assumption queries — done**
+  (`IncDet::resolve_with_assumptions`, tried first by
+  `solve_with_assumptions`): existential assumption literals are
+  assigned as *constants at fresh decision levels* — the existential
+  analog of universal case assumptions — sticky across backtracks and
+  passed to the conflict check as level-guarded units. Assumptions
+  carry no implication clauses, so conflict analysis keeps their
+  negations in every resolvent, making everything learnt or recorded
+  during a query matrix-valid and persistent. Query-critical pieces:
+  CEGAR rounds add the query literals to the response-solver
+  assumptions (recorded cases then respect them, so region coverage
+  and the piecewise certificate stay valid); assumption *violations*
+  (an opposite-polarity implication firing against the constant)
+  resolve exclusively by CEGAR rounds, since variable-centric analysis
+  would drop the assumption literal from the learnt clause; the
+  redundancy check no longer treats reason-less literals as removable;
+  root-assigned assumption variables are answered directly (constants
+  and root functions are forced, so a function-entailment
+  counterexample refutes the query and doubles as its universal
+  witness, verified under the query units). The fast path declines —
+  falling back to the throwaway query solver — when recorded cases
+  predate the query, a root pure *choice* blocks the verdict, or the
+  search cannot attribute a state; a declined attempt marks the base
+  for re-search since it may already have backtracked it (the fuzz
+  caught exactly that as an invalid certificate). Retraction is lazy:
+  a satisfiable query state serves models and certificates until the
+  next solve backtracks it. Measured on probed parity unrolling: the
+  probe answers drop from a rebuild each to one small entailment SAT
+  call each (~98 ms → ~55 ms at 200 steps, on top of the plain solves
+  already being in-place).
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean

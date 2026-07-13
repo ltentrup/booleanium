@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc ef2f970d8c48223034ad84eaf26e75c72820e624980cf965c97120af0b82b16b # shrinks to universals = 3, existentials = 3, script = [(7, [0, 5]), (3, [0]), (4, [3]), (3, [0])], threshold = 2, continuation = true

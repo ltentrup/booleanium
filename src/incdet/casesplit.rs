@@ -196,10 +196,17 @@ impl IncDet {
         self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
         self.conflict_check_assume(lit);
         self.casesplits.active.push((lit, below));
-        // Determinacy may improve within the restricted domain, but the
-        // determinacy check is local to a variable's implication clauses
-        // (simplified by constants), so only variables whose implications
-        // mention the assumed variable can change.
+        self.requeue_mentioning(lit.var());
+    }
+
+    /// Re-queues the determinacy checks of the unassigned existential
+    /// variables whose implications mention `var`. Used after assuming a
+    /// constant (universal case assumption or existential query
+    /// assumption): determinacy may improve, but the determinacy check is
+    /// local to a variable's implication clauses (simplified by
+    /// constants), so only variables whose implications mention the
+    /// assumed variable can change.
+    pub(crate) fn requeue_mentioning(&mut self, assumed: Var) {
         for (var, data) in self.vars.iter() {
             if data.scope.is_some()
                 && data.is_existential(&self.prefix)
@@ -208,7 +215,7 @@ impl IncDet {
                 let mentions_assumption = |l: Lit| {
                     self.skolem[l]
                         .implications()
-                        .any(|cid| self.allocator[cid].iter().any(|c| c.var() == lit.var()))
+                        .any(|cid| self.allocator[cid].iter().any(|c| c.var() == assumed))
                 };
                 if mentions_assumption(Lit::positive(var))
                     || mentions_assumption(Lit::negative(var))

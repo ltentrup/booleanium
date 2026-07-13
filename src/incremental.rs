@@ -57,6 +57,10 @@ struct Base {
     /// per-frame `(universals, existentials, clauses)` lengths at the
     /// time of integration
     integrated: Vec<(usize, usize, usize)>,
+    /// whether the solver sits in a lazily retracted query state instead
+    /// of the plain solve state (models must not be served as plain, and
+    /// the next plain solve re-searches)
+    queried: bool,
 }
 
 /// Which solver serves model queries for the most recent solve.
@@ -64,6 +68,9 @@ struct Base {
 enum Served {
     /// the continuation base (a plain solve)
     Base,
+    /// the continuation base, left in the state of an in-place assumption
+    /// query with the given verdict
+    BaseQuery(SolverResult),
     /// the throwaway solver of a temporary query
     Query,
 }
@@ -316,7 +323,7 @@ impl IncrementalSolver {
                         self.last = Some(Served::Base);
                         return SolverResult::Unsatisfiable;
                     }
-                    SolverResult::Satisfiable if unchanged => {
+                    SolverResult::Satisfiable if unchanged && !base.queried => {
                         self.base = Some(base);
                         self.last = Some(Served::Base);
                         return SolverResult::Satisfiable;
@@ -331,6 +338,7 @@ impl IncrementalSolver {
                         if let Some(result) = extended {
                             base.result = result;
                             base.integrated = self.frame_sizes();
+                            base.queried = false;
                             self.base = Some(base);
                             self.last = Some(Served::Base);
                             return result;
@@ -345,7 +353,7 @@ impl IncrementalSolver {
         let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
         let result = solver.solve();
         self.harvest_learnt(&solver);
-        self.base = Some(Base { result, solver, integrated: self.frame_sizes() });
+        self.base = Some(Base { result, solver, integrated: self.frame_sizes(), queried: false });
         self.last = Some(Served::Base);
         result
     }
@@ -364,9 +372,51 @@ impl IncrementalSolver {
     }
 
     /// Solves the assertion stack under the given assumption literals
-    /// (temporary unit clauses, retracted afterwards together with
-    /// everything learnt from them).
+    /// (temporary unit clauses, retracted afterwards).
+    ///
+    /// When the continuation base exists, the query first tries to run
+    /// *in place* on the live solver ([`IncDet::resolve_with_assumptions`]):
+    /// the stack is brought up to date with a plain solve, the literals
+    /// are assumed as retractable constants, and everything learnt or
+    /// recorded during the query persists. When the in-place path
+    /// declines (recorded cases predate the query, unsupported assumption
+    /// shapes), the query falls back to a throwaway solver.
     pub fn solve_with_assumptions(&mut self, assumptions: &[i32]) -> SolverResult {
+        if self.continuation && self.base.is_some() {
+            // bring the base up to date with the stack; when nothing
+            // changed the query manages the solver state itself, so no
+            // re-solve is needed even after an earlier query
+            let unchanged = {
+                let base = self.base.as_ref().expect("checked");
+                let (u, e, c) = self.delta(&base.integrated);
+                u.is_empty() && e.is_empty() && c.is_empty()
+            };
+            let result =
+                if unchanged { self.base.as_ref().expect("checked").result } else { self.solve() };
+            match result {
+                // an unsatisfiable stack answers any query
+                SolverResult::Unsatisfiable => {
+                    self.query = None;
+                    self.last = Some(Served::BaseQuery(SolverResult::Unsatisfiable));
+                    return SolverResult::Unsatisfiable;
+                }
+                SolverResult::Satisfiable => {
+                    let base = self.base.as_mut().expect("checked");
+                    if base.solver.fast_query_available() {
+                        // the attempt may backtrack the live solver even
+                        // when it declines mid-way, so the next plain
+                        // solve must re-search either way
+                        base.queried = true;
+                        if let Some(result) = base.solver.resolve_with_assumptions(assumptions) {
+                            self.query = None;
+                            self.last = Some(Served::BaseQuery(result));
+                            return result;
+                        }
+                    }
+                }
+                SolverResult::Unknown => {}
+            }
+        }
         let clauses: Vec<Vec<i32>> = assumptions.iter().map(|&lit| vec![lit]).collect();
         self.solve_with_clauses(&clauses)
     }
@@ -392,6 +442,7 @@ impl IncrementalSolver {
     fn served(&self) -> Option<(SolverResult, &IncDet)> {
         match self.last? {
             Served::Base => self.base.as_ref().map(|b| (b.result, &b.solver)),
+            Served::BaseQuery(result) => self.base.as_ref().map(|b| (result, &b.solver)),
             Served::Query => self.query.as_ref().map(|(r, s)| (*r, s)),
         }
     }
@@ -545,6 +596,31 @@ mod test {
         assert_eq!(solver.last_result(), None, "models are stale after a pop");
         assert_eq!(solver.solve(), SolverResult::Satisfiable);
         assert_eq!(solver.extension_count(), 0, "the base was rebuilt");
+    }
+
+    #[test]
+    fn in_place_assumption_queries() {
+        let mut solver = IncrementalSolver::default();
+        solver.declare_universal(1);
+        solver.declare_existential(2);
+        solver.declare_existential(3);
+        solver.add_clause(&[-1, 2, 3]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        // a satisfiable query on the live solver: models and certificate
+        // reflect the assumed state
+        assert_eq!(solver.solve_with_assumptions(&[-2]), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        let model = solver.skolem_model().expect("satisfiable");
+        assert!(!model.evaluate(&[1])[&2], "assumption holds in the model");
+        assert!(model.evaluate(&[1])[&3], "the clause is satisfied via e3");
+        // an unsatisfiable query: no response for u1 = true
+        assert_eq!(solver.solve_with_assumptions(&[-2, -3]), SolverResult::Unsatisfiable);
+        assert_eq!(solver.universal_witness(), Some(vec![1]));
+        // the base recovers for plain solves and further queries
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        assert_eq!(solver.solve_with_assumptions(&[2, 3]), SolverResult::Satisfiable);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
     }
 
     #[test]

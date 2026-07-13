@@ -295,6 +295,49 @@ impl IncDet {
         self.conflict_check.add_definition_clause(lvl, &[unit]);
     }
 
+    /// Checks whether the constant assumption `lit` is violated: a
+    /// universal assignment — within the standing exclusions, constants,
+    /// and level guards — under which an implication clause of `!lit`
+    /// fires, forcing the opposite of the assumed constant. Implication
+    /// clauses are only registered on unassigned variables, so the set is
+    /// frozen while the assumption is assigned and one check per
+    /// (re-)assumption covers it.
+    pub(crate) fn is_assumption_conflicted(&mut self, lit: Lit) -> Option<HashSet<Lit>> {
+        if self.skolem[!lit].len() == 0 {
+            return None;
+        }
+        // syntactic pre-check: an implication clause satisfied by a
+        // constant can never fire
+        let fireable = self.skolem[!lit].implications().any(|cid| {
+            !self.allocator[cid]
+                .iter()
+                .any(|&l| l.var() != lit.var() && self.assignment.constant_value(l) == Some(true))
+        });
+        if !fireable {
+            return None;
+        }
+        self.stats.skolem.global_conflict_checks += 1;
+        let arbiters: Vec<_> = self.skolem[!lit]
+            .implications()
+            .map(|cid| self.conflict_check.fire_arbiter(cid, !lit, &self.allocator[cid]))
+            .collect();
+        let mut assumptions = Vec::new();
+        if let [arbiter] = arbiters[..] {
+            assumptions.push(!arbiter);
+        } else {
+            let guard = self.conflict_check.sat_solver.add_variable();
+            let mut build = vec![!guard];
+            build.extend(arbiters.into_iter().map(|arbiter| !arbiter));
+            self.conflict_check.sat_solver.add_clause(&build);
+            assumptions.push(guard);
+        }
+        let mut result = self.conflict_check.solve(&assumptions)?;
+        result.remove(&Lit::positive(lit.var()));
+        result.remove(&Lit::negative(lit.var()));
+        self.stats.global.conflicts += 1;
+        Some(result)
+    }
+
     fn is_conflicted_incremental(&mut self, var: Var) -> Option<HashSet<Lit>> {
         // The check asks for a model where both polarities fire: the firing
         // condition of a polarity is a disjunction over the fire arbiters of

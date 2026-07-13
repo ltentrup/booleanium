@@ -174,6 +174,10 @@ pub struct IncDet {
     /// extension stays sound only while no added clause contains one of
     /// these literals (see [`IncDet::extend_and_resolve`])
     root_pure_lits: Vec<Lit>,
+    /// the existential constant assumptions of the active query
+    /// ([`IncDet::resolve_with_assumptions`]); sticky like committed case
+    /// assumptions: re-assumed after every backtrack below their level
+    query_assumptions: Vec<Lit>,
     /// learnt clauses that are candidates for deletion
     learnts: Vec<ClauseId>,
     /// state of the CEGAR extension
@@ -222,6 +226,24 @@ enum PureStep {
     Progress,
     /// The pure candidate is conflicted.
     Conflict(Conflict),
+}
+
+/// Result of one query-assumption (re-)assumption step.
+enum QueryStep {
+    /// All query assumptions hold (assumed or satisfied by constants).
+    Nothing,
+    /// An assumption was assumed; propagation must run before the next.
+    Assumed,
+    /// Assuming the constant is violated by a firing implication clause
+    /// of the opposite polarity.
+    Conflict(Conflict),
+    /// The assumption variable is forced to the opposite constant at the
+    /// root: no strategy with the assumed constant exists.
+    Unsat,
+    /// The fast path cannot attribute the state (the assumption variable
+    /// acquired a function or a choice-based constant mid-query); the
+    /// caller falls back to a fresh throwaway query.
+    Abort,
 }
 
 impl FromQdimacs for IncDet {
@@ -485,6 +507,8 @@ impl IncDet {
     /// literals) such that no extension admits an existential response.
     /// Only meaningful for prefixes with the universal block first (for
     /// ∃∀ prefixes the universal player needs a strategy, not a move).
+    /// After an assumption query ([`IncDet::resolve_with_assumptions`])
+    /// the move refutes the instance *under the query assumptions*.
     ///
     /// The recorded candidate is heuristic — pure-literal assignments are
     /// winnability-preserving *choices* rather than pointwise-forced
@@ -501,6 +525,10 @@ impl IncDet {
         for &cid in &self.originals {
             let clause: Vec<_> = self.allocator[cid].iter().map(|&l| solver.lookup(l)).collect();
             solver.add_clause(&clause);
+        }
+        for &lit in &self.query_assumptions {
+            let unit = solver.lookup(lit);
+            solver.add_clause(&[unit]);
         }
         let assumptions: Vec<_> = witness.iter().map(|&l| solver.lookup(l)).collect();
         if solver.solve_with_assumptions(&assumptions).unwrap() {
@@ -548,6 +576,8 @@ impl IncDet {
             // unsatisfiable, and the recorded winning move stays winning
             return Some(SolverResult::Unsatisfiable);
         }
+        // retract any lazily kept query state
+        self.query_assumptions.clear();
         self.extend_declarations(new_universals, new_existentials)?;
 
         // normalize the clauses; this may bind further free variables to
@@ -645,6 +675,180 @@ impl IncDet {
         self.stats.global.extensions += 1;
         debug!("monotone extension: continuing in place");
         Some(self.search())
+    }
+
+    /// Solves the loaded instance under temporary existential constant
+    /// assumptions, reusing the live solver state. Assumptions are
+    /// assigned as constants at fresh decision levels (the existential
+    /// analog of universal case assumptions), sticky across backtracks;
+    /// conflict analysis keeps their negations in every resolvent (they
+    /// have no implication clauses to resolve on), so everything learnt
+    /// or recorded during the query — learnt clauses, handled cases, root
+    /// assignments — is matrix-valid and persists after retraction.
+    ///
+    /// On `Some(Satisfiable)` the solver is *left in the assumed state*
+    /// so models and certificates reflect the query; the next solve or
+    /// extension retracts it by backtracking. On `Some(Unsatisfiable)`,
+    /// [`IncDet::unsat_witness`] (verified under the query assumptions)
+    /// may expose a winning universal move for the query.
+    ///
+    /// Returns `None` when the fast path cannot answer soundly and the
+    /// caller must fall back to a fresh throwaway query: handled cases
+    /// were recorded before the query (their strategies need not respect
+    /// the assumptions, so region coverage cannot be trusted), the
+    /// incremental conflict check is disabled, an assumption variable is
+    /// universal or unknown, the opposite constant was a root pure
+    /// *choice* (revisable, so no verdict follows), or the search runs
+    /// into a state it cannot attribute.
+    pub fn resolve_with_assumptions(&mut self, assumptions: &[i32]) -> Option<SolverResult> {
+        self.query_assumptions.clear();
+        if self.conflicted {
+            return Some(SolverResult::Unsatisfiable);
+        }
+        if !self.fast_query_available() {
+            return None;
+        }
+        if !self.trail.decision_level().is_root() {
+            self.backtrack_to(DecLvl::ROOT);
+        }
+        self.casesplits.clear_committed();
+        let mut to_assume: Vec<Lit> = Vec::new();
+        for &raw in assumptions {
+            let lit = Lit::from_dimacs(raw);
+            let var = lit.var();
+            if var.as_index() >= self.vars.get_var_count() || self.vars[var].scope.is_none() {
+                return None;
+            }
+            if self.vars[var].is_universal(&self.prefix) {
+                return None;
+            }
+            if to_assume.contains(&!lit) {
+                return Some(SolverResult::Unsatisfiable);
+            }
+            if to_assume.contains(&lit) {
+                continue;
+            }
+            if self.assignment.is_assigned(var) {
+                match self.assignment.constant_value(lit) {
+                    Some(true) => {}
+                    Some(false) => {
+                        if self.root_pure_lits.contains(&lit) {
+                            // the opposite constant is a winnability
+                            // choice, not forced: no verdict follows
+                            return None;
+                        }
+                        return Some(SolverResult::Unsatisfiable);
+                    }
+                    None => {
+                        // root functions are implied, so the assumption
+                        // holds iff the function is constantly the
+                        // assumed polarity; a counterexample is a winning
+                        // universal move for the query
+                        let functions = self.snapshot_functions();
+                        if let Some(witness) =
+                            self.region_counterexample(&functions, &[], 0, &[vec![lit]])
+                        {
+                            // keep the assumptions for the witness
+                            // verification context
+                            self.query_assumptions = to_assume;
+                            self.query_assumptions.push(lit);
+                            self.unsat_witness = Some(witness);
+                            return Some(SolverResult::Unsatisfiable);
+                        }
+                    }
+                }
+                continue;
+            }
+            to_assume.push(lit);
+        }
+        self.query_assumptions = to_assume;
+        match self.search() {
+            SolverResult::Satisfiable => Some(SolverResult::Satisfiable),
+            SolverResult::Unsatisfiable => {
+                if !self.trail.decision_level().is_root() {
+                    self.backtrack_to(DecLvl::ROOT);
+                }
+                Some(SolverResult::Unsatisfiable)
+            }
+            SolverResult::Unknown => {
+                // the search aborted the query; retract and fall back
+                self.query_assumptions.clear();
+                if !self.trail.decision_level().is_root() {
+                    self.backtrack_to(DecLvl::ROOT);
+                }
+                None
+            }
+        }
+    }
+
+    /// Whether the in-place assumption query path is available: it
+    /// declines outright when recorded cases predate the query (their
+    /// strategies need not respect the assumptions) or the incremental
+    /// conflict check is disabled. Callers can pre-check this to know
+    /// whether an attempt may mutate the solver state.
+    #[must_use]
+    pub fn fast_query_available(&self) -> bool {
+        self.options.incremental_conflict_check && self.handled_cases.is_empty()
+    }
+
+    /// Establishes the next query assumption that is not yet in force.
+    fn reassume_query_step(&mut self) -> QueryStep {
+        for i in 0..self.query_assumptions.len() {
+            let lit = self.query_assumptions[i];
+            let var = lit.var();
+            if self.assignment.is_assigned(var) {
+                match self.assignment.constant_value(lit) {
+                    Some(true) => continue,
+                    Some(false) => {
+                        if self.dec_lvls[var] == Some(DecLvl::ROOT)
+                            && !self.root_pure_lits.contains(&lit)
+                        {
+                            return QueryStep::Unsat;
+                        }
+                        return QueryStep::Abort;
+                    }
+                    None => return QueryStep::Abort,
+                }
+            }
+            if let Some(assignment) = self.is_assumption_conflicted(lit) {
+                return QueryStep::Conflict(Conflict { var, assignment });
+            }
+            self.assume_existential(lit);
+            return QueryStep::Assumed;
+        }
+        QueryStep::Nothing
+    }
+
+    /// Assumes an existential literal as a constant at a fresh decision
+    /// level: the query-scoped analog of a universal case assumption. The
+    /// constant is communicated to the conflict check as a level-guarded
+    /// unit; no implication clause justifies it, so conflict analysis
+    /// keeps its negation in every resolvent.
+    fn assume_existential(&mut self, lit: Lit) {
+        debug!("query: assuming {lit}");
+        self.trail.add_decision(lit);
+        self.assignment.assign_constant(lit);
+        self.dec_lvls[lit.var()] = Some(self.trail.decision_level());
+        self.vsids.remove(lit.var());
+        self.conflict_check_assume(lit);
+        self.propagate_function(lit.var());
+        self.requeue_mentioning(lit.var());
+        // the clauses satisfied by the constant no longer block purity of
+        // their other variables
+        for idx in 0..self.occurrences[lit].len() {
+            let cid = self.occurrences[lit][idx];
+            for i in 0..self.allocator[cid].lits().len() {
+                let other = self.allocator[cid].lits()[i].var();
+                let data = &self.vars[other];
+                if data.scope.is_some()
+                    && data.is_existential(&self.prefix)
+                    && !self.assignment.is_assigned(other)
+                    && self.pure_queued.insert(other)
+                {
+                    self.pure_queue.push_back(other);
+                }
+            }
+        }
     }
 
     /// Declares new variables in the existing scopes for a monotone
@@ -831,6 +1035,35 @@ impl IncDet {
             }
             if initial.take().is_some() {
                 info!("number of initial deterministic vars: {}", self.trail.len());
+            }
+            if !self.query_assumptions.is_empty() {
+                match self.reassume_query_step() {
+                    QueryStep::Nothing => {}
+                    QueryStep::Assumed => continue,
+                    QueryStep::Conflict(conflict) => {
+                        // Assumption violations resolve by CEGAR rounds
+                        // only: clause learning would attribute the
+                        // conflict to the assumption variable and lose the
+                        // assumption literal from the resolvent. Each
+                        // round either answers the query or excludes a
+                        // cube around the violation.
+                        match self.cegar_round(&conflict.assignment) {
+                            cegar::CegarOutcome::Unsatisfiable => {
+                                self.record_unsat_witness(&conflict.assignment);
+                                return SolverResult::Unsatisfiable;
+                            }
+                            cegar::CegarOutcome::Satisfiable => {
+                                return SolverResult::Satisfiable;
+                            }
+                            cegar::CegarOutcome::CaseRecorded => {
+                                conflicts_since_restart += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    QueryStep::Unsat => return SolverResult::Unsatisfiable,
+                    QueryStep::Abort => return SolverResult::Unknown,
+                }
             }
             if self.options.case_splits && self.reassume_cases() {
                 continue;

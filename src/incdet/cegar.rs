@@ -197,7 +197,7 @@ impl IncDet {
     }
 
     /// Runs one CEGAR round for the conflicting assignment.
-    fn cegar_round(&mut self, conflicting: &HashSet<Lit>) -> CegarOutcome {
+    pub(crate) fn cegar_round(&mut self, conflicting: &HashSet<Lit>) -> CegarOutcome {
         self.stats.cegar.rounds += 1;
         self.cegar.rounds += 1;
         if self.stats.cegar.rounds % 1024 == 0 {
@@ -222,7 +222,14 @@ impl IncDet {
             .copied()
             .collect();
         universal_part.sort_unstable();
-        let assumptions: Vec<_> = universal_part.iter().map(|&l| exists.solver.lookup(l)).collect();
+        // query assumptions constrain every response, so recorded cases
+        // respect them (and stay matrix-valid: a response satisfying
+        // matrix ∧ assumptions satisfies the matrix)
+        let assumptions: Vec<_> = universal_part
+            .iter()
+            .chain(self.query_assumptions.iter())
+            .map(|&l| exists.solver.lookup(l))
+            .collect();
         if !exists.solver.solve_with_assumptions(&assumptions).unwrap() {
             return CegarOutcome::Unsatisfiable;
         }
@@ -244,18 +251,20 @@ impl IncDet {
             // assignment pinned — so that the frontier values of the model
             // match the actual function outputs — and generalize over the
             // frontier instead.
+            let query = self.query_assumptions.clone();
             let exists = self.cegar.solver.as_mut().expect("solver exists during round");
             let assumptions: Vec<_> = exists
                 .interface
                 .iter()
                 .map(|&var| {
-                    let lit = if conflicting.contains(&Lit::negative(var)) {
+                    if conflicting.contains(&Lit::negative(var)) {
                         Lit::negative(var)
                     } else {
                         Lit::positive(var)
-                    };
-                    exists.solver.lookup(lit)
+                    }
                 })
+                .chain(query)
+                .map(|lit| exists.solver.lookup(lit))
                 .collect();
             if !exists.solver.solve_with_assumptions(&assumptions).unwrap() {
                 return CegarOutcome::Unsatisfiable;

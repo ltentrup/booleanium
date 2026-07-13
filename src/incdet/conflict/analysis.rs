@@ -288,7 +288,14 @@ impl IncDet {
         if self.trail.is_decision(lit) {
             return false;
         }
-        // assert!(!self.graph[!lit].is_empty()); // doesn't hold if variable is in singleton clause
+        // A literal with no implication clauses at all is unjustified and
+        // must stay in the clause. This matters for assumed constants
+        // (query assumptions carry no implication clauses): dropping
+        // their negation would turn an assumption-dependent resolvent
+        // into a clause claimed to be matrix-implied.
+        if self.graph[!lit].is_empty() {
+            return false;
+        }
         for implication in &self.graph[!lit] {
             let reason = implication.reason(&self.allocator);
             trace!("{reason}");

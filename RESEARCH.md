@@ -120,14 +120,38 @@ universal point against the matrix. The open work below is about
   of frames the base never solved (push/assert/pop scoping) no longer
   invalidates anything: the base tracks per-frame *integrated sizes*,
   frames are append-only, and the delta is derived at solve time.
-* Remaining gaps, in value order: the query solvers themselves are
-  still rebuilds — making them incremental needs *assumption-scoped
-  solving in the core* (assume literals at a pre-decision level,
-  answer for the assumed sub-domain only, retract without recording
-  exclusions; the universal case-assumption machinery is most of the
-  ingredients, existential assumptions want a guard-literal
-  convention). That is also what a QIPASIR-style interface would
-  expose, and it would make every ∃∀ `check-sat` incremental. And
+* **Assumption-scoped solving in the core — done for existential
+  literal assumptions** (`IncDet::resolve_with_assumptions`, tried
+  first by `IncrementalSolver::solve_with_assumptions`): assumptions
+  are assigned as *constants at fresh decision levels* — the
+  existential analog of universal case assumptions — sticky across
+  backtracks, communicated to the conflict check as level-guarded
+  units. They carry no implication clauses, so conflict analysis keeps
+  their negations in every resolvent: everything learnt or recorded
+  during a query (learnt clauses, CEGAR cases, root assignments) is
+  matrix-valid and *persists* after retraction. Retraction is lazy
+  (backtracking at the next solve), so a satisfiable query state
+  serves models and certificates directly. The pieces that made this
+  sound: CEGAR rounds take the query literals as extra response-solver
+  assumptions (so recorded cases respect them and region coverage
+  stays trustworthy); assumption *violations* (a firing implication of
+  the opposite polarity against the constant) resolve by CEGAR rounds
+  only, since variable-centric clause learning would lose the
+  assumption literal from the resolvent; the redundancy check keeps
+  literals whose variable has no implication clauses; root-assigned
+  assumption variables are answered directly (forced constants and
+  functions are implied — a function-entailment counterexample is a
+  winning universal move for the query, verified under the query
+  units); and the fast path declines when recorded cases predate the
+  query or a root pure *choice* blocks the verdict — the throwaway
+  query solver remains the fallback, and a declined attempt marks the
+  base for re-search since it may already have backtracked it.
+* Remaining gaps: hooking the ∃∀ frontend's negation-clause check onto
+  assumption queries (reify the growing disjunction as a hash-consed
+  gate and assume its literal; needs query-witness plumbing through
+  the frontend), universal assumptions (the case machinery is most of
+  it), keeping recorded cases usable across queries (per-case
+  compatibility checks instead of the empty-cases precondition), and
   pop-retention of *solved* state per the dependency-tracking question
   above.
 
