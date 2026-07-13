@@ -123,11 +123,6 @@ const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 512;
 /// calls).
 const MAX_REVERIFIED_CASES: usize = 64;
 
-/// Number of assumption-violation CEGAR rounds per query before the query
-/// aborts to the throwaway fallback (violations make exclusion-only
-/// progress; the fallback's full machinery learns clauses instead).
-const QUERY_VIOLATION_BUDGET: u32 = 8;
-
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
     loop {
@@ -239,15 +234,15 @@ enum QueryStep {
     Nothing,
     /// An assumption was assumed; propagation must run before the next.
     Assumed,
-    /// Assuming the constant is violated by a firing implication clause
-    /// of the opposite polarity.
-    Conflict(Conflict),
-    /// The assumption variable is forced to the opposite constant at the
-    /// root: no strategy with the assumed constant exists.
+    /// The assumption is refuted: the variable is forced to the opposite
+    /// constant at the root, or a root-registered implication of the
+    /// opposite literal fires — either way no strategy compatible with
+    /// the (permanent) root state carries the assumed constant.
     Unsat,
     /// The fast path cannot attribute the state (the assumption variable
-    /// acquired a function or a choice-based constant mid-query); the
-    /// caller falls back to a fresh throwaway query.
+    /// acquired a function, a choice-based constant, or implications
+    /// above the root mid-query); the caller falls back to a fresh
+    /// throwaway query.
     Abort,
 }
 
@@ -815,8 +810,15 @@ impl IncDet {
                     None => return QueryStep::Abort,
                 }
             }
-            if let Some(assignment) = self.is_assumption_conflicted(lit) {
-                return QueryStep::Conflict(Conflict { var, assignment });
+            match self.is_assumption_conflicted(lit) {
+                conflict::check::AssumptionCheck::Clear => {}
+                conflict::check::AssumptionCheck::NonRoot => return QueryStep::Abort,
+                conflict::check::AssumptionCheck::Violation(assignment) => {
+                    // the universal part is a winning-move candidate for
+                    // the query (verified before exposure)
+                    self.record_unsat_witness(&assignment);
+                    return QueryStep::Unsat;
+                }
             }
             self.assume_existential(lit);
             return QueryStep::Assumed;
@@ -1024,7 +1026,6 @@ impl IncDet {
     #[allow(clippy::too_many_lines)]
     fn search(&mut self) -> SolverResult {
         let mut initial = Some(());
-        let mut violation_rounds = 0;
         let mut conflicts_since_restart = 0;
         let mut restart_number = 1;
         let mut next_reduction = self.learnts.len() + REDUCTION_INCREMENT;
@@ -1046,36 +1047,6 @@ impl IncDet {
                 match self.reassume_query_step() {
                     QueryStep::Nothing => {}
                     QueryStep::Assumed => continue,
-                    QueryStep::Conflict(conflict) => {
-                        // Assumption violations resolve by CEGAR rounds
-                        // only: clause learning would attribute the
-                        // conflict to the assumption variable and lose the
-                        // assumption literal from the resolvent. Each
-                        // round either answers the query or excludes a
-                        // cube around the violation — exclusion-only
-                        // progress, so recurring violations degenerate
-                        // into cube enumeration; a small budget hands
-                        // those queries to the throwaway fallback, whose
-                        // full machinery learns clauses instead.
-                        violation_rounds += 1;
-                        if violation_rounds > QUERY_VIOLATION_BUDGET {
-                            debug!("query: violation budget exhausted, aborting");
-                            return SolverResult::Unknown;
-                        }
-                        match self.cegar_round(&conflict.assignment) {
-                            cegar::CegarOutcome::Unsatisfiable => {
-                                self.record_unsat_witness(&conflict.assignment);
-                                return SolverResult::Unsatisfiable;
-                            }
-                            cegar::CegarOutcome::Satisfiable => {
-                                return SolverResult::Satisfiable;
-                            }
-                            cegar::CegarOutcome::CaseRecorded => {
-                                conflicts_since_restart += 1;
-                                continue;
-                            }
-                        }
-                    }
                     QueryStep::Unsat => return SolverResult::Unsatisfiable,
                     QueryStep::Abort => return SolverResult::Unknown,
                 }

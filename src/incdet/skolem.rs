@@ -21,6 +21,16 @@ impl Implications {
         self.implications.values().flat_map(IntoIterator::into_iter).copied()
     }
 
+    /// The implication clauses registered at the root level.
+    pub(crate) fn root_implications(&self) -> impl Iterator<Item = ClauseId> + '_ {
+        self.implications.get(&DecLvl::ROOT).into_iter().flatten().copied()
+    }
+
+    /// Whether any implication clause is registered above the root level.
+    pub(crate) fn has_non_root_implications(&self) -> bool {
+        self.implications.keys().any(|&lvl| lvl != DecLvl::ROOT)
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.count
     }

@@ -159,18 +159,29 @@ universal point against the matrix. The open work below is about
   wide clause (a single implication candidate once the roots
   determinize), while the gate chain turns the same constraint into a
   chain of decisions. The ∃∀ check therefore keeps the temporary
-  disjunction clause; assumption queries remain the tool for *literal*
-  probes. A `QUERY_VIOLATION_BUDGET` was added along the way:
-  assumption-violation conflicts make exclusion-only progress (CEGAR
-  rounds without clause learning), so recurring violations now abort
-  the fast path to the learning-capable throwaway fallback.
+  disjunction clause (re-measured after the violation fix below: still
+  ~23x slower reified); assumption queries remain the tool for
+  *literal* probes.
+* **Assumption violations are final, not conflicts.** A firing
+  implication clause of `¬a` that was *root-registered* has permanent
+  root functions as premises: at the firing point every strategy
+  compatible with the root state yields `¬a`, and since pure rewrites
+  never touch assumption variables, the pure-literal lemma lifts this
+  pointwise fact to the strategy level — the query is unsatisfiable
+  outright, with the firing assignment's universal part as the
+  winning-move candidate (verified under the query units before
+  exposure, so choice-tainted candidates are filtered while
+  gate-determined ones — the synthesis case — pass). This replaced the
+  earlier CEGAR-per-violation loop and its budget: no enumeration, no
+  learning surgery needed. Violations via implications registered
+  *above* the root (possible while the variable is transiently
+  unassigned between a backtrack and its re-assumption) depend on
+  revisable search state and abort to the throwaway fallback.
 * Remaining gaps: universal assumptions (the case machinery is most of
-  it), proper *learning* from assumption violations (keep the
-  assumption variable's gate literal in the resolvent instead of
-  CEGAR-only rounds — would lift the violation budget), keeping
-  recorded cases usable across queries (per-case compatibility checks
-  instead of the empty-cases precondition), and pop-retention of
-  *solved* state per the dependency-tracking question above.
+  it), keeping recorded cases usable across queries (per-case
+  compatibility checks instead of the empty-cases precondition), and
+  pop-retention of *solved* state per the dependency-tracking question
+  above.
 
 ## RQ3 — SMT-LIB as the surface language
 

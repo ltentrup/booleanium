@@ -62,6 +62,22 @@ impl<S: SatSolver> Default for ConflictCheck<S> {
     }
 }
 
+/// Outcome of the assumption-violation check
+/// ([`IncDet::is_assumption_conflicted`]).
+pub(crate) enum AssumptionCheck {
+    /// No root-registered implication of the opposite literal can fire:
+    /// the constant can be assumed.
+    Clear,
+    /// The opposite literal carries implications registered above the
+    /// root; their firing depends on revisable search state, so the fast
+    /// query path cannot attribute a violation.
+    NonRoot,
+    /// A root-registered implication fires under this assignment: the
+    /// query is unsatisfiable, and the assignment's universal part is a
+    /// winning-move candidate.
+    Violation(HashSet<Lit>),
+}
+
 impl<S: SatSolver> ConflictCheck<S> {
     pub(crate) fn set_var_count(&mut self, count: usize) {
         self.sat_solver.set_var_count(count);
@@ -295,30 +311,35 @@ impl IncDet {
         self.conflict_check.add_definition_clause(lvl, &[unit]);
     }
 
-    /// Checks whether the constant assumption `lit` is violated: a
+    /// Checks whether assuming the constant `lit` is violated: a
     /// universal assignment — within the standing exclusions, constants,
-    /// and level guards — under which an implication clause of `!lit`
-    /// fires, forcing the opposite of the assumed constant. Implication
-    /// clauses are only registered on unassigned variables, so the set is
-    /// frozen while the assumption is assigned and one check per
-    /// (re-)assumption covers it.
-    pub(crate) fn is_assumption_conflicted(&mut self, lit: Lit) -> Option<HashSet<Lit>> {
-        if self.skolem[!lit].len() == 0 {
-            return None;
+    /// and level guards — under which a *root-registered* implication
+    /// clause of `!lit` fires. The premises of root implications are
+    /// permanent root functions, so a firing forces `!lit` under every
+    /// strategy compatible with the root state, and the query is
+    /// unsatisfiable outright. Implication clauses are only registered on
+    /// unassigned variables, so the root set is frozen while the
+    /// assumption is assigned and one check per (re-)assumption covers
+    /// it. Implications registered *above* the root (while the variable
+    /// was transiently unassigned after a backtrack) depend on revisable
+    /// search state and cannot be attributed; the caller falls back.
+    pub(crate) fn is_assumption_conflicted(&mut self, lit: Lit) -> AssumptionCheck {
+        if self.skolem[!lit].has_non_root_implications() {
+            return AssumptionCheck::NonRoot;
         }
         // syntactic pre-check: an implication clause satisfied by a
         // constant can never fire
-        let fireable = self.skolem[!lit].implications().any(|cid| {
+        let fireable = self.skolem[!lit].root_implications().any(|cid| {
             !self.allocator[cid]
                 .iter()
                 .any(|&l| l.var() != lit.var() && self.assignment.constant_value(l) == Some(true))
         });
         if !fireable {
-            return None;
+            return AssumptionCheck::Clear;
         }
         self.stats.skolem.global_conflict_checks += 1;
         let arbiters: Vec<_> = self.skolem[!lit]
-            .implications()
+            .root_implications()
             .map(|cid| self.conflict_check.fire_arbiter(cid, !lit, &self.allocator[cid]))
             .collect();
         let mut assumptions = Vec::new();
@@ -331,11 +352,13 @@ impl IncDet {
             self.conflict_check.sat_solver.add_clause(&build);
             assumptions.push(guard);
         }
-        let mut result = self.conflict_check.solve(&assumptions)?;
+        let Some(mut result) = self.conflict_check.solve(&assumptions) else {
+            return AssumptionCheck::Clear;
+        };
         result.remove(&Lit::positive(lit.var()));
         result.remove(&Lit::negative(lit.var()));
         self.stats.global.conflicts += 1;
-        Some(result)
+        AssumptionCheck::Violation(result)
     }
 
     fn is_conflicted_incremental(&mut self, var: Var) -> Option<HashSet<Lit>> {
