@@ -543,11 +543,14 @@ impl Frontend {
             self.fix_forall_exists();
         }
         let result = if self.mode == Mode::ExistsForall {
-            // solve the negation ∀ constants ∃ binders, gates: ¬(∧ roots)
+            // Solve the negation ∀ constants ∃ binders, gates: ¬(∧ roots)
             // and invert the verdict. The disjunction of the negated
             // roots weakens whenever an assertion is added, so it must
             // stay a temporary clause: carried learnt clauses must never
-            // resolve against it.
+            // resolve against it. (Reifying it as a hash-consed AND gate
+            // to make the check an in-place assumption query was measured
+            // 25–90x slower — the accumulated gates make the instances
+            // harder than the flat clause; see RESEARCH.md.)
             let clause: Vec<i32> = self
                 .frames
                 .iter()

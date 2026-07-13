@@ -146,14 +146,31 @@ universal point against the matrix. The open work below is about
   query or a root pure *choice* blocks the verdict — the throwaway
   query solver remains the fallback, and a declined attempt marks the
   base for re-search since it may already have backtracked it.
-* Remaining gaps: hooking the ∃∀ frontend's negation-clause check onto
-  assumption queries (reify the growing disjunction as a hash-consed
-  gate and assume its literal; needs query-witness plumbing through
-  the frontend), universal assumptions (the case machinery is most of
-  it), keeping recorded cases usable across queries (per-case
-  compatibility checks instead of the empty-cases precondition), and
-  pop-retention of *solved* state per the dependency-tracking question
-  above.
+* **Negative result — the ∃∀ check does *not* benefit from assumption
+  queries.** The plan was to reify the growing disjunction
+  `¬a₁ ∨ … ∨ ¬aₖ` as `¬AND(a₁…aₖ)` with hash-consed gates and assume
+  the single gate literal. Measured on an incremental ∃∀ workload
+  (8 constants, 60 asserts, check after each): the flat temporary
+  clause solves the session in ~45 ms; the gate reification takes 4.4 s
+  with full-width gates and 1.26 s with a binary chain — 25–90x
+  slower — *even when the reified instance is solved through the old
+  throwaway path*. The stale accumulated gates themselves make the
+  internal instances harder: ID handles the flat disjunction as one
+  wide clause (a single implication candidate once the roots
+  determinize), while the gate chain turns the same constraint into a
+  chain of decisions. The ∃∀ check therefore keeps the temporary
+  disjunction clause; assumption queries remain the tool for *literal*
+  probes. A `QUERY_VIOLATION_BUDGET` was added along the way:
+  assumption-violation conflicts make exclusion-only progress (CEGAR
+  rounds without clause learning), so recurring violations now abort
+  the fast path to the learning-capable throwaway fallback.
+* Remaining gaps: universal assumptions (the case machinery is most of
+  it), proper *learning* from assumption violations (keep the
+  assumption variable's gate literal in the resolvent instead of
+  CEGAR-only rounds — would lift the violation budget), keeping
+  recorded cases usable across queries (per-case compatibility checks
+  instead of the empty-cases precondition), and pop-retention of
+  *solved* state per the dependency-tracking question above.
 
 ## RQ3 — SMT-LIB as the surface language
 

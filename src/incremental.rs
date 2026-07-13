@@ -382,17 +382,20 @@ impl IncrementalSolver {
     /// declines (recorded cases predate the query, unsupported assumption
     /// shapes), the query falls back to a throwaway solver.
     pub fn solve_with_assumptions(&mut self, assumptions: &[i32]) -> SolverResult {
-        if self.continuation && self.base.is_some() {
-            // bring the base up to date with the stack; when nothing
-            // changed the query manages the solver state itself, so no
-            // re-solve is needed even after an earlier query
-            let unchanged = {
-                let base = self.base.as_ref().expect("checked");
+        if self.continuation {
+            // bring the base up to date with the stack (establishing it
+            // on the first query); when nothing changed the query manages
+            // the solver state itself, so no re-solve is needed even
+            // after an earlier query
+            let unchanged = self.base.as_ref().is_some_and(|base| {
                 let (u, e, c) = self.delta(&base.integrated);
                 u.is_empty() && e.is_empty() && c.is_empty()
+            });
+            let result = if unchanged {
+                self.base.as_ref().expect("unchanged implies present").result
+            } else {
+                self.solve()
             };
-            let result =
-                if unchanged { self.base.as_ref().expect("checked").result } else { self.solve() };
             match result {
                 // an unsatisfiable stack answers any query
                 SolverResult::Unsatisfiable => {

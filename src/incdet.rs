@@ -123,6 +123,11 @@ const CONFLICT_CHECK_REBOOT_INTERVAL: u32 = 512;
 /// calls).
 const MAX_REVERIFIED_CASES: usize = 64;
 
+/// Number of assumption-violation CEGAR rounds per query before the query
+/// aborts to the throwaway fallback (violations make exclusion-only
+/// progress; the fallback's full machinery learns clauses instead).
+const QUERY_VIOLATION_BUDGET: u32 = 8;
+
 /// The Luby sequence (1, 1, 2, 1, 1, 2, 4, ...) for `i >= 1`.
 fn luby(mut i: u32) -> u32 {
     loop {
@@ -1019,6 +1024,7 @@ impl IncDet {
     #[allow(clippy::too_many_lines)]
     fn search(&mut self) -> SolverResult {
         let mut initial = Some(());
+        let mut violation_rounds = 0;
         let mut conflicts_since_restart = 0;
         let mut restart_number = 1;
         let mut next_reduction = self.learnts.len() + REDUCTION_INCREMENT;
@@ -1046,7 +1052,16 @@ impl IncDet {
                         // conflict to the assumption variable and lose the
                         // assumption literal from the resolvent. Each
                         // round either answers the query or excludes a
-                        // cube around the violation.
+                        // cube around the violation — exclusion-only
+                        // progress, so recurring violations degenerate
+                        // into cube enumeration; a small budget hands
+                        // those queries to the throwaway fallback, whose
+                        // full machinery learns clauses instead.
+                        violation_rounds += 1;
+                        if violation_rounds > QUERY_VIOLATION_BUDGET {
+                            debug!("query: violation budget exhausted, aborting");
+                            return SolverResult::Unknown;
+                        }
                         match self.cegar_round(&conflict.assignment) {
                             cegar::CegarOutcome::Unsatisfiable => {
                                 self.record_unsat_witness(&conflict.assignment);
