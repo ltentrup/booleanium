@@ -30,7 +30,9 @@
 
 use crate::{
     incdet::{model::SkolemModel, IncDet, Options},
+    literal::{Lit, Var},
     qcnf::QCNF,
+    qdimacs::FromQdimacs,
     QuantTy, SolverResult,
 };
 use std::collections::HashSet;
@@ -245,17 +247,36 @@ impl IncrementalSolver {
         if self.frames.len() <= 1 {
             return false;
         }
-        self.frames.pop();
+        let popped = self.frames.pop().expect("checked above");
         let depth = self.frames.len() - 1;
         self.learnt.retain(|(d, _)| *d <= depth);
         self.carried = self.learnt.iter().map(|(_, c)| c.clone()).collect();
-        // the base survives a pop of frames it never integrated (a
-        // pushed-and-popped scope without a solve inside); popping an
-        // integrated frame retracts clauses the live solver holds
+        // The base survives a pop of frames it never integrated (a
+        // pushed-and-popped scope without a solve inside). Popping an
+        // integrated frame retracts clauses the live solver holds: for a
+        // satisfiable base and a clause-only frame the solver can often
+        // drop them in place ([`IncDet::retract_to_depth`]); otherwise
+        // the base is discarded and the next solve rebuilds.
         let integrated_popped =
             self.base.as_ref().is_some_and(|base| self.frames.len() < base.integrated.len());
         if integrated_popped {
-            self.base = None;
+            let sizes = self.frame_sizes();
+            let mut retained = false;
+            if popped.universals.is_empty() && popped.existentials.is_empty() {
+                if let Some(base) = self.base.as_mut() {
+                    if base.result == SolverResult::Satisfiable
+                        && base.solver.retract_to_depth(depth)
+                    {
+                        base.integrated = sizes;
+                        // the retraction backtracked the live solver
+                        base.queried = true;
+                        retained = true;
+                    }
+                }
+            }
+            if !retained {
+                self.base = None;
+            }
         }
         self.query = None;
         self.last = None;
@@ -292,6 +313,7 @@ impl IncrementalSolver {
 
     /// Builds the 2QBF instance for the current stack, including the
     /// carried learnt clauses.
+    #[cfg(test)]
     fn qcnf(&self) -> QCNF {
         self.qcnf_with(&[])
     }
@@ -306,17 +328,53 @@ impl IncrementalSolver {
 
     /// The stack content beyond the integrated per-frame sizes: the
     /// monotone delta between the base solver and the current stack.
-    fn delta(&self, integrated: &[(usize, usize, usize)]) -> (Vec<u32>, Vec<u32>, Vec<Vec<i32>>) {
+    fn delta(
+        &self,
+        integrated: &[(usize, usize, usize)],
+    ) -> (Vec<u32>, Vec<u32>, Vec<Vec<i32>>, Vec<usize>) {
         let mut universals = Vec::new();
         let mut existentials = Vec::new();
         let mut clauses = Vec::new();
+        let mut depths = Vec::new();
         for (i, frame) in self.frames.iter().enumerate() {
             let (u, e, c) = integrated.get(i).copied().unwrap_or((0, 0, 0));
             universals.extend_from_slice(&frame.universals[u..]);
             existentials.extend_from_slice(&frame.existentials[e..]);
             clauses.extend_from_slice(&frame.clauses[c..]);
+            depths.extend(std::iter::repeat(i).take(frame.clauses.len() - c));
         }
-        (universals, existentials, clauses)
+        (universals, existentials, clauses, depths)
+    }
+
+    /// Builds a fresh core solver for the current stack plus the carried
+    /// learnt clauses, tagging every clause with its frame depth (carried
+    /// clauses with the depth they were harvested at) so popped frames
+    /// can later be retracted in place.
+    fn build_base_solver(&self) -> IncDet {
+        let mut solver = IncDet::with_options(self.options);
+        let to_var = |v: &u32| Var::from_dimacs(i32::try_from(*v).expect("variable fits an i32"));
+        let universals: Vec<Var> =
+            self.frames.iter().flat_map(|f| f.universals.iter()).map(to_var).collect();
+        let existentials: Vec<Var> =
+            self.frames.iter().flat_map(|f| f.existentials.iter()).map(to_var).collect();
+        if !universals.is_empty() {
+            solver.quantify(QuantTy::Forall, &universals);
+        }
+        solver.quantify(QuantTy::Exists, &existentials);
+        let add = |solver: &mut IncDet, depth: usize, clause: &[i32]| {
+            solver.set_load_depth(depth);
+            let lits: Vec<Lit> = clause.iter().map(|&l| Lit::from_dimacs(l)).collect();
+            FromQdimacs::add_clause(solver, &lits);
+        };
+        for (depth, frame) in self.frames.iter().enumerate() {
+            for clause in &frame.clauses {
+                add(&mut solver, depth, clause);
+            }
+        }
+        for (depth, clause) in &self.learnt {
+            add(&mut solver, *depth, clause);
+        }
+        solver
     }
 
     /// Solves the conjunction of the assertion stack. When the changes
@@ -330,7 +388,7 @@ impl IncrementalSolver {
         self.query = None;
         if self.continuation {
             if let Some(mut base) = self.base.take() {
-                let (universals, existentials, clauses) = self.delta(&base.integrated);
+                let (universals, existentials, clauses, depths) = self.delta(&base.integrated);
                 let unchanged =
                     universals.is_empty() && existentials.is_empty() && clauses.is_empty();
                 match base.result {
@@ -347,8 +405,12 @@ impl IncrementalSolver {
                         return SolverResult::Satisfiable;
                     }
                     SolverResult::Satisfiable => {
-                        let extended =
-                            base.solver.extend_and_resolve(&universals, &existentials, &clauses);
+                        let extended = base.solver.extend_and_resolve(
+                            &universals,
+                            &existentials,
+                            &clauses,
+                            &depths,
+                        );
                         // the live solver's learnt clauses are valid
                         // resolvents of the current stack either way (a
                         // rejected extension integrates nothing)
@@ -367,8 +429,7 @@ impl IncrementalSolver {
                 }
             }
         }
-        let qcnf = self.qcnf();
-        let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
+        let mut solver = self.build_base_solver();
         let result = solver.solve();
         self.harvest_learnt(&solver);
         self.base = Some(Base { result, solver, integrated: self.frame_sizes(), queried: false });
@@ -419,7 +480,7 @@ impl IncrementalSolver {
             // the solver state itself, so no re-solve is needed even
             // after an earlier query
             let unchanged = self.base.as_ref().is_some_and(|base| {
-                let (u, e, c) = self.delta(&base.integrated);
+                let (u, e, c, _) = self.delta(&base.integrated);
                 u.is_empty() && e.is_empty() && c.is_empty()
             });
             let result = if unchanged {
@@ -703,6 +764,35 @@ mod test {
         assert_eq!(solver.solve_with_assumptions(&[1]), SolverResult::Satisfiable);
         // contradictory restrictions: an empty domain, vacuously sat
         assert_eq!(solver.solve_with_assumptions(&[1, -1]), SolverResult::Satisfiable);
+    }
+
+    #[test]
+    fn pop_retention_of_solved_frames() {
+        let mut solver = IncrementalSolver::default();
+        solver.declare_universal(1);
+        solver.declare_existential(2);
+        solver.declare_existential(3);
+        solver.add_clause(&[-1, 2, 3]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        // a clause-only frame whose clause keeps two unassigned
+        // existentials is retractable in place
+        solver.push();
+        solver.add_clause(&[1, -2, -3]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert_eq!(solver.extension_count(), 1);
+        assert!(solver.pop());
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        assert!(solver.extension_count() >= 2, "the base survived the pop");
+        // a popped frame with declarations discards the base
+        solver.push();
+        solver.declare_existential(4);
+        solver.add_clause(&[-1, 4]);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert!(solver.pop());
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        assert!(solver.verify());
+        assert_eq!(solver.extension_count(), 0, "declarations forced a rebuild");
     }
 
     #[test]

@@ -160,6 +160,13 @@ pub struct IncDet {
     /// extension ([`IncDet::extend_and_resolve`]) — an explicit list, since
     /// extension clauses arrive after learnt clauses in the allocator
     originals: Vec<ClauseId>,
+    /// the assertion-stack depth each original clause belongs to (aligned
+    /// with the load order and with `originals` once solving started);
+    /// lets [`IncDet::retract_to_depth`] identify the clauses of popped
+    /// frames
+    original_depths: Vec<usize>,
+    /// the depth tag for clauses loaded next ([`IncDet::set_load_depth`])
+    load_depth: usize,
     /// for every literal, the original clauses containing it (static; used
     /// by the pure-literal rule)
     occurrences: LitVec<Vec<ClauseId>>,
@@ -400,11 +407,22 @@ impl IncDet {
         Some(lits)
     }
 
+    /// Sets the assertion-stack depth recorded for subsequently loaded
+    /// clauses (before solving starts). Incremental frontends use the
+    /// tags to retract popped frames in place.
+    pub fn set_load_depth(&mut self, depth: usize) {
+        self.load_depth = depth;
+    }
+
     fn _add_clause(&mut self, lits: &[Lit]) {
         debug!("Add clause: {}", LitSlice::from(lits));
         let Some(lits) = self.preprocess_clause(lits) else {
             return;
         };
+        if !self.watches.enabled() {
+            // a loaded original (learnt clauses arrive with watches on)
+            self.original_depths.push(self.load_depth);
+        }
         let clause_id = self.allocator.add(&lits);
 
         // check if there is only one existential variable
@@ -570,7 +588,9 @@ impl IncDet {
         new_universals: &[u32],
         new_existentials: &[u32],
         clauses: &[Vec<i32>],
+        depths: &[usize],
     ) -> Option<SolverResult> {
+        debug_assert_eq!(clauses.len(), depths.len());
         if self.conflicted {
             // adding clauses and variables keeps an unsatisfiable instance
             // unsatisfiable, and the recorded winning move stays winning
@@ -584,7 +604,8 @@ impl IncDet {
         // the outermost existential scope
         let free_before = self.prefix.first().map_or(0, |s| s.variables.len());
         let mut processed: Vec<Vec<Lit>> = Vec::new();
-        for clause in clauses {
+        let mut processed_depths: Vec<usize> = Vec::new();
+        for (clause, &depth) in clauses.iter().zip(depths) {
             let lits: Vec<Lit> = clause.iter().map(|&l| Lit::from_dimacs(l)).collect();
             let Some(lits) = self.preprocess_clause(&lits) else {
                 continue;
@@ -594,9 +615,11 @@ impl IncDet {
                 // preprocessing; keep the clause for witness verification
                 let cid = self.allocator.add(&lits);
                 self.originals.push(cid);
+                self.original_depths.push(depth);
                 return Some(SolverResult::Unsatisfiable);
             }
             processed.push(lits);
+            processed_depths.push(depth);
         }
         let new_frees: Vec<Var> = self.prefix[0].variables[free_before..].to_vec();
         for var in new_frees {
@@ -663,8 +686,8 @@ impl IncDet {
             }
         }
 
-        for lits in &processed {
-            if let Some(result) = self.integrate_clause(lits) {
+        for (lits, &depth) in processed.iter().zip(&processed_depths) {
+            if let Some(result) = self.integrate_clause(lits, depth) {
                 return Some(result);
             }
         }
@@ -821,6 +844,95 @@ impl IncDet {
                 None
             }
         }
+    }
+
+    /// Retracts every original clause integrated at a stack depth above
+    /// `depth`, keeping the solved state alive across a pop of
+    /// clause-only frames. The popped clauses and *all* learnt clauses —
+    /// resolvents that may have been derived from them — are deleted like
+    /// reduced learnt clauses, the incremental conflict check is rebooted
+    /// from the surviving state, and the matrix-derived helper solvers
+    /// are invalidated (rebuilt lazily). What stays: root functions and
+    /// constants (their implication clauses are locked, see below), root
+    /// pure choices (purity is monotone under clause removal), variable
+    /// activities, and handled cases (their recorded strategies satisfy a
+    /// superset of the shrunk matrix).
+    ///
+    /// Returns `false` — the caller rebuilds instead — when a doomed
+    /// clause is locked after the backtrack to the root: locked then
+    /// means "registered as a root-level implication", i.e. a permanent
+    /// root function depends on it. A satisfiable verdict survives the
+    /// retraction (clause removal only weakens the instance);
+    /// unsatisfiable states must not be retracted.
+    pub fn retract_to_depth(&mut self, depth: usize) -> bool {
+        if self.conflicted {
+            return false;
+        }
+        self.query_assumptions.clear();
+        if !self.trail.decision_level().is_root() {
+            self.backtrack_to(DecLvl::ROOT);
+        }
+        self.casesplits.clear_committed();
+        debug_assert_eq!(self.originals.len(), self.original_depths.len());
+        let doomed: Vec<ClauseId> = self
+            .originals
+            .iter()
+            .zip(&self.original_depths)
+            .filter(|&(_, &d)| d > depth)
+            .map(|(&cid, _)| cid)
+            .collect();
+        if doomed.is_empty() {
+            // nothing to retract; the learnt clauses are resolvents of
+            // the surviving matrix and stay
+            return true;
+        }
+        if doomed.iter().chain(self.learnts.iter()).any(|&cid| self.allocator.is_locked(cid)) {
+            debug!("retraction: a doomed or learnt clause backs a root function");
+            return false;
+        }
+        let deleted: HashSet<ClauseId> =
+            doomed.iter().copied().chain(self.learnts.iter().copied()).collect();
+        for &cid in &deleted {
+            self.allocator.delete(cid);
+            self.clause_activity.remove(cid);
+        }
+        self.learnts.clear();
+        self.clauses.retain(|cid| !deleted.contains(cid));
+        self.watches.remove_clauses(&deleted);
+        let mut originals = Vec::new();
+        let mut original_depths = Vec::new();
+        for (&cid, &d) in self.originals.iter().zip(&self.original_depths) {
+            if !deleted.contains(&cid) {
+                originals.push(cid);
+                original_depths.push(d);
+            }
+        }
+        self.originals = originals;
+        self.original_depths = original_depths;
+        for occurrences in self.occurrences.iter_mut() {
+            occurrences.retain(|cid| !deleted.contains(cid));
+        }
+        // shrinking the clause set can only enable more purity
+        let candidates: Vec<Var> = self
+            .vars
+            .iter()
+            .filter(|(var, data)| {
+                data.scope.is_some()
+                    && data.is_existential(&self.prefix)
+                    && !self.assignment.is_assigned(*var)
+            })
+            .map(|(var, _)| var)
+            .collect();
+        for var in candidates {
+            self.queue_pure_check(var);
+        }
+        // the conflict check and the helper solvers hold the old matrix
+        if self.options.incremental_conflict_check {
+            self.reboot_conflict_check();
+        }
+        self.cegar.invalidate_solver();
+        self.casesplits.invalidate_domain();
+        true
     }
 
     /// Whether the in-place assumption query path is available: it
@@ -996,10 +1108,11 @@ impl IncDet {
     /// unsatisfiability if every existential literal of the clause is
     /// (permanently) root-assigned and the root functions do not entail
     /// the clause outside the handled regions.
-    fn integrate_clause(&mut self, lits: &[Lit]) -> Option<SolverResult> {
+    fn integrate_clause(&mut self, lits: &[Lit], depth: usize) -> Option<SolverResult> {
         debug_assert!(self.trail.decision_level().is_root());
         let cid = self.allocator.add(lits);
         self.originals.push(cid);
+        self.original_depths.push(depth);
         for &lit in lits {
             self.occurrences[lit].push(cid);
         }
@@ -1076,6 +1189,7 @@ impl IncDet {
     /// [`IncDet::extend_and_resolve`].
     fn _solve(&mut self) -> SolverResult {
         self.originals = self.allocator.ids().take(self.allocator.len()).collect();
+        debug_assert_eq!(self.originals.len(), self.original_depths.len());
         for &cid in &self.originals {
             for &lit in self.allocator[cid].iter() {
                 self.occurrences[lit].push(cid);

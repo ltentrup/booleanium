@@ -95,7 +95,10 @@ universal point against the matrix. The open work below is about
   their derivation did not touch popped clauses? (Dependency tracking
   per case — the CEGAR response solver knows which clauses supported a
   cube.) This is the difference between "restart per query" and a truly
-  incremental games loop.
+  incremental games loop. *Answered — see the pop-retention entry
+  below*: locked-ness of root implications turned out to be the right
+  dependency granularity, and recorded cases need no tracking at all
+  (they survive any clause deletion).
 * **In-place monotone continuation — done** (see `PLAN.md` §1c for the
   full design and measurements): the live solver continues across
   add-only deltas, keeping root trail, learnt clauses, handled cases
@@ -213,18 +216,35 @@ universal point against the matrix. The open work below is about
   violation verdicts stay final with cases retained. Fast-path hits in
   the differential fuzz went from 20 to 88 per 256 sessions (half of
   which run with continuation disabled).
-* Remaining gap: pop-retention of *solved* state per the
-  dependency-tracking question above. The tractable slice mapped out
-  so far: retain the base across a pop of solved frames when the
-  popped originals (and the live solver's learnt clauses, which may
-  resolve against them) are all unlocked after a backtrack to root —
-  i.e. not registered as root implications — by deleting them like
-  learnt clauses and rebooting the conflict check; recorded cases
-  survive (their strategies satisfy a superset of the shrunk matrix)
-  and root pure choices survive (purity is monotone under clause
-  removal). The blocker is bookkeeping: originals need per-frame depth
-  tags through the build and extension paths, which the flat
-  QCNF-based construction currently erases.
+* **Pop-retention of solved state — done** (`IncDet::retract_to_depth`;
+  the dependency-tracking question above, resolved for the tractable
+  slice): a pop of a clause-only frame keeps a *satisfiable* base
+  when, after a backtrack to root, none of the popped originals and
+  none of the live learnt clauses is *locked* (registered as a root
+  implication) — locked-ness is exactly the dependency that matters,
+  because an unlocked clause supports no root function. The popped
+  originals and *all* learnt clauses (they may resolve against popped
+  ones; per-clause resolution ancestry was not worth tracking) are
+  deleted like a reduce-DB sweep and the conflict check is rebooted;
+  recorded cases survive (their strategies satisfy a superset of the
+  shrunk matrix), root pure-constant choices survive (purity is
+  monotone under clause removal — deleting clauses only *frees*
+  occurrences), and the satisfiable verdict survives outright. The
+  bookkeeping blocker fell to per-clause depth tags: every original
+  carries the stack depth it was loaded at, through both the build
+  path (rebuilds now construct the core solver frame by frame instead
+  of from a flat QCNF) and the extension path. One subtlety the unit
+  test surfaced: a clause can be integrated *unlocked* because a root
+  pure choice already satisfies it, so whether retention applies is a
+  property of the solving trajectory, not of the instance alone.
+  Measured on scoped re-solving (`parity-scoped` in
+  `bench_incremental`: push a clause frame, solve, pop — 200 rounds
+  on a 200-step chain): ~124 ms retained vs ~145 ms with the base
+  dropped on every pop (the prior behavior) vs ~217 ms
+  rebuild-per-solve. Modest on this easy family because carried
+  learnt clauses already make its rebuilds cheap — but every round
+  stays on the extension path (399 in-place extensions), keeping the
+  cases and activities that matter on harder instances.
 
 ## RQ3 — SMT-LIB as the surface language
 

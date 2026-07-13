@@ -94,6 +94,27 @@ fn parity_unrolling_probed(solver: &mut IncrementalSolver, steps: u32) -> Solver
     result
 }
 
+/// The parity chain solved once, then repeated *scoped* re-solves: push
+/// a clause-only frame, solve, pop. Retraction keeps the live solver
+/// across the pops; without it every round rebuilds from scratch.
+fn parity_scoped(solver: &mut IncrementalSolver, steps: u32) -> SolverResult {
+    let mut result = parity_unrolling(solver, steps, false);
+    for r in 0..steps {
+        let i = r % steps + 1;
+        let (u, x) = (i32::try_from(2 * i - 1).unwrap(), i32::try_from(2 * i).unwrap());
+        solver.push();
+        if i == 1 {
+            solver.add_clause(&[-u, x]);
+        } else {
+            solver.add_clause(&[x - 2, u, -x]);
+        }
+        result = solver.solve();
+        assert_eq!(result, SolverResult::Satisfiable);
+        assert!(solver.pop());
+    }
+    result
+}
+
 /// Declares a fixed 2QBF variable set and feeds a random matrix in
 /// chunks, re-solving after each chunk: the clause-refinement access
 /// pattern (e.g. counterexample-guided loops adding constraints).
@@ -168,6 +189,7 @@ fn main() {
         run(&format!("parity-unroll-sat-{n}"), |solver| parity_unrolling(solver, n, false));
         run(&format!("parity-unroll-unsat-{n}"), |solver| parity_unrolling(solver, n, true));
         run(&format!("parity-unroll-probed-{n}"), |solver| parity_unrolling_probed(solver, n));
+        run(&format!("parity-scoped-{n}"), |solver| parity_scoped(solver, n));
     }
     for (k, m, c, chunks, seed) in
         [(10, 60, 220, 10, 1), (10, 60, 220, 10, 2), (12, 90, 330, 15, 1), (12, 90, 330, 15, 2)]

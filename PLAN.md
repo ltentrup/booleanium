@@ -289,6 +289,18 @@ increasing order of ambition:
   probe answers drop from a rebuild each to one small entailment SAT
   call each (~98 ms → ~55 ms at 200 steps, on top of the plain solves
   already being in-place).
+* **Universal assumptions, case retention across queries, and
+  pop-retention of solved state — done**: domain-restriction queries
+  ("what if the environment plays u") run on the in-place fast path;
+  recorded cases stay usable across assumption queries via a
+  per-case compatibility check; and popping a clause-only frame keeps
+  a satisfiable base when the popped originals and live learnt
+  clauses are unlocked (`IncDet::retract_to_depth`, per-clause depth
+  tags on originals through both the build and extension paths).
+  Measured on scoped re-solving (`parity-scoped`, 200 rounds on a
+  200-step chain): ~124 ms retained vs ~145 ms dropping the base per
+  pop vs ~217 ms rebuild-per-solve. Full designs, soundness
+  arguments, and measurements in `RESEARCH.md` (RQ2).
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean
