@@ -301,6 +301,16 @@ increasing order of ambition:
   200-step chain): ~124 ms retained vs ~145 ms dropping the base per
   pop vs ~217 ms rebuild-per-solve. Full designs, soundness
   arguments, and measurements in `RESEARCH.md` (RQ2).
+* **Safety-game unrolling benchmark — done** (`aiger::Unroller`,
+  `bench_games`): the AIGER path parses sequential SYNTCOMP-style
+  safety specifications (latches, `controllable_` inputs, error
+  outputs) and unrolls them one time step per solve into the
+  incremental API; benchmark families are a bounded-response arbiter
+  and ring/corridor pursuit games, validated by a differential
+  proptest against an independent game-simulation oracle. End-to-end
+  findings — which derived artifacts transfer across game depths,
+  the clairvoyance caveat of per-depth ∀∃ queries, and the syntactic
+  extension decline it motivated — in `RESEARCH.md` (RQ5).
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean

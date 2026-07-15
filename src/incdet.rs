@@ -648,6 +648,27 @@ impl IncDet {
             return None;
         }
 
+        // A retained case treats variables without a recorded function
+        // adversarially — the same semantics its original verification
+        // used, so a clause over old variables can still pass. A clause
+        // mentioning a variable *declared by this extension* cannot: no
+        // case has a function for it (an unrolling's fresh step
+        // variables are the typical source). Decline syntactically
+        // instead of discovering the same in the SAT checks below.
+        if !self.handled_cases.is_empty() {
+            let fresh: HashSet<Var> = (new_universals.iter())
+                .chain(new_existentials)
+                .map(|&v| Var::from_dimacs(i32::try_from(v).expect("variable fits an i32")))
+                .collect();
+            if processed.iter().any(|lits| lits.iter().any(|l| fresh.contains(&l.var()))) {
+                debug!(
+                    "monotone extension: a new clause constrains a newly declared variable, \
+                     which no handled case covers"
+                );
+                return None;
+            }
+        }
+
         // The pure gate: root-level pure-constant assignments are
         // winnability-preserving choices, and an added clause containing
         // such a literal invalidates the rewrite argument behind them —

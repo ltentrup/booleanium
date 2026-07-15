@@ -338,13 +338,52 @@ earns its keep — none of which a one-shot QDIMACS call can express.
 * Competition/baselines: Z3's quantifier engines, Yices `ef-solve`,
   SyGuS solvers. The niche for an ID-based engine is structure
   exploitation plus *certified* function output plus incrementality.
-* Benchmark plan: SYNTCOMP safety specifications reduced to per-depth
-  ∀∃ queries; compare one-shot re-solving vs incremental push/pop to
-  quantify what incrementality is worth end to end.
-* Open question: which of the derived artifacts (learnt clauses,
-  handled cases, Skolem fragments) transfer across game depths — the
-  RQ2 dependency-tracking question is exactly the "how much does the
-  solver remember between rounds of the game" question.
+* **Benchmark built — done** (`aiger::Unroller`, `bench_games`): the
+  AIGER path now parses *sequential* safety specifications (latch
+  next-state and reset, the SYNTCOMP `controllable_` input convention,
+  outputs as error signals) and unrolls them one time step per solve
+  into the incremental API — fresh input and gate copies per step, the
+  latch chain connecting to the previous step, and the error signals
+  asserted false. The unrolling is monotone, so the per-depth queries
+  ride the whole incremental stack. Validated by a differential
+  proptest against an *independent* clairvoyant-simulation game oracle
+  (random small sequential circuits, every depth's verdict compared
+  and every satisfiable result certified), plus hand-built games. The
+  benchmark families are SYNTCOMP-shaped generators: a
+  bounded-response arbiter (realizable iff clients ≤ bound) and
+  pursuit games on a ring/corridor.
+* **The clairvoyant relaxation is real, not a technicality**: a ∀∃
+  prefix fixes the universal input sequence in advance, so a bound-k
+  satisfiable answer is a *necessary* condition for realizability
+  (unsatisfiable refutes outright) but not sufficient. Measured
+  concretely: the corridor pursuit with a staying obstacle is a
+  classic cop-win game for a *reactive* cop, yet stays satisfiable at
+  every probed depth — the future-seeing robot times swaps past the
+  oblivious sweep. A synthesis loop on top of this interface needs a
+  causality post-check or per-step ∃∀ queries for the sufficient
+  direction.
+* **Which artifacts transfer across game depths — answered** (the RQ2
+  dependency question, measured end to end): *learnt clauses* transfer
+  (rebuilds are seeded with them; both modes benefit equally);
+  *unsatisfiable verdicts* transfer via the monotone shortcut (the
+  overloaded arbiter: ~1.3 ms in-place vs ~9.5 ms rebuilding each of
+  16 depths); *handled cases do not transfer*: the fresh step
+  variables have no function in any recorded case, so the adversarial
+  per-case re-verification necessarily fails — the extension gate now
+  detects this syntactically (a new clause constraining a variable
+  declared by the same extension declines for free, instead of
+  discovering the same in per-case SAT calls). In-place extensions
+  therefore happen only until the first case is recorded (2 of 24
+  depths on the rings), after which in-place and rebuild do the same
+  learnt-seeded work and differ by search-trajectory variance
+  (arbiter 2-2 at depth 16: ~613 ms vs ~325 ms against in-place;
+  ring-4 at depth 12: ~1.46 s vs ~1.86 s in favor). Open follow-up:
+  *definitional case extension* — the clauses of an unrolling step are
+  definitions of the fresh variables (gates, latch equalities), so
+  each recorded case could be extended with the canonical functions
+  those definitions induce, making cases transfer across depths;
+  requires recognizing definitional clause groups, which the
+  QCIR/QAIGER definition-level input path (RQ1) would get for free.
 
 ## Suggested experiment order
 

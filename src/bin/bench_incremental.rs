@@ -177,7 +177,7 @@ fn run(name: &str, workload: impl Fn(&mut IncrementalSolver) -> SolverResult) {
         let mode = if continuation { "in-place" } else { "rebuild" };
         println!(
             "{name:<32} {mode:>8} {result:>7} {elapsed:>12.3?} (extensions: {})",
-            solver.extension_count()
+            solver.extension_total()
         );
     }
 }

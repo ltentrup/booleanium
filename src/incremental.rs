@@ -122,6 +122,8 @@ pub struct IncrementalSolver {
     continuation: bool,
     /// the next fresh variable for [`IncrementalSolver::fresh_var`]
     next_var: u32,
+    /// lifetime count of in-place monotone extensions, across rebuilds
+    extensions: u32,
 }
 
 impl Default for IncrementalSolver {
@@ -143,6 +145,7 @@ impl IncrementalSolver {
             last: None,
             continuation: true,
             next_var: 1,
+            extensions: 0,
         }
     }
 
@@ -416,6 +419,7 @@ impl IncrementalSolver {
                         // rejected extension integrates nothing)
                         self.harvest_learnt(&base.solver);
                         if let Some(result) = extended {
+                            self.extensions += 1;
                             base.result = result;
                             base.integrated = self.frame_sizes();
                             base.queried = false;
@@ -591,6 +595,15 @@ impl IncrementalSolver {
     #[must_use]
     pub fn extension_count(&self) -> u32 {
         self.base.as_ref().map_or(0, |base| base.solver.extension_count())
+    }
+
+    /// Number of in-place monotone extensions performed over the lifetime
+    /// of this solver, across rebuilds (diagnostic for incremental
+    /// workloads; [`IncrementalSolver::extension_count`] resets with
+    /// every rebuild).
+    #[must_use]
+    pub fn extension_total(&self) -> u32 {
+        self.extensions
     }
 
     /// The verified winning move of the universal player for the most
