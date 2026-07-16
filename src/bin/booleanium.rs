@@ -48,6 +48,12 @@ struct Args {
     /// Verify the Skolem functions of a satisfiable result.
     #[arg(long)]
     certify: bool,
+
+    /// Write the Skolem functions of a satisfiable result as a strategy
+    /// circuit (ASCII AIGER, universal inputs to existential outputs) to
+    /// this path.
+    #[arg(long, value_name = "PATH")]
+    strategy: Option<PathBuf>,
 }
 
 impl Args {
@@ -107,6 +113,15 @@ fn main() -> Result<SolverResult> {
         } else {
             println!("certificate: INVALID");
             return Ok(SolverResult::Unknown);
+        }
+    }
+    if let Some(path) = &args.strategy {
+        if result == SolverResult::Satisfiable {
+            let circuit = solver.skolem_model().to_aiger(&|_| None);
+            std::fs::write(path, circuit).into_diagnostic()?;
+            println!("strategy written to {}", path.display());
+        } else {
+            tracing::warn!("no strategy to write: the result is not satisfiable");
         }
     }
 

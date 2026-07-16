@@ -353,8 +353,25 @@ increasing order of ambition:
   the matrix under these functions. The differential fuzz harness verifies
   the functions of every satisfiable result, and all satisfiable instances
   of the CADET suite certify.
-* **Skolem function output**: emit the verified functions in a standard
-  format (AIGER) instead of only checking them internally.
+* **Skolem function output — done** (`SkolemModel::to_aiger`, CLI
+  `--strategy <path>`): the piecewise Skolem functions are emitted as a
+  *strategy circuit* in ASCII AIGER — universal variables as inputs,
+  every defined existential as an output — mirroring the region
+  structure of the model (first handled region whose cube holds wins,
+  the final chain covers the rest) with a constant-folding AIG builder.
+  Validated by a proptest simulating the emitted circuit on every
+  universal point against the pointwise model evaluation (which the
+  differential harness checks against the matrix), with aggressive
+  case splitting so region selection is exercised, and externally by a
+  Python simulator sampling the CADET suite's satisfiable instances:
+  42/42 parseable instances check out (the remaining two are QAIGER
+  inputs the external checker does not parse; verified by hand). The
+  external sweep found a real emitter gap: a CEGAR *response* can
+  cover a variable the final solver state leaves unassigned, and both
+  emitters dropped such region-only variables — `to_smtlib`'s
+  `get-model` had the same latent bug. Both now emit the union of
+  defined variables (unconstrained outside the defining regions,
+  emitted as constant false there).
 * **QRAT / clausal proofs** for UNSAT results: the `qrat` module (currently
   commented out in `lib.rs`) was started for this; learned clauses are
   resolvents, so logging them in order should yield checkable proofs.

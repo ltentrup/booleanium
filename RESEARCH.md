@@ -331,9 +331,11 @@ What generalizes cleanly, judged against the current architecture:
 
 An incremental ∀∃ solver that returns functions is the inner loop of
 bounded synthesis and safety-game solving: the game unrolling depth maps
-to push levels, the winning-strategy extraction maps to `get-model`,
-and the incrementality between depths is where the interface (RQ2/RQ3)
-earns its keep — none of which a one-shot QDIMACS call can express.
+to push levels, the winning-strategy extraction maps to `get-model` (or
+`SkolemModel::to_aiger` / CLI `--strategy`, which emits the functions as
+an AIGER strategy circuit — see `PLAN.md` §2), and the incrementality
+between depths is where the interface (RQ2/RQ3) earns its keep — none
+of which a one-shot QDIMACS call can express.
 
 * Competition/baselines: Z3's quantifier engines, Yices `ef-solve`,
   SyGuS solvers. The niche for an ID-based engine is structure
