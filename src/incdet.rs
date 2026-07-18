@@ -35,6 +35,7 @@ pub(crate) mod conflict;
 pub(crate) mod determinacy;
 pub(crate) mod graph;
 pub mod model;
+pub(crate) mod proof;
 pub(crate) mod propagation;
 pub(crate) mod skolem;
 pub(crate) mod stats;
@@ -83,6 +84,12 @@ pub struct Options {
     /// Number of conflicts after which the search counts as stalled and a
     /// case split is attempted.
     pub case_split_threshold: u32,
+    /// Log a QRAT refutation proof of an unsatisfiable result,
+    /// retrievable via [`IncDet::qrat_proof`]. Forces `cegar` and
+    /// `case_splits` off: cube exclusions are justified game-theoretically
+    /// by recorded strategies, which the clausal proof rules cannot
+    /// express.
+    pub proof: bool,
     /// Restart the search (backtrack to the root level, keeping all learnt
     /// clauses and variable activities) on a Luby schedule.
     ///
@@ -103,6 +110,7 @@ impl Default for Options {
             cegar: true,
             case_splits: true,
             case_split_threshold: 5000,
+            proof: false,
             restarts: false,
         }
     }
@@ -201,6 +209,8 @@ pub struct IncDet {
     /// that no extension has an existential response (valid for prefixes
     /// with the universal block first)
     unsat_witness: Option<Vec<Lit>>,
+    /// the QRAT proof log; `Some` iff [`Options::proof`] is set
+    proof_log: Option<crate::qrat::ProofLog>,
     stats: Statistics,
 }
 
@@ -274,8 +284,14 @@ impl FromQdimacs for IncDet {
 impl IncDet {
     /// Creates a solver with the provided configuration.
     #[must_use]
-    pub fn with_options(options: Options) -> Self {
-        Self { options, ..Self::default() }
+    pub fn with_options(mut options: Options) -> Self {
+        if options.proof && (options.cegar || options.case_splits) {
+            tracing::info!("proof logging disables CEGAR and case splits");
+            options.cegar = false;
+            options.case_splits = false;
+        }
+        let proof_log = options.proof.then(crate::qrat::ProofLog::default);
+        Self { options, proof_log, ..Self::default() }
     }
 
     #[cfg(test)]
@@ -419,6 +435,9 @@ impl IncDet {
         let Some(lits) = self.preprocess_clause(lits) else {
             return;
         };
+        if let Some(log) = &mut self.proof_log {
+            log.add(&lits);
+        }
         if !self.watches.enabled() {
             // a loaded original (learnt clauses arrive with watches on)
             self.original_depths.push(self.load_depth);
@@ -591,6 +610,9 @@ impl IncDet {
         depths: &[usize],
     ) -> Option<SolverResult> {
         debug_assert_eq!(clauses.len(), depths.len());
+        if let Some(log) = &mut self.proof_log {
+            log.poisoned = true;
+        }
         if self.conflicted {
             // adding clauses and variables keeps an unsatisfiable instance
             // unsatisfiable, and the recorded winning move stays winning
@@ -745,6 +767,9 @@ impl IncDet {
     /// *choice* (revisable, so no verdict follows), or the search runs
     /// into a state it cannot attribute.
     pub fn resolve_with_assumptions(&mut self, assumptions: &[i32]) -> Option<SolverResult> {
+        if let Some(log) = &mut self.proof_log {
+            log.poisoned = true;
+        }
         self.query_assumptions.clear();
         // Partition: universal assumptions restrict the domain and must
         // be in force before any existential assumption is judged — a
@@ -886,6 +911,9 @@ impl IncDet {
     /// retraction (clause removal only weakens the instance);
     /// unsatisfiable states must not be retracted.
     pub fn retract_to_depth(&mut self, depth: usize) -> bool {
+        if let Some(log) = &mut self.proof_log {
+            log.poisoned = true;
+        }
         if self.conflicted {
             return false;
         }
@@ -1231,9 +1259,17 @@ impl IncDet {
             error!("Only 2QBF is currently supported");
             return SolverResult::Unknown;
         }
+        if let Some(log) = &mut self.proof_log {
+            log.active = true;
+        }
         if self.conflicted {
-            // witness recorded when the offending clause was added
+            // witness recorded when the offending clause was added; the
+            // clause is an original without existential literals, so the
+            // proof is one universal reduction to the empty clause
             debug_assert!(self.unsat_witness.is_some());
+            if let Some(log) = &mut self.proof_log {
+                log.add(&[]);
+            }
             return SolverResult::Unsatisfiable;
         }
         self.build_watchlist();
@@ -1545,6 +1581,12 @@ impl IncDet {
             };
         }
         trace!("{lit} is constant");
+        if let Some(log) = &mut self.proof_log {
+            // forced constants are propositional consequences (RUP); pure
+            // constants are QRAT additions (their opposite literal occurs
+            // only in clauses satisfied by earlier constants)
+            log.add(&[lit]);
+        }
         self.stats.skolem.constant_propagations += 1;
         if let Some(assignment) = self.is_conflicted(var) {
             trace!("{} is conflicted", var);
@@ -1673,8 +1715,15 @@ impl IncDet {
 
     pub(crate) fn backtrack_to(&mut self, lvl: DecLvl) {
         let mut unassigned = Vec::new();
+        let mut retracted_constants = Vec::new();
         self.trail.backtrack_to(lvl, |assigned_lit| {
             let var = assigned_lit.var();
+            if self.assignment.constant_value(assigned_lit) == Some(true) {
+                // a non-root constant (a pure choice under decisions) was
+                // logged as a proof unit; retract it so a later opposite
+                // constant stays justifiable (deletions only weaken)
+                retracted_constants.push(assigned_lit);
+            }
             self.assignment.unassign(var);
             self.dec_lvls[var] = None;
             if self.vars[var].scope.is_some() && self.vars[var].is_existential(&self.prefix) {
@@ -1682,6 +1731,11 @@ impl IncDet {
             }
             unassigned.push(var);
         });
+        if let Some(log) = &mut self.proof_log {
+            for lit in retracted_constants {
+                log.delete(&[lit]);
+            }
+        }
         self.prune_cases_on_backtrack(lvl);
         self.skolem.backtrack_to(lvl, |cid| self.allocator.unlock(cid));
         self.graph.backtrack_to(lvl);
@@ -1726,6 +1780,12 @@ impl IncDet {
         }
         let deleted: HashSet<ClauseId> = candidates.into_iter().map(|(_, _, cid)| cid).collect();
         for &cid in &deleted {
+            if self.proof_log.is_some() {
+                let lits = self.allocator[cid].lits().to_vec();
+                if let Some(log) = &mut self.proof_log {
+                    log.delete(&lits);
+                }
+            }
             self.allocator.delete(cid);
             self.clause_activity.remove(cid);
         }
@@ -1751,6 +1811,7 @@ impl IncDet {
             // at the root all functions are forced, so the conflicting
             // assignment is a winning universal move
             self.record_unsat_witness(&conflict.assignment);
+            self.log_root_refutation(conflict);
             return Some(SolverResult::Unsatisfiable);
         }
         let Ok(backtrack_to) = self.analyze(conflict) else {
@@ -1769,6 +1830,7 @@ impl IncDet {
                 .map(|&l| !l)
                 .collect();
             self.unsat_witness = Some(witness);
+            self.log_seed_refutation(conflict, self.conflict_analysis.clause().to_vec());
             return Some(SolverResult::Unsatisfiable);
         };
         debug!("conflict analysis: backtrack to {backtrack_to:?}");
@@ -1781,6 +1843,9 @@ impl IncDet {
             // negation of a case assumption); the witness falsifying it was
             // recorded when the clause was added
             debug_assert!(self.unsat_witness.is_some());
+            if let Some(log) = &mut self.proof_log {
+                log.add(&[]);
+            }
             return Some(SolverResult::Unsatisfiable);
         }
         // the learnt clause constrains the conflicted variable further, so it

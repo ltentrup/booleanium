@@ -14,6 +14,21 @@ mod fuzz {
         let mut solver = IncDet::from_qcnf(qcnf);
         let actual = solver.solve();
         prop_assert_eq!(actual, expected, "solver disagrees with oracle on instance:\n{}", qcnf);
+        if actual == crate::SolverResult::Unsatisfiable {
+            // re-solve with proof logging and check the emitted QRAT
+            // refutation with the independent checker
+            let options = Options { proof: true, ..Options::default() };
+            let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
+            prop_assert_eq!(solver.solve(), expected, "proof-mode verdict on:\n{}", qcnf);
+            let proof = solver.qrat_proof();
+            prop_assert!(proof.is_some(), "no proof was produced for:\n{}", qcnf);
+            let proof = proof.expect("checked above");
+            if let Err(err) = crate::qrat::check_refutation(qcnf, &proof) {
+                return Err(TestCaseError::fail(format!(
+                    "invalid proof for instance:\n{qcnf}\nproof:\n{proof}\nerror: {err}"
+                )));
+            }
+        }
         if actual == crate::SolverResult::Satisfiable {
             prop_assert!(
                 solver.verify_skolem_functions(),
@@ -51,6 +66,7 @@ mod fuzz {
                         case_splits: flags & 8 != 0,
                         // split almost immediately to exercise the machinery
                         case_split_threshold: 2,
+                        proof: false,
                     };
                     let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
                     let actual = solver.solve();

@@ -13,13 +13,13 @@ pub mod aiger;
 #[macro_use]
 pub mod qcnf;
 mod clause;
-mod literal;
-pub mod qdimacs;
-// mod qrat;
 pub mod cli;
 mod datastructure;
 pub mod incdet;
 pub mod incremental;
+mod literal;
+pub mod qdimacs;
+pub mod qrat;
 mod quantifier;
 mod sat;
 pub mod smtlib;

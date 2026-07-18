@@ -372,9 +372,32 @@ increasing order of ambition:
   `get-model` had the same latent bug. Both now emit the union of
   defined variables (unconstrained outside the defining regions,
   emitted as constant false there).
-* **QRAT / clausal proofs** for UNSAT results: the `qrat` module (currently
-  commented out in `lib.rs`) was started for this; learned clauses are
-  resolvents, so logging them in order should yield checkable proofs.
+* **QRAT refutation proofs — done** (`Options::proof`, CLI
+  `--proof <path>`, checker binary `qrat_check`): unsatisfiable results
+  emit a standard-format QRAT proof, checked by the in-tree checker
+  (`qrat::check_refutation`) on every UNSAT instance of the
+  differential fuzz (7 families × 20k cases) and on the CADET suite
+  (47 of the supported UNSAT instances valid, one timeout). Proof mode
+  disables CEGAR and case splits — their cube exclusions are justified
+  game-theoretically by recorded strategies, which clausal rules cannot
+  express — and everything else is checkable: learnt clauses are linear
+  resolution-chain conclusions (RUP by construction, preserved by
+  clause minimization); forced root constants are RUP units; *pure*
+  constants are QRAT unit additions (every clause containing the
+  opposite literal is satisfied by an earlier constant unit, making
+  each outer resolvent an asymmetric tautology) — and a non-root pure
+  constant discarded by backtracking emits a *deletion* line, so a
+  later opposite constant stays justifiable (the fuzz caught exactly
+  this as contradictory unit lines); reduce-DB deletions emit deletion
+  lines; the two pointwise UNSAT sites (root conflict, analysis with
+  only root existentials) are completed to a clause without existential
+  literals by resolving along the trail with the implications that fire
+  under the conflicting assignment, which universal reduction then
+  empties. The checker implements RUP with scope-aware universal
+  reduction and the unit-QRAT rule (tautologies dropped as inert, the
+  same normalization the solver's preprocessing applies). The old
+  half-finished `qrat` parser stub was removed, superseded by the
+  emitter and checker.
 
 ### 3. Performance
 

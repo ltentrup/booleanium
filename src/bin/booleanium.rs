@@ -54,6 +54,12 @@ struct Args {
     /// this path.
     #[arg(long, value_name = "PATH")]
     strategy: Option<PathBuf>,
+
+    /// Log a QRAT refutation proof and write it to this path on an
+    /// unsatisfiable result (disables CEGAR and case splits, whose
+    /// derivations the clausal proof rules cannot express).
+    #[arg(long, value_name = "PATH")]
+    proof: Option<PathBuf>,
 }
 
 impl Args {
@@ -66,6 +72,7 @@ impl Args {
             case_splits: !self.no_case_splits,
             case_split_threshold: self.case_split_threshold,
             restarts: self.restarts,
+            proof: self.proof.is_some(),
             ..Options::default()
         }
     }
@@ -113,6 +120,19 @@ fn main() -> Result<SolverResult> {
         } else {
             println!("certificate: INVALID");
             return Ok(SolverResult::Unknown);
+        }
+    }
+    if let Some(path) = &args.proof {
+        if result == SolverResult::Unsatisfiable {
+            match solver.qrat_proof() {
+                Some(proof) => {
+                    std::fs::write(path, proof).into_diagnostic()?;
+                    println!("proof written to {}", path.display());
+                }
+                None => println!("proof: NOT AVAILABLE (run left the proof rules)"),
+            }
+        } else {
+            tracing::warn!("no proof to write: the result is not unsatisfiable");
         }
     }
     if let Some(path) = &args.strategy {
