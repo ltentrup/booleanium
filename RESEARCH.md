@@ -31,11 +31,16 @@ The prototype ingests circuits by emitting two-sided Tseitin clauses, so
 determinization *rediscovers* the gates in the initial propagation.
 Open questions:
 
-* **Direct pre-determinization**: an API that enters a defined variable
-  as already-deterministic (implications attached, no determinacy
-  checks) would skip the discovery pass. Measure discovery cost on
-  large circuits first — if initial propagation is cheap relative to
-  solving, the API is convenience, not speed.
+* **Direct pre-determinization — measured, verdict: convenience, not
+  speed** (at current scales): on the largest definition-level suite
+  instance (`beem.qaig`, 18k gates) the whole run is dominated by
+  discovery — zero decisions, one conflict — and completes in ~0.15 s,
+  i.e. ~8 µs/gate; a pre-determinization API could save at most that.
+  Discovery *can* dominate pathologically (`AR-fixpoint` corpus
+  instances spend >30 s before the first fixpoint), but those are
+  PG-encoded CNF where no definitions exist to enter, so the API would
+  not apply. Revisit only if definition-level instances 100x larger
+  than the suite appear.
 * **Paired-encoding experiment — run** (`bench_encodings`: the same
   circuit families rendered as (a) QCIR through the definition-level
   frontend, (b) two-sided Tseitin CNF, (c) Plaisted–Greenbaum CNF;
