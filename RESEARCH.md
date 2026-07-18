@@ -48,8 +48,20 @@ Open questions:
   propagation determinizes; correlate with solve success. The 38 `stmt`
   instances suggest the answer is "not enough under PG", but a corpus-
   wide number would settle it.
-* QCIR support is the natural next frontend (richer gates than AIGER,
-  the QBF community's standard for structured instances).
+* **QCIR frontend — done for the prenex 2QBF slice** (`src/qcir.rs`,
+  auto-detected by the CLI via the `#QCIR` header): `and`/`or`/`xor`/
+  `ite` gates over cleansed or named identifiers become existential
+  variables with two-sided Tseitin definitions — the same
+  definition-level path as QAIGER, with richer gates. Prefixes that
+  collapse to ∀∃ or a single block solve natively (with certification,
+  strategy circuits under the surface names, and QRAT proofs); an ∃∀
+  prefix is solved by negation with the verdict inverted (gate
+  definitions are self-dual, only the output flips), mirroring the
+  SMT-LIB frontend's synthesis mode. Non-prenex quantifier gates and
+  deeper prefixes are rejected with clear errors. Validated by a
+  differential proptest against direct circuit evaluation (game
+  semantics on the circuit itself, independent of the Tseitin
+  conversion) in both quantifier orders, 8k cases.
 
 ## RQ2 — The incremental interface (the QIPASIR gap)
 

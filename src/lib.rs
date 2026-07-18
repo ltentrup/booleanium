@@ -18,6 +18,7 @@ mod datastructure;
 pub mod incdet;
 pub mod incremental;
 mod literal;
+pub mod qcir;
 pub mod qdimacs;
 pub mod qrat;
 mod quantifier;

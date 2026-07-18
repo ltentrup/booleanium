@@ -1,6 +1,7 @@
 use booleanium::{
     aiger,
     incdet::{IncDet, Options},
+    qcir,
     qdimacs::{ExtendedParseError, QdimacsParser},
     smtlib, SolverResult,
 };
@@ -12,8 +13,8 @@ use std::{io::Cursor, io::Read, path::PathBuf};
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Path to a QDIMACS or ASCII AIGER (QAIGER) file; reads from stdin
-    /// if omitted.
+    /// Path to a QDIMACS, ASCII AIGER (QAIGER), QCIR, or SMT-LIB file
+    /// (auto-detected); reads from stdin if omitted.
     file: Option<PathBuf>,
 
     /// Disable eager propagation of constant Skolem functions.
@@ -98,6 +99,56 @@ fn main() -> Result<SolverResult> {
         let mut frontend = smtlib::Frontend::new(args.options());
         print!("{}", frontend.run(text));
         return Ok(frontend.last_result().unwrap_or(SolverResult::Unknown));
+    }
+    if contents.starts_with(b"#QCIR") {
+        // prenex QCIR circuit input; an exists-forall prefix is solved
+        // by negation with the verdict inverted
+        let text = std::str::from_utf8(&contents).into_diagnostic()?;
+        let parsed = qcir::parse_qcir(text).into_diagnostic()?;
+        let mut solver = IncDet::from_qcnf_with_options(&parsed.qcnf, args.options());
+        let mut result = solver.solve();
+        if parsed.negated {
+            result = match result {
+                SolverResult::Satisfiable => SolverResult::Unsatisfiable,
+                SolverResult::Unsatisfiable => SolverResult::Satisfiable,
+                SolverResult::Unknown => SolverResult::Unknown,
+            };
+            if args.certify || args.strategy.is_some() || args.proof.is_some() {
+                tracing::warn!(
+                    "certificates, strategies, and proofs describe the negated instance                      and are not emitted for exists-forall QCIR inputs"
+                );
+            }
+            println!("result status: {result}");
+            return Ok(result);
+        }
+        println!("result status: {result}");
+        if args.certify && result == SolverResult::Satisfiable {
+            if solver.verify_skolem_functions() {
+                println!("certificate: valid");
+            } else {
+                println!("certificate: INVALID");
+                return Ok(SolverResult::Unknown);
+            }
+        }
+        if let Some(path) = &args.proof {
+            if result == SolverResult::Unsatisfiable {
+                match solver.qrat_proof() {
+                    Some(proof) => {
+                        std::fs::write(path, proof).into_diagnostic()?;
+                        println!("proof written to {}", path.display());
+                    }
+                    None => println!("proof: NOT AVAILABLE (run left the proof rules)"),
+                }
+            }
+        }
+        if let Some(path) = &args.strategy {
+            if result == SolverResult::Satisfiable {
+                let circuit = solver.skolem_model().to_aiger(&|v| parsed.name_of(v));
+                std::fs::write(path, circuit).into_diagnostic()?;
+                println!("strategy written to {}", path.display());
+            }
+        }
+        return Ok(result);
     }
     let mut solver = IncDet::with_options(args.options());
     if contents.starts_with(b"aag ") {

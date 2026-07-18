@@ -192,10 +192,14 @@ increasing order of ambition:
   CADET suite solve in ≤ 0.8s, certified, raising the suite to **93 of
   93 supported instances correct**. Validated additionally by a
   differential proptest over random circuits against the brute-force
-  oracle. The larger questions this opens — QCIR, an incremental
-  (QIPASIR-style or SMT-LIB) interface, theories, and positioning as a
-  building block for two-player games — are collected in
-  **`RESEARCH.md`**.
+  oracle. A **QCIR frontend** (`src/qcir.rs`, prenex 2QBF slice with
+  `and`/`or`/`xor`/`ite` gates, named or cleansed identifiers, ∃∀ by
+  negation) extends the same definition-level path to the QBF
+  community's structured-instance format — see `RESEARCH.md` (RQ1)
+  for design and validation. The larger questions this opens — an
+  incremental (QIPASIR-style or SMT-LIB) interface, theories, and
+  positioning as a building block for two-player games — are collected
+  in **`RESEARCH.md`**.
 
 ### 1c. Incremental API and SMT-LIB frontend
 
