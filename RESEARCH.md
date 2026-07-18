@@ -73,12 +73,34 @@ Open questions:
   effectively one-sidedly, under tops that force nothing. The
   corpus-wide determinization-fraction metric is now queryable for the
   detection question below.
-* **How much does gate *detection* on CNF actually recover?** Markus's
-  position (QDIMACS is fine, detect the gates) is testable now: count,
-  per QBFEVAL'17 instance, the fraction of existentials that initial
-  propagation determinizes; correlate with solve success. The 38 `stmt`
-  instances suggest the answer is "not enough under PG", but a corpus-
-  wide number would settle it.
+* **How much does gate *detection* on CNF actually recover? —
+  surveyed** (all 384 QBFEVAL'17 2QBF instances, 10 s budget,
+  fraction of existentials determinized at the first propagation
+  fixpoint vs solve outcome):
+
+  | initially determinized | n | solved |
+  |---|---|---|
+  | fixpoint not reached in 10 s | 10 | 0% |
+  | 0–20% | 182 | 21% |
+  | 20–50% | 90 | 40% |
+  | 50–80% | 86 | 50% |
+  | 80–99% | 15 | 60% |
+  | ~100% | 1 | 100% |
+
+  Solved instances recover a median 45% of their existentials up
+  front; timeouts a median 6%. Only *one* instance in the corpus
+  determinizes fully — on wild CNF encodings, propagation-based
+  detection recovers a fraction of the structure, and that fraction
+  is a strong monotone predictor of solvability. This settles the
+  corpus-wide question against "QDIMACS is fine": the structure ID
+  runs on is mostly *not* recoverable from the shipped encodings
+  (consistent with the `stmt` observation and with the
+  paired-encoding result that one-sidedness hurts exactly when
+  neither top-down forcing nor irrelevance rescues it). Caveat on
+  causality: instance size confounds — larger instances both
+  determinize less and are harder — so the number argues for
+  definition-level *inputs*, not for detection being the only
+  bottleneck.
 * **QCIR frontend — done for the prenex 2QBF slice** (`src/qcir.rs`,
   auto-detected by the CLI via the `#QCIR` header): `and`/`or`/`xor`/
   `ite` gates over cleansed or named identifiers become existential
