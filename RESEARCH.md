@@ -36,12 +36,38 @@ Open questions:
   checks) would skip the discovery pass. Measure discovery cost on
   large circuits first — if initial propagation is cheap relative to
   solving, the API is convenience, not speed.
-* **Paired-encoding experiment**: the thesis needs instances that exist
-  in both forms. Generate them: take circuit families (adders,
-  comparators, sorting networks), emit (a) QAIGER, (b) two-sided CNF,
-  (c) Plaisted–Greenbaum CNF, and compare solve times. Prediction from
-  current data: (a) ≈ (b) ≪ (c) for ID, while CEGAR-style solvers care
-  much less.
+* **Paired-encoding experiment — run** (`bench_encodings`: the same
+  circuit families rendered as (a) QCIR through the definition-level
+  frontend, (b) two-sided Tseitin CNF, (c) Plaisted–Greenbaum CNF;
+  measured: verdict, time, *initially determinized fraction*
+  (`IncDet::initial_deterministic`), decisions, conflicts). The
+  prediction (a) ≈ (b) ≪ (c) is **refuted in its general form**; the
+  encodings separate *conditionally*:
+  - *(a) ≈ (b) always* — the definition-level path is two-sided CNF by
+    construction; identical determinization and search on every family
+    (the format's value is convenience and losslessness, not a
+    separate algorithm).
+  - *Output-forced structure*: on trees whose output forces everything
+    (parity-equality chains, mux trees), PG loses nothing — unit
+    propagation down the forced output re-derives the dropped
+    directions; all encodings determinize 100% initially with zero
+    decisions, PG slightly leaner.
+  - *Irrelevant cones*: on random circuits PG wins **~100x** — gates
+    outside the output cone get no clauses and stay unconstrained,
+    while (a)/(b) pay decisions and conflicts to determinize junk
+    (initial 6–10/50 determinized, then search; PG: solved in
+    microseconds).
+  - *Choice-blocked structure* (comparison gates over existential
+    choice variables under a disjunctive top): initial determinization
+    stalls for **all** encodings — a gate whose arguments include an
+    unconstrained existential cannot be recognized bottom-up — and PG
+    is a mild constant worse (~1.3–1.5x decisions/time).
+  The drastic definition-level wins recorded on the wild `stmt`/QAIGER
+  instances (PLAN §1) therefore hinge on instance structure the naive
+  generators do not produce: deep gates over *universal* inputs, used
+  effectively one-sidedly, under tops that force nothing. The
+  corpus-wide determinization-fraction metric is now queryable for the
+  detection question below.
 * **How much does gate *detection* on CNF actually recover?** Markus's
   position (QDIMACS is fine, detect the gates) is testable now: count,
   per QBFEVAL'17 instance, the fraction of existentials that initial

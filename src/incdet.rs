@@ -423,6 +423,26 @@ impl IncDet {
         Some(lits)
     }
 
+    /// The trail length at the first propagation fixpoint of the most
+    /// recent search: how many variables the input structure determinized
+    /// before any decision (diagnostic for encoding experiments).
+    #[must_use]
+    pub fn initial_deterministic(&self) -> usize {
+        self.stats.global.initial_deterministic
+    }
+
+    /// The number of decisions of the most recent search.
+    #[must_use]
+    pub fn decisions(&self) -> u32 {
+        self.stats.global.decisions
+    }
+
+    /// The number of conflicts of the most recent search.
+    #[must_use]
+    pub fn conflicts(&self) -> u32 {
+        self.stats.global.conflicts
+    }
+
     /// Sets the assertion-stack depth recorded for subsequently loaded
     /// clauses (before solving starts). Incremental frontends use the
     /// tags to retract popped frames in place.
@@ -1296,6 +1316,7 @@ impl IncDet {
                 continue;
             }
             if initial.take().is_some() {
+                self.stats.global.initial_deterministic = self.trail.len();
                 info!("number of initial deterministic vars: {}", self.trail.len());
             }
             if !self.query_assumptions.is_empty() {

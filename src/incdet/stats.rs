@@ -24,6 +24,9 @@ pub(crate) struct CaseStats {
 #[derive(Debug, Default)]
 pub(crate) struct GlobalStats {
     pub(crate) decisions: u32,
+    /// trail length at the first propagation fixpoint of the search:
+    /// how many variables the input structure determinizes up front
+    pub(crate) initial_deterministic: usize,
     pub(crate) conflicts: u32,
     pub(crate) restarts: u32,
     pub(crate) added_clauses: u32,

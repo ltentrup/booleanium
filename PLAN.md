@@ -196,7 +196,11 @@ increasing order of ambition:
   `and`/`or`/`xor`/`ite` gates, named or cleansed identifiers, ∃∀ by
   negation) extends the same definition-level path to the QBF
   community's structured-instance format — see `RESEARCH.md` (RQ1)
-  for design and validation. The larger questions this opens — an
+  for design and validation. The **paired-encoding experiment**
+  (`bench_encodings`: the same families as QCIR, two-sided CNF, and
+  Plaisted–Greenbaum CNF) measured what the format is worth — the
+  answer is conditional, not the predicted uniform win; results and
+  analysis in `RESEARCH.md` (RQ1). The larger questions this opens — an
   incremental (QIPASIR-style or SMT-LIB) interface, theories, and
   positioning as a building block for two-player games — are collected
   in **`RESEARCH.md`**.
