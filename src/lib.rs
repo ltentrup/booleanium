@@ -10,6 +10,7 @@ use std::{
 };
 
 pub mod aiger;
+pub mod alternation;
 #[macro_use]
 pub mod qcnf;
 mod clause;

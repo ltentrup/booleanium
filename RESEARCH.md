@@ -483,6 +483,87 @@ of which a one-shot QDIMACS call can express.
   invalidates every later region's piecewise claim, so re-opening
   needs re-verification cascades. Cases remain per-matrix artifacts.
 
+## RQ6 — Quantifier alternations
+
+The core is deliberately 2QBF (root permanence, pointwise forcing over
+*one* universal frontier). Four algorithmic routes to ∃∀∃ and beyond,
+judged against what this codebase already has:
+
+* **Dependency-aware ID (the DQBF route).** Generalize determinacy to
+  per-variable dependency sets: an existential of block `k` may only
+  take implication premises over its preceding universals (and
+  existentials with smaller dependency sets); determinacy means a
+  unique value under every assignment of *its* dependencies. This is
+  the conceptually clean extension — ID's implication sets are already
+  definitions, and Pedant shows definition-based solving carries to
+  DQBF — but it rewires every invariant this project spent its
+  validation budget on: conflict analysis must respect the dependency
+  lattice (the soundness pitfalls of long-distance Q-resolution live
+  exactly here), the pointwise-forcing lemma that underpins root
+  permanence, pure choices, assumption verdicts, and certificates is
+  per-frontier, and the conflict check becomes a QBF query itself for
+  inner blocks. High risk, whole-solver surgery. Not the smart first
+  move.
+* **Innermost-block expansion.** ∀-expand the innermost universal
+  block into two copies per variable and recurse. Doubles the matrix
+  per variable; only smart when that block is tiny. A degenerate
+  special case of the next option; not worth separate machinery.
+* **Recursive expansion with a persistent ID oracle (the smart
+  move).** RAReQS-style CEGAR at the outermost existential block `X`:
+  a plain SAT abstraction over `X` proposes candidates `X*`; the
+  remaining ∀Y∃Z is *exactly* the 2QBF core — and the incremental
+  API makes it a **persistent oracle**: declare `Y` universal and
+  `Z ∪ X` existential once, then each candidate is one
+  `solve_with_assumptions(X*)` — the workload the in-place assumption
+  queries, case compatibility, and learnt-clause persistence were
+  built for, and everything learnt is matrix-valid across candidates
+  (assumption literals survive in every resolvent). On inner UNSAT
+  the solver hands back a *verified* universal witness `Y*` — no
+  UNSAT-core plumbing needed — and the refinement is the classic
+  expansion: add `matrix[Y := Y*]` with fresh `Z`-copies to the
+  abstraction (guaranteed to exclude `X*` precisely because the
+  witness is verified); when the witness is unavailable (the recorded
+  candidate failed verification), the weak refinement `¬X*` keeps the
+  loop total. A ∀-outermost prefix is handled by negation (Tseitin of
+  the negated matrix; gate variables join the innermost existential
+  block), the same self-duality trick the ∃∀ frontends use; deeper
+  prefixes recurse, with strong refinements available whenever the
+  inner problem bottoms out at the 2QBF oracle. What no existing
+  expansion solver has: an inner oracle with persistent learning,
+  certified inner strategies (composable toward alternation
+  certificates: `X*` constants + the 2QBF Skolem functions), and
+  verified witnesses driving the refinements.
+* **Determinize-then-dispatch (hybrid).** Run the definition-level
+  discovery across the whole prefix first — an inner existential
+  whose implication premises all lie within its own dependency prefix
+  is a *definition* regardless of alternation depth and can be
+  treated as a gate (eliminated from the game). The residual
+  undetermined variables then go through the expansion loop. This is
+  the RQ1 story applied to alternations: on structured instances most
+  inner existentials are gates, so the expansion loop only ever sees
+  the genuinely strategic variables. Natural second step once the
+  expansion loop exists.
+
+**Status: the expansion route is prototyped and validated**
+(`src/alternation.rs`, wired into the CLI for `>2`-block QDIMACS):
+outermost-∃ expansion loop over a varisat abstraction with the
+persistent 2QBF oracle at depth three (verified-witness expansions,
+`¬X*` fallback); a *dual candidate loop* for ∀-outermost blocks — the
+first cut negated the matrix instead, and the Tseitin gates cascading
+through the recursion blew memory; enumeration keeps the matrix fixed
+— and recursion (weak refinements only) beyond three blocks, with an
+honest resource budget that returns `Unknown` instead of expanding
+into the ground. Validated by 20k-case differential proptests against
+the brute-force oracle on random 1–6-block instances. On the CADET
+suite the prototype lifts the score from 93 correct + 33 unsupported
+to **116 correct, 0 wrong**: 23 of the 33 alternation instances solve
+within 30 s (including both `pec_adder` pairs and `adder2`-class
+instances), the remaining 8 give up on budget or time out. Next steps
+in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
+support in the core), strong dual refinements (regions of answered
+universal candidates), the determinize-then-dispatch hybrid, and
+certificate composition (outer constants + inner Skolem functions).
+
 ## Suggested experiment order
 
 1. Paired-encoding experiment (RQ1) — settles the format thesis with

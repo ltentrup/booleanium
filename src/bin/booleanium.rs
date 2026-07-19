@@ -150,17 +150,32 @@ fn main() -> Result<SolverResult> {
         }
         return Ok(result);
     }
-    let mut solver = IncDet::with_options(args.options());
+    let mut solver;
     if contents.starts_with(b"aag ") {
         // ASCII AIGER circuit input (QAIGER convention)
         let text = std::str::from_utf8(&contents).into_diagnostic()?;
         let qcnf = aiger::parse_qaiger(text).into_diagnostic()?;
         solver = IncDet::from_qcnf_with_options(&qcnf, args.options());
     } else {
+        let mut qcnf = booleanium::qcnf::QCNF::default();
         let reader = Cursor::new(&contents);
-        if let Err(err) = QdimacsParser::new(reader).parse_into(&mut solver) {
+        if let Err(err) = QdimacsParser::new(reader).parse_into(&mut qcnf) {
             Err(ExtendedParseError { source_code: contents, related: vec![err] })?;
         }
+        let blocks = qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
+        if blocks > 2 {
+            // alternations beyond 2QBF: recursive expansion over the
+            // 2QBF core (no certificates, strategies, or proofs yet)
+            if args.certify || args.strategy.is_some() || args.proof.is_some() {
+                tracing::warn!(
+                    "certificates, strategies, and proofs are not available beyond 2QBF"
+                );
+            }
+            let result = booleanium::alternation::solve(&qcnf, args.options());
+            println!("result status: {result}");
+            return Ok(result);
+        }
+        solver = IncDet::from_qcnf_with_options(&qcnf, args.options());
     }
 
     let result = solver.solve();

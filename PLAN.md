@@ -351,6 +351,24 @@ increasing order of ambition:
   every printed model against the matrix on all universal points, plus
   the core fuzz asserting witness validity on all UNSAT 2QBF cases.
 
+### 1d. Quantifier alternations
+
+* **Expansion prototype — done** (`src/alternation.rs`, CLI-dispatched
+  for QDIMACS with more than two blocks): recursive CEGAR over the
+  outermost block with the incremental 2QBF core as a *persistent
+  oracle* at depth three — candidates arrive as assumption queries,
+  learnt clauses persist across candidates, and refutations return
+  verified universal witnesses that drive classic expansion
+  refinements. ∀-outermost blocks use a dual candidate loop (matrix
+  negation cascaded Tseitin gates through the recursion and blew
+  memory — a measured dead end), deeper prefixes recurse with weak
+  refinements, and a resource budget degrades to unknown. Differential
+  proptests (20k cases, 1–6 blocks) against the brute-force oracle;
+  CADET suite: 93 + 23 = **116 correct, 0 wrong**, 8 alternation
+  instances beyond the 30 s budget. Design rationale and the algorithm
+  survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
+  (RQ6).
+
 ### 2. Certificates
 
 * **Skolem function verification — done**
