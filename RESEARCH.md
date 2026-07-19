@@ -444,13 +444,31 @@ of which a one-shot QDIMACS call can express.
   depths on the rings), after which in-place and rebuild do the same
   learnt-seeded work and differ by search-trajectory variance
   (arbiter 2-2 at depth 16: ~613 ms vs ~325 ms against in-place;
-  ring-4 at depth 12: ~1.46 s vs ~1.86 s in favor). Open follow-up:
-  *definitional case extension* — the clauses of an unrolling step are
-  definitions of the fresh variables (gates, latch equalities), so
-  each recorded case could be extended with the canonical functions
-  those definitions induce, making cases transfer across depths;
-  requires recognizing definitional clause groups, which the
-  QCIR/QAIGER definition-level input path (RQ1) would get for free.
+  ring-4 at depth 12: ~1.46 s vs ~1.86 s in favor).
+* **Definitional case extension — tried and rejected by measurement.**
+  The idea: an unrolling step's clauses are definitions of the fresh
+  variables, so recorded cases could be extended with the induced
+  functions instead of declining. Implemented as *deferred
+  re-verification*: run the extension search first, then graft the
+  final state's snapshot functions for the fresh variables onto every
+  retained region (materializing CEGAR responses into closed chains —
+  their live root snapshot never carries decision-level functions) and
+  re-check the deferred clauses per region; failure falls back to
+  rebuild. The mechanism is sound (the check arbitrates the graft),
+  and two real gaps surfaced on the way: fresh *inputs* are decisions,
+  not root functions, and responses read only the root snapshot. But
+  the graft rarely wins: the final region's new-step choice loses on
+  old regions with different latch states (ring-6: 20 of 21 deferred
+  checks fail — the failures are semantically genuine, each region
+  needs its *own* new-step response, which is a per-region search,
+  i.e. the very cost the idea was meant to avoid). Aggregate: one
+  wasted search per depth, 2–4x slower than the syntactic decline
+  (arbiter 2-2: 613 ms → 1.15 s; ring-4: 1.46 s → 6.2 s) for 1–2
+  extra extensions. Reverted; the decline stays. What *would* work is
+  bounding the per-region response search or lazily re-opening failed
+  regions — both approach rebuild cost, and un-excluding a region
+  invalidates every later region's piecewise claim, so re-opening
+  needs re-verification cascades. Cases remain per-matrix artifacts.
 
 ## Suggested experiment order
 
