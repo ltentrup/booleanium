@@ -568,7 +568,14 @@ verification only mattered for exclusion) — that change took
 9 split into three 7-block `biu`-family give-ups (recursion-bound)
 and four timeouts with known causes (`BLOCKS4iii`: e288 outer over
 a7, per-round oracle cost; the depth-4/6 arbiters and 22-block
-`lights3`: deep recursion). Next steps
+`lights3`: deep recursion). A second round threaded the expansion
+witnesses through the recursion (the ∀-loop's refuting candidate and
+the core's recorded witness now reach the ∃-loop above, so deep
+recursion gets strong refinements too — sound at any depth because
+the propositional copy existentially relaxes every inner variable)
+and seeded each abstraction with one relaxed matrix copy;
+suite-neutral at the 30 s budget, structural groundwork for the
+hard instances. Next steps
 in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
 support in the core), strong dual refinements (regions of answered
 universal candidates), the determinize-then-dispatch hybrid, and
