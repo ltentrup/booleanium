@@ -315,5 +315,26 @@ fn main() {
         let text = pursuit(m, false, true);
         run(&format!("corridor-{m}-depth-{depth}"), sat, |solver| unroll(solver, &text, depth));
     }
+    // causality report: is the found bounded strategy also a winning
+    // strategy of the *real* game (reads no future inputs)?
+    for (name, text, depth) in [
+        ("ring-6-depth-8", pursuit(6, true, false), 8),
+        ("corridor-4-depth-8", pursuit(4, false, true), 8),
+    ] {
+        if let Some(filter) = std::env::args().nth(1) {
+            if !name.contains(&filter) {
+                continue;
+            }
+        }
+        let mut solver = IncrementalSolver::new(Options::default());
+        let mut unroller = Unroller::new(&text).expect("generated spec parses");
+        for _ in 0..depth {
+            unroller.step(&mut solver);
+            assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        }
+        let strategy = solver.skolem_model().expect("satisfiable").to_aiger(&|_| None);
+        let causal = unroller.strategy_is_causal(&strategy).expect("strategy parses");
+        println!("{name:<24} strategy causal: {causal}");
+    }
     println!("total: {:.3?}", total.elapsed());
 }

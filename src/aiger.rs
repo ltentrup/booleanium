@@ -68,6 +68,8 @@ struct Aiger {
     ands: Vec<And>,
     /// symbol names of the inputs, by input position
     input_names: Vec<Option<String>>,
+    /// symbol names of the outputs, by output position
+    output_names: Vec<Option<String>>,
 }
 
 /// Parses an ASCII AIGER file and converts it into a 2QBF instance.
@@ -161,24 +163,29 @@ fn parse_aag(input: &str) -> Result<Aiger, ParseError> {
         }
     }
 
-    // symbol table: only input names are relevant (controllability)
+    // symbol table: input names carry controllability, output names
+    // identify the defined variables of strategy circuits
     let mut input_names = vec![None; inputs.len()];
+    let mut output_names = vec![None; outputs.len()];
     for (_, line) in lines {
         if line.starts_with('c') {
             break;
         }
-        if let Some(rest) = line.strip_prefix('i') {
-            if let Some((pos, name)) = rest.split_once(' ') {
-                if let Ok(pos) = pos.parse::<usize>() {
-                    if pos < input_names.len() {
-                        input_names[pos] = Some(name.to_string());
-                    }
+        let target = match line.chars().next() {
+            Some('i') => &mut input_names,
+            Some('o') => &mut output_names,
+            _ => continue,
+        };
+        if let Some((pos, name)) = line[1..].split_once(' ') {
+            if let Ok(pos) = pos.parse::<usize>() {
+                if pos < target.len() {
+                    target[pos] = Some(name.to_string());
                 }
             }
         }
     }
 
-    Ok(Aiger { max_var, inputs, latches, outputs, ands, input_names })
+    Ok(Aiger { max_var, inputs, latches, outputs, ands, input_names, output_names })
 }
 
 fn to_qcnf(aiger: &Aiger) -> QCNF {
@@ -282,6 +289,9 @@ pub struct Unroller {
     /// solver variables of the inputs of the most recent step, by input
     /// position
     input_vars: Vec<u32>,
+    /// every input variable declared so far: `(solver var, step,
+    /// controllable)` with steps numbered from 1
+    declared_inputs: Vec<(u32, u32, bool)>,
     depth: u32,
 }
 
@@ -314,6 +324,7 @@ impl Unroller {
             true_var: None,
             latch_vars: Vec::new(),
             input_vars: Vec::new(),
+            declared_inputs: Vec::new(),
             depth: 0,
         })
     }
@@ -366,6 +377,7 @@ impl Unroller {
             } else {
                 solver.declare_universal(v);
             }
+            self.declared_inputs.push((v, self.depth + 1, controllable));
             input_vars.push(v);
         }
         let mut gate_vars = Vec::with_capacity(self.aiger.ands.len());
@@ -422,6 +434,98 @@ impl Unroller {
         self.latch_vars = next_vars;
         self.input_vars = input_vars;
         self.depth += 1;
+    }
+
+    /// Checks whether a strategy circuit for this unrolling (an ASCII
+    /// AIGER emitted by `SkolemModel::to_aiger` with numeric labels) is
+    /// *causal*: every controllable input's value depends only on
+    /// uncontrollable inputs of its own step or earlier. A bounded ∀∃
+    /// answer is only a *necessary* condition for realizability because
+    /// its Skolem functions may read future universal inputs; a causal
+    /// strategy closes the gap — it wins the real game for the unrolled
+    /// depth. The check is *semantic*: per controllable output, a SAT
+    /// call asks whether two copies of the circuit that agree on all
+    /// inputs of steps up to the output's step can disagree on the
+    /// output (structural cones are too coarse — the region selectors
+    /// of a piecewise model routinely mix steps even when the selected
+    /// values agree).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the strategy text is not a well-formed
+    /// combinational ASCII AIGER circuit.
+    pub fn strategy_is_causal(&self, strategy: &str) -> Result<bool, ParseError> {
+        use crate::literal::Lit;
+        use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
+
+        let circuit = parse_aag(strategy)?;
+        let steps: std::collections::HashMap<u32, (u32, bool)> =
+            self.declared_inputs.iter().map(|&(v, s, c)| (v, (s, c))).collect();
+        let parse_name =
+            |name: &Option<String>| -> Option<u32> { name.as_deref().and_then(|n| n.parse().ok()) };
+        let input_step: Vec<Option<u32>> = circuit
+            .input_names
+            .iter()
+            .map(|name| parse_name(name).and_then(|v| steps.get(&v).map(|&(s, _)| s)))
+            .collect();
+        let offset = i32::try_from(circuit.max_var).expect("variable count fits an i32") + 1;
+        // `copy` 0/1 selects the circuit copy; constants share one
+        // always-true variable at DIMACS 2 * offset
+        let key = |l: u64, copy: i32| -> Lit {
+            let truth = 2 * offset;
+            match l {
+                0 => Lit::from_dimacs(-truth),
+                1 => Lit::from_dimacs(truth),
+                _ => {
+                    let var = i32::try_from(l / 2).expect("variable fits an i32") + copy * offset;
+                    Lit::from_dimacs(if l % 2 == 0 { var } else { -var })
+                }
+            }
+        };
+
+        for (position, &out) in circuit.outputs.iter().enumerate() {
+            let Some(var) = parse_name(&circuit.output_names[position]) else {
+                continue;
+            };
+            let Some(&(step, controllable)) = steps.get(&var) else {
+                continue;
+            };
+            if !controllable {
+                continue;
+            }
+            let mut solver = LookupSolver::<Varisat>::default();
+            solver.set_var_count(usize::try_from(2 * offset).expect("fits") + 1);
+            let truth = solver.lookup(key(1, 0));
+            solver.add_clause(&[truth]);
+            for copy in 0..2 {
+                for and in &circuit.ands {
+                    let lhs = solver.lookup(key(and.lhs, copy));
+                    let rhs0 = solver.lookup(key(and.rhs0, copy));
+                    let rhs1 = solver.lookup(key(and.rhs1, copy));
+                    solver.add_clause(&[!lhs, rhs0]);
+                    solver.add_clause(&[!lhs, rhs1]);
+                    solver.add_clause(&[lhs, !rhs0, !rhs1]);
+                }
+            }
+            // inputs of steps up to the output's step are shared
+            for (pos, &input) in circuit.inputs.iter().enumerate() {
+                if input_step[pos].is_some_and(|s| s <= step) {
+                    let a = solver.lookup(key(input, 0));
+                    let b = solver.lookup(key(input, 1));
+                    solver.add_clause(&[!a, b]);
+                    solver.add_clause(&[a, !b]);
+                }
+            }
+            // can the two copies disagree on this output?
+            let a = solver.lookup(key(out, 0));
+            let b = solver.lookup(key(out, 1));
+            solver.add_clause(&[a, b]);
+            solver.add_clause(&[!a, !b]);
+            if solver.solve().unwrap() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 }
 
@@ -612,6 +716,39 @@ mod test {
         let text = "aag 5 2 0 1 3\n2\n4\n10\n6 2 5\n8 3 4\n10 7 9\ni0 u\ni1 controllable_c\n";
         let verdicts = check_unrolling(text, 4, true);
         assert!(verdicts.iter().all(|&v| v == SolverResult::Satisfiable));
+        // the copy strategy is forced (c_t = u_t) and reads only the
+        // current step: causal, so the bounded answers certify the game
+        let mut unroller = Unroller::new(text).expect("parses");
+        let mut solver =
+            crate::incremental::IncrementalSolver::new(crate::incdet::Options::default());
+        for _ in 0..4 {
+            unroller.step(&mut solver);
+            assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        }
+        let strategy = solver.skolem_model().expect("satisfiable").to_aiger(&|_| None);
+        assert!(unroller.strategy_is_causal(&strategy).expect("strategy parses"));
+    }
+
+    #[test]
+    fn unroller_clairvoyance_is_detected() {
+        // the controller must *predict* the next step's universal input:
+        // a latch carries c into the next step, where the error compares
+        // it with the fresh u (guarded by a started latch so step one is
+        // safe). Clairvoyantly winnable — c_t := u_{t+1} — but every
+        // winning strategy must read a future input, so the causality
+        // check rejects it.
+        let text = "aag 8 2 2 1 4\n2\n4\n6 4\n8 1\n16\n10 6 3\n12 7 2\n14 11 13\n16 8 15\ni0 u\ni1 controllable_c\n";
+        let verdicts = check_unrolling(text, 3, true);
+        assert!(verdicts.iter().all(|&v| v == SolverResult::Satisfiable));
+        let mut unroller = Unroller::new(text).expect("parses");
+        let mut solver =
+            crate::incremental::IncrementalSolver::new(crate::incdet::Options::default());
+        for _ in 0..3 {
+            unroller.step(&mut solver);
+            assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        }
+        let strategy = solver.skolem_model().expect("satisfiable").to_aiger(&|_| None);
+        assert!(!unroller.strategy_is_causal(&strategy).expect("strategy parses"));
     }
 
     proptest::proptest! {

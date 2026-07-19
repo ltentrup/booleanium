@@ -426,9 +426,22 @@ of which a one-shot QDIMACS call can express.
   concretely: the corridor pursuit with a staying obstacle is a
   classic cop-win game for a *reactive* cop, yet stays satisfiable at
   every probed depth — the future-seeing robot times swaps past the
-  oblivious sweep. A synthesis loop on top of this interface needs a
-  causality post-check or per-step ∃∀ queries for the sufficient
-  direction.
+  oblivious sweep. **The causality post-check closing this gap is
+  built** (`Unroller::strategy_is_causal`): per controllable output of
+  the emitted strategy circuit, one SAT call asks whether two copies
+  of the circuit agreeing on all inputs up to that output's step can
+  disagree on the output — semantic support, because the structural
+  cone is too coarse (piecewise region selectors routinely mix steps
+  even when the selected values agree, which a first cone-based
+  attempt reported as false negatives). A causal strategy makes the
+  bounded answer *sufficient*: it wins the real game for the unrolled
+  depth. Demonstrated end to end (`bench_games`): the ring pursuit's
+  found strategy is causal (mirroring — realizability certified up to
+  the bound), the corridor's is not (swap-timing needs the future);
+  a synthetic "predict the next input" spec is clairvoyantly
+  satisfiable and correctly rejected. Remaining gap to full
+  realizability: a causal bounded strategy certifies the bound only —
+  unbounded synthesis still needs an inductive argument on top.
 * **Which artifacts transfer across game depths — answered** (the RQ2
   dependency question, measured end to end): *learnt clauses* transfer
   (rebuilds are seeded with them; both modes benefit equally);
