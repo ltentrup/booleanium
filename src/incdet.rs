@@ -595,6 +595,17 @@ impl IncDet {
         Some(witness.iter().map(|l| l.to_dimacs()).collect())
     }
 
+    /// The *unverified* recorded universal candidate of the most recent
+    /// unsatisfiable solve (see [`IncDet::unsat_witness`] for the
+    /// verified variant). A candidate tainted by pure choices may be
+    /// answerable, so this must only be used where any universal
+    /// assignment is sound — e.g. as an expansion point of an
+    /// abstraction refinement, never as a claimed winning move.
+    #[must_use]
+    pub fn unsat_witness_candidate(&self) -> Option<Vec<i32>> {
+        self.unsat_witness.as_ref().map(|w| w.iter().map(|l| l.to_dimacs()).collect())
+    }
+
     /// Extends the loaded instance *in place* after a completed solve —
     /// new variables in the existing scopes and new matrix clauses — and
     /// re-solves. This is the monotone continuation of the incremental

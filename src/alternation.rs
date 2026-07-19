@@ -11,11 +11,14 @@
 //! with everything learnt carrying across candidates — and an inner
 //! refutation returns a *verified* universal witness `Y*`, so the
 //! refinement is the classic expansion `matrix[Y := Y*]` over fresh
-//! `Z`-copies, guaranteed to exclude `X*`. Without a witness (deep
-//! recursion, unverifiable candidate) the weak refinement `¬X*` keeps
-//! the loop total. A ∀-outermost prefix is solved by negation (Tseitin
-//! of the negated matrix, gate variables in the innermost existential
-//! block), mirroring the ∃∀ frontends.
+//! `Z`-copies — the blocking clause `¬X*` is added alongside (sound,
+//! since the oracle refuted the candidate; it guarantees progress even
+//! when `Y*` is only the unverified recorded candidate). Without any
+//! witness (deep recursion) the blocking clause alone keeps the loop
+//! total. A ∀-outermost prefix runs the dual candidate loop — search
+//! for a refuting outer assignment, block answered candidates — which
+//! keeps the matrix fixed instead of cascading negation gates through
+//! the recursion.
 
 use crate::{
     incdet::{IncDet, Options},
@@ -228,8 +231,12 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
             Some(solver) => {
                 let assumptions: Vec<i32> = candidate.iter().map(|l| l.to_dimacs()).collect();
                 let verdict = solver.solve_with_assumptions(&assumptions);
+                // any universal assignment is a sound expansion point (a
+                // winning outer choice must answer it), so the unverified
+                // candidate serves; the blocking clause below guarantees
+                // progress either way
                 let witness = solver
-                    .universal_witness()
+                    .universal_witness_candidate()
                     .map(|w| w.into_iter().map(Lit::from_dimacs).collect::<Vec<_>>());
                 (verdict, witness)
             }
@@ -243,6 +250,11 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
             SolverResult::Unknown => return SolverResult::Unknown,
             SolverResult::Unsatisfiable => {}
         }
+
+        // the oracle refuted this candidate: excluding it is always
+        // sound and guarantees progress
+        let blocking: Vec<_> = candidate.iter().map(|&l| alpha.lookup(!l)).collect();
+        alpha.add_clause(&blocking);
 
         if let Some(universal) = witness {
             {
@@ -290,10 +302,6 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
                     return SolverResult::Unsatisfiable;
                 }
             }
-        } else {
-            // weak refinement: exclude exactly this candidate
-            let blocking: Vec<_> = candidate.iter().map(|&l| alpha.lookup(!l)).collect();
-            alpha.add_clause(&blocking);
         }
     }
 }

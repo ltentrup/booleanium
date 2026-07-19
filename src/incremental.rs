@@ -619,6 +619,18 @@ impl IncrementalSolver {
             _ => None,
         }
     }
+
+    /// The *unverified* recorded universal candidate of the most recent
+    /// unsatisfiable solve (see [`IncDet::unsat_witness_candidate`]):
+    /// sound only where any universal assignment is, e.g. as an
+    /// expansion point.
+    #[must_use]
+    pub fn universal_witness_candidate(&self) -> Option<Vec<i32>> {
+        match self.served() {
+            Some((SolverResult::Unsatisfiable, solver)) => solver.unsat_witness_candidate(),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
