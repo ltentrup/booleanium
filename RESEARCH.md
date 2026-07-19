@@ -556,9 +556,19 @@ honest resource budget that returns `Unknown` instead of expanding
 into the ground. Validated by 20k-case differential proptests against
 the brute-force oracle on random 1–6-block instances. On the CADET
 suite the prototype lifts the score from 93 correct + 33 unsupported
-to **116 correct, 0 wrong**: 23 of the 33 alternation instances solve
-within 30 s (including both `pec_adder` pairs and `adder2`-class
-instances), the remaining 8 give up on budget or time out. Next steps
+to **117 correct, 0 wrong**: 24 of the 33 alternation instances solve
+within 30 s (both `pec_adder` pairs, `adder2`-class, planning). Two
+refinement lessons along the way: the blocking clause for a refuted
+candidate is added *unconditionally* (the oracle proved it
+unanswerable — sound, and it guarantees progress), which frees the
+expansion point to be the *unverified* recorded witness candidate
+(any universal assignment is a sound expansion constraint;
+verification only mattered for exclusion) — that change took
+`p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The remaining
+9 split into three 7-block `biu`-family give-ups (recursion-bound)
+and four timeouts with known causes (`BLOCKS4iii`: e288 outer over
+a7, per-round oracle cost; the depth-4/6 arbiters and 22-block
+`lights3`: deep recursion). Next steps
 in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
 support in the core), strong dual refinements (regions of answered
 universal candidates), the determinize-then-dispatch hybrid, and

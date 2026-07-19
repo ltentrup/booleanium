@@ -364,8 +364,9 @@ increasing order of ambition:
   memory — a measured dead end), deeper prefixes recurse with weak
   refinements, and a resource budget degrades to unknown. Differential
   proptests (20k cases, 1–6 blocks) against the brute-force oracle;
-  CADET suite: 93 + 23 = **116 correct, 0 wrong**, 8 alternation
-  instances beyond the 30 s budget. Design rationale and the algorithm
+  CADET suite: 93 + 24 = **117 correct, 0 wrong**, 9 alternation
+  instances beyond the 30 s budget (three 7-block give-ups, four
+  timeouts with known causes). Design rationale and the algorithm
   survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
   (RQ6).
 
