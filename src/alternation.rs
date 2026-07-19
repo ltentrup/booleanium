@@ -33,16 +33,29 @@ use std::collections::{HashMap, HashSet};
 #[must_use]
 pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
     let qcnf = normalized(qcnf);
-    solve_normalized(&qcnf, options)
+    solve_normalized(&qcnf, options).0
 }
 
-fn solve_normalized(qcnf: &QCNF, options: Options) -> SolverResult {
+/// The internal solve additionally returns, on an unsatisfiable
+/// verdict whose outermost block is universal, the refuting assignment
+/// of that block — the expansion witness of the ∃-loop one level up
+/// (already computed by the ∀-loop and by the 2QBF core; threading it
+/// upgrades deep recursion from blocking-only to strong refinements).
+fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
     if qcnf.prefix.len() <= 2 {
         let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
-        return solver.solve();
+        let verdict = solver.solve();
+        let witness = if verdict == SolverResult::Unsatisfiable
+            && matches!(qcnf.prefix.first(), Some((QuantTy::Forall, _)))
+        {
+            solver.unsat_witness_candidate().map(|w| w.into_iter().map(Lit::from_dimacs).collect())
+        } else {
+            None
+        };
+        return (verdict, witness);
     }
     match qcnf.prefix[0].0 {
-        QuantTy::Exists => expansion_loop(qcnf, options),
+        QuantTy::Exists => (expansion_loop(qcnf, options), None),
         QuantTy::Forall => forall_loop(qcnf, options),
     }
 }
@@ -53,7 +66,7 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> SolverResult {
 /// recursion and blow up; the dual loop keeps the matrix fixed. Strong
 /// dual refinements would need regions of answered candidates — future
 /// work, the weak blocking clause keeps the loop total.)
-fn forall_loop(qcnf: &QCNF, options: Options) -> SolverResult {
+fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -72,11 +85,11 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> SolverResult {
         rounds += 1;
         if rounds > 4096 {
             tracing::warn!("universal candidate budget exhausted");
-            return SolverResult::Unknown;
+            return (SolverResult::Unknown, None);
         }
         if !alpha.solve().unwrap() {
             // every universal choice is answered
-            return SolverResult::Satisfiable;
+            return (SolverResult::Satisfiable, None);
         }
         let model: HashMap<Var, bool> = alpha
             .orig_model()
@@ -95,10 +108,11 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> SolverResult {
             })
             .collect();
         let restricted = normalized(&restrict(qcnf, &candidate, 1));
-        match solve_normalized(&restricted, options) {
-            // the candidate is a winning universal prefix move
-            SolverResult::Unsatisfiable => return SolverResult::Unsatisfiable,
-            SolverResult::Unknown => return SolverResult::Unknown,
+        match solve_normalized(&restricted, options).0 {
+            // the candidate is a winning universal prefix move — and the
+            // expansion witness for the ∃-loop above
+            SolverResult::Unsatisfiable => return (SolverResult::Unsatisfiable, Some(candidate)),
+            SolverResult::Unknown => return (SolverResult::Unknown, None),
             SolverResult::Satisfiable => {
                 let blocking: Vec<_> = candidate.iter().map(|&l| alpha.lookup(!l)).collect();
                 alpha.add_clause(&blocking);
@@ -191,12 +205,24 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
             alpha.add_clause(&lits);
         }
     }
+    // seed with one existentially relaxed matrix copy: candidates then
+    // satisfy the necessary condition ∃(rest) matrix before any oracle
+    // call is spent
+    let mut added_literals = 0usize;
+    alpha.set_var_count(2 * total_vars + 2);
+    add_relaxed_copy(
+        &mut alpha,
+        qcnf,
+        &outer_set,
+        &HashSet::new(),
+        &mut next_copy_var,
+        &mut added_literals,
+    );
 
     // expansion can blow up on hard instances (the known weakness of
     // the algorithm family); give up honestly instead of exhausting
     // memory
     let mut rounds = 0u32;
-    let mut added_literals = 0usize;
     loop {
         rounds += 1;
         if rounds > 4096 || added_literals > 8_000_000 {
@@ -241,8 +267,11 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
                 (verdict, witness)
             }
             None => {
+                // the recursion hands back the refuting assignment of the
+                // block below, which is exactly this loop's expansion
+                // witness
                 let restricted = restrict(qcnf, &candidate, 1);
-                (solve_normalized(&normalized(&restricted), options), None)
+                solve_normalized(&normalized(&restricted), options)
             }
         };
         match verdict {
@@ -257,53 +286,73 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
         alpha.add_clause(&blocking);
 
         if let Some(universal) = witness {
-            {
-                // strong refinement: the expansion matrix[Y := Y*] over a
-                // fresh copy of every non-outer variable; verified
-                // witnesses guarantee the candidate is excluded
-                let assigned: HashSet<Lit> = universal.iter().copied().collect();
-                let mut rename: HashMap<Var, i32> = HashMap::new();
-                let mut empty_added = false;
-                for clause in &qcnf.matrix {
-                    if clause.iter().any(|l| assigned.contains(l)) {
-                        continue;
-                    }
-                    let mut lits: Vec<_> = Vec::new();
-                    for &l in clause {
-                        if assigned.contains(&!l) {
-                            continue;
-                        }
-                        let mapped = if outer_set.contains(&l.var()) {
-                            l
-                        } else {
-                            let raw = *rename.entry(l.var()).or_insert_with(|| {
-                                let fresh = next_copy_var;
-                                next_copy_var += 1;
-                                fresh
-                            });
-                            let lit = Lit::from_dimacs(raw);
-                            if l.is_positive() {
-                                lit
-                            } else {
-                                !lit
-                            }
-                        };
-                        lits.push(alpha.lookup(mapped));
-                    }
-                    if lits.is_empty() {
-                        empty_added = true;
-                    }
-                    added_literals += lits.len() + 1;
-                    alpha.add_clause(&lits);
-                }
-                if empty_added {
-                    // some clause is falsified by the witness alone: no
-                    // outer choice can answer it
-                    return SolverResult::Unsatisfiable;
-                }
+            // strong refinement: the expansion matrix[Y := Y*] over a
+            // fresh copy of every non-outer variable
+            let assigned: HashSet<Lit> = universal.iter().copied().collect();
+            if add_relaxed_copy(
+                &mut alpha,
+                qcnf,
+                &outer_set,
+                &assigned,
+                &mut next_copy_var,
+                &mut added_literals,
+            ) {
+                // some clause is falsified by the witness alone: no
+                // outer choice can answer it
+                return SolverResult::Unsatisfiable;
             }
         }
     }
+}
+
+/// Adds one copy of the matrix restricted by `assigned` to the
+/// abstraction: outer literals stay shared, every other variable gets a
+/// fresh (existentially relaxed) copy. Returns `true` if an empty
+/// clause was added (the restriction alone falsifies a clause).
+fn add_relaxed_copy(
+    alpha: &mut crate::sat::LookupSolver<crate::sat::varisat::Varisat>,
+    qcnf: &QCNF,
+    outer_set: &HashSet<Var>,
+    assigned: &HashSet<Lit>,
+    next_copy_var: &mut i32,
+    added_literals: &mut usize,
+) -> bool {
+    use crate::sat::SatSolver;
+    let mut rename: HashMap<Var, i32> = HashMap::new();
+    let mut empty_added = false;
+    for clause in &qcnf.matrix {
+        if clause.iter().any(|l| assigned.contains(l)) {
+            continue;
+        }
+        let mut lits: Vec<_> = Vec::new();
+        for &l in clause {
+            if assigned.contains(&!l) {
+                continue;
+            }
+            let mapped = if outer_set.contains(&l.var()) {
+                l
+            } else {
+                let raw = *rename.entry(l.var()).or_insert_with(|| {
+                    let fresh = *next_copy_var;
+                    *next_copy_var += 1;
+                    fresh
+                });
+                let lit = Lit::from_dimacs(raw);
+                if l.is_positive() {
+                    lit
+                } else {
+                    !lit
+                }
+            };
+            lits.push(alpha.lookup(mapped));
+        }
+        if lits.is_empty() {
+            empty_added = true;
+        }
+        *added_literals += lits.len() + 1;
+        alpha.add_clause(&lits);
+    }
+    empty_added
 }
 
 /// The instance restricted by the given outer-block assignment: satisfied
