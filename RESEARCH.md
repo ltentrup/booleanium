@@ -556,8 +556,9 @@ honest resource budget that returns `Unknown` instead of expanding
 into the ground. Validated by 20k-case differential proptests against
 the brute-force oracle on random 1–6-block instances. On the CADET
 suite the prototype lifts the score from 93 correct + 33 unsupported
-to **117 correct, 0 wrong**: 24 of the 33 alternation instances solve
-within 30 s (both `pec_adder` pairs, `adder2`-class, planning). Two
+to **118 correct, 0 wrong**: 25 of the 33 alternation instances solve
+within 30 s (both `pec_adder` pairs, `adder2`-class, planning,
+blocks-world). Two
 refinement lessons along the way: the blocking clause for a refuted
 candidate is added *unconditionally* (the oracle proved it
 unanswerable — sound, and it guarantees progress), which frees the
@@ -565,17 +566,37 @@ expansion point to be the *unverified* recorded witness candidate
 (any universal assignment is a sound expansion constraint;
 verification only mattered for exclusion) — that change took
 `p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The remaining
-9 split into three 7-block `biu`-family give-ups (recursion-bound)
-and four timeouts with known causes (`BLOCKS4iii`: e288 outer over
-a7, per-round oracle cost; the depth-4/6 arbiters and 22-block
-`lights3`: deep recursion). A second round threaded the expansion
+8 split into three 7-block `biu`-family give-ups (recursion-bound)
+and three deep-recursion timeouts (the depth-4/6 arbiters, 22-block
+`lights3`). A second round threaded the expansion
 witnesses through the recursion (the ∀-loop's refuting candidate and
 the core's recorded witness now reach the ∃-loop above, so deep
 recursion gets strong refinements too — sound at any depth because
 the propositional copy existentially relaxes every inner variable)
 and seeded each abstraction with one relaxed matrix copy;
 suite-neutral at the 30 s budget, structural groundwork for the
-hard instances. Next steps
+hard instances.
+
+A third round added **∀-expansion dispatch**: the *innermost*
+universal block is enumerated away before either loop runs (one copy
+of everything bound after it per assignment of the block), which
+removes an alternation and — at the innermost block, where only the
+final existential block is copied — collapses a three-block prefix to
+plain SAT. Soundness: each copy's conjunct mentions only that copy's
+variables, so a strategy for the expansion projects back by fixing
+the other copies' universals arbitrarily; the cross-copy dependencies
+that merging the per-level copies allows are never needed. Both
+halves of the dispatch rule came from measurement. Expanding an
+*outer* block removes an alternation too, but multiplies every
+survivor by `2^|Y|` — the fuzz produced instances that solve directly
+yet exhaust the budget once their 3-variable blocks became
+24-variable ones. And large blocks lose to CEGAR, which enumerates
+only the *relevant* assignments of a block rather than all of them: a
+10-variable block made `p10-1.pddl` 17x slower expanded (0.78 s →
+13.3 s), so blocks are capped at eight variables alongside the clause
+and variable budgets. With the cap, `BLOCKS4iii.7` (∃288 ∀7 ∃560)
+drops from a 30 s timeout to 2.4 s while `p10-1` keeps its search
+path — **118 correct, 0 wrong**. Next steps
 in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
 support in the core), strong dual refinements (regions of answered
 universal candidates), the determinize-then-dispatch hybrid, and
