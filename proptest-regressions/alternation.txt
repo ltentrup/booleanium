@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 21d78eb238c61eb8057c4bc91655fc3be6c06dbe49b8329935da40d8b4f344d8 # shrinks to qcnf = QCNF { prefix: [(Forall, [Var { index: 0 }, Var { index: 1 }, Var { index: 2 }]), (Exists, [Var { index: 3 }, Var { index: 4 }, Var { index: 5 }]), (Forall, [Var { index: 6 }, Var { index: 7 }, Var { index: 8 }]), (Exists, [Var { index: 9 }, Var { index: 10 }]), (Forall, [Var { index: 11 }, Var { index: 12 }, Var { index: 13 }]), (Exists, [Var { index: 14 }])], matrix: [[Lit { repr: 20 }, Lit { repr: 18 }, Lit { repr: 21 }]] }

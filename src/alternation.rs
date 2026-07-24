@@ -19,6 +19,13 @@
 //! for a refuting outer assignment, block answered candidates — which
 //! keeps the matrix fixed instead of cascading negation gates through
 //! the recursion.
+//!
+//! Before either loop runs, a *small innermost universal block* is
+//! enumerated away instead ([`expand_universal_block`]): ∀-expansion
+//! removes an alternation outright, and at the innermost block only the
+//! final existential block is copied — a three-block prefix collapses
+//! to plain SAT. Only small blocks qualify, because CEGAR enumerates
+//! just the relevant assignments while expansion pays for all of them.
 
 use crate::{
     incdet::{IncDet, Options},
@@ -29,11 +36,33 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// Clause budget for ∀-expansion: a universal block is enumerated away
+/// when the expanded matrix stays below this size. Enumerating a small
+/// block is far cheaper than reasoning about it, and it removes a
+/// quantifier alternation outright.
+const EXPANSION_BUDGET: usize = 2_000_000;
+
+/// Largest universal block that is enumerated rather than reasoned
+/// about. Beyond this the CEGAR loop usually wins: it enumerates only
+/// the *relevant* assignments of the block, while expansion pays for
+/// all `2^|Y|` of them (measured: a 10-variable block costs 17x more
+/// expanded than searched on `p10-1.pddl`, a 7-variable one turns a
+/// 30 s timeout into 3 s on `BLOCKS4iii.7`).
+const MAX_EXPANDED_BLOCK: usize = 8;
+
 /// Solves a prenex QBF with any number of quantifier blocks.
 #[must_use]
 pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
     let qcnf = normalized(qcnf);
-    solve_normalized(&qcnf, options).0
+    solve_normalized(&qcnf, options, EXPANSION_BUDGET).0
+}
+
+/// Solves with an explicit ∀-expansion budget; `0` disables expansion
+/// (used by the differential tests to exercise the CEGAR loops).
+#[must_use]
+pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult {
+    let qcnf = normalized(qcnf);
+    solve_normalized(&qcnf, options, budget).0
 }
 
 /// The internal solve additionally returns, on an unsatisfiable
@@ -41,7 +70,22 @@ pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
 /// of that block — the expansion witness of the ∃-loop one level up
 /// (already computed by the ∀-loop and by the 2QBF core; threading it
 /// upgrades deep recursion from blocking-only to strong refinements).
-fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
+fn solve_normalized(
+    qcnf: &QCNF,
+    options: Options,
+    budget: usize,
+) -> (SolverResult, Option<Vec<Lit>>) {
+    if qcnf.prefix.len() > 2 {
+        // enumerating a small innermost universal block beats reasoning
+        // about it, and removes an alternation outright
+        if let Some(block) = expandable_block(qcnf, budget) {
+            // a normalized prefix alternates, so the innermost universal
+            // block is never block 0 here and this level's witness
+            // survives the expansion
+            let expanded = normalized(&expand_universal_block(qcnf, block));
+            return solve_normalized(&expanded, options, budget);
+        }
+    }
     if qcnf.prefix.len() <= 2 {
         let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
         let verdict = solver.solve();
@@ -55,8 +99,8 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<
         return (verdict, witness);
     }
     match qcnf.prefix[0].0 {
-        QuantTy::Exists => (expansion_loop(qcnf, options), None),
-        QuantTy::Forall => forall_loop(qcnf, options),
+        QuantTy::Exists => (expansion_loop(qcnf, options, budget), None),
+        QuantTy::Forall => forall_loop(qcnf, options, budget),
     }
 }
 
@@ -66,7 +110,7 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<
 /// recursion and blow up; the dual loop keeps the matrix fixed. Strong
 /// dual refinements would need regions of answered candidates — future
 /// work, the weak blocking clause keeps the loop total.)
-fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
+fn forall_loop(qcnf: &QCNF, options: Options, budget: usize) -> (SolverResult, Option<Vec<Lit>>) {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -108,7 +152,7 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
             })
             .collect();
         let restricted = normalized(&restrict(qcnf, &candidate, 1));
-        match solve_normalized(&restricted, options).0 {
+        match solve_normalized(&restricted, options, budget).0 {
             // the candidate is a winning universal prefix move — and the
             // expansion witness for the ∃-loop above
             SolverResult::Unsatisfiable => return (SolverResult::Unsatisfiable, Some(candidate)),
@@ -119,6 +163,115 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
             }
         }
     }
+}
+
+/// The *innermost* universal block, if enumerating it fits the budget.
+///
+/// Only the innermost block is worth expanding: expansion copies
+/// everything bound after the block, so expanding an outer block
+/// multiplies every remaining block by `2^|Y|` — the prefix loses one
+/// alternation but the survivors become far too wide for the CEGAR
+/// loops (the differential fuzz caught exactly this as instances that
+/// solve directly but exhaust the budget after expanding block 0).
+/// At the innermost block only the final existential block is copied,
+/// and a three-block prefix collapses to plain SAT.
+fn expandable_block(qcnf: &QCNF, budget: usize) -> Option<usize> {
+    if budget == 0 {
+        return None;
+    }
+    let (block, vars) = qcnf
+        .prefix
+        .iter()
+        .enumerate()
+        .filter(|(_, (quant, _))| *quant == QuantTy::Forall)
+        .next_back()
+        .map(|(block, (_, vars))| (block, vars))?;
+    if vars.len() > MAX_EXPANDED_BLOCK {
+        return None;
+    }
+    let copies = 1usize << vars.len();
+    let copied_vars: usize =
+        qcnf.prefix[block + 1..].iter().map(|(_, vars)| vars.len()).sum::<usize>();
+    let clauses = copies.checked_mul(qcnf.matrix.len())?;
+    let fresh = copies.checked_mul(copied_vars)?;
+    (clauses <= budget && fresh <= budget).then_some(block)
+}
+
+/// ∀-expansion of one universal block: the block is replaced by a
+/// conjunction of copies, one per assignment of its variables, with
+/// fresh copies of every variable bound after it (copies of the same
+/// original block merge into one block, preserving the quantifier
+/// order). Clauses satisfied by an assignment are dropped, falsified
+/// literals deleted, and clauses over neither the block nor anything
+/// after it are kept once.
+///
+/// Soundness: the conjunct of copy `y` mentions only copy-`y`
+/// variables, so a winning strategy for the expansion projects back to
+/// the original by fixing the other copies' universals arbitrarily —
+/// the cross-copy dependencies the merged blocks allow are never
+/// needed.
+fn expand_universal_block(qcnf: &QCNF, block: usize) -> QCNF {
+    let ys: Vec<Var> = qcnf.prefix[block].1.clone();
+    let after: Vec<(QuantTy, Vec<Var>)> = qcnf.prefix[block + 1..].to_vec();
+    let after_set: HashSet<Var> = after.iter().flat_map(|(_, vars)| vars.iter().copied()).collect();
+    let y_set: HashSet<Var> = ys.iter().copied().collect();
+    let declared = qcnf.prefix.iter().flat_map(|(_, vars)| vars.iter()).map(|v| v.to_dimacs());
+    let mentioned = qcnf.matrix.iter().flatten().map(|l| l.var().to_dimacs());
+    let mut next = declared.chain(mentioned).max().unwrap_or(0) + 1;
+
+    let mut copied_blocks: Vec<Vec<Var>> = vec![Vec::new(); after.len()];
+    let mut matrix: Vec<Vec<Lit>> = Vec::new();
+    for point in 0..1u64 << ys.len() {
+        // the assignment of this copy, and fresh names for everything
+        // bound after the expanded block
+        let assigned: HashSet<Lit> = ys
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if point >> i & 1 == 1 { Lit::positive(v) } else { Lit::negative(v) })
+            .collect();
+        let mut rename: HashMap<Var, Var> = HashMap::new();
+        for (index, (_, vars)) in after.iter().enumerate() {
+            for &v in vars {
+                let fresh = Var::from_dimacs(next);
+                next += 1;
+                rename.insert(v, fresh);
+                copied_blocks[index].push(fresh);
+            }
+        }
+        for clause in &qcnf.matrix {
+            if clause.iter().any(|l| assigned.contains(l)) {
+                continue;
+            }
+            let touches_copy =
+                clause.iter().any(|l| y_set.contains(&l.var()) || after_set.contains(&l.var()));
+            if !touches_copy && point > 0 {
+                // independent of this expansion; kept once
+                continue;
+            }
+            let lits: Vec<Lit> = clause
+                .iter()
+                .filter(|l| !assigned.contains(&!**l))
+                .map(|&l| match rename.get(&l.var()) {
+                    Some(&fresh) => {
+                        let lit = Lit::positive(fresh);
+                        if l.is_positive() {
+                            lit
+                        } else {
+                            !lit
+                        }
+                    }
+                    None => l,
+                })
+                .collect();
+            matrix.push(lits);
+        }
+    }
+
+    let mut prefix: Vec<(QuantTy, Vec<Var>)> = qcnf.prefix[..block].to_vec();
+    for ((quant, _), vars) in after.iter().zip(copied_blocks) {
+        prefix.push((*quant, vars));
+    }
+    QCNF { prefix, matrix }
 }
 
 /// Drops empty blocks, merges adjacent blocks of the same quantifier,
@@ -156,7 +309,7 @@ fn normalized(qcnf: &QCNF) -> QCNF {
 /// at least three blocks.
 // the loop reads best as one piece: oracle setup, candidates, refinements
 #[allow(clippy::too_many_lines)]
-fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
+fn expansion_loop(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -271,7 +424,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
                 // block below, which is exactly this loop's expansion
                 // witness
                 let restricted = restrict(qcnf, &candidate, 1);
-                solve_normalized(&normalized(&restricted), options)
+                solve_normalized(&normalized(&restricted), options, budget)
             }
         };
         match verdict {
@@ -375,10 +528,21 @@ mod test {
     use crate::qcnf::strategy;
     use proptest::prelude::*;
 
+    /// Checks both dispatch paths: with ∀-expansion enabled (the
+    /// production default, which the small generated blocks always
+    /// trigger) and with it disabled, so the CEGAR loops stay covered.
     fn check(qcnf: &QCNF) -> Result<(), TestCaseError> {
         let expected = qcnf.brute_force();
-        let actual = solve(qcnf, Options::default());
-        prop_assert_eq!(actual, expected, "alternation solver disagrees on:\n{}", qcnf);
+        for budget in [EXPANSION_BUDGET, 0] {
+            let actual = solve_with_expansion_budget(qcnf, Options::default(), budget);
+            prop_assert_eq!(
+                actual,
+                expected,
+                "alternation solver (expansion budget {}) disagrees on:\n{}",
+                budget,
+                qcnf
+            );
+        }
         Ok(())
     }
 
@@ -402,6 +566,7 @@ mod test {
             ],
         );
         assert_eq!(solve(&qcnf, Options::default()), qcnf.brute_force());
+        assert_eq!(solve_with_expansion_budget(&qcnf, Options::default(), 0), qcnf.brute_force());
         // ∃x ∀y ∃z: z ↔ (x xor y) — satisfiable for any x
         let qcnf = QCNF::new(
             &[
