@@ -376,7 +376,10 @@ increasing order of ambition:
   seconds — and speculative expansions (those leaving more than two
   blocks, so the result still goes through the loops) get a much
   smaller budget than collapsing ones. CADET suite: 93 + 29 = **122
-  correct, 0 wrong**, 2 alternation instances beyond the 30 s budget. Design rationale and the algorithm
+  correct, 0 wrong**, 2 alternation instances beyond the 30 s budget.
+  Beyond the suite, the dispatch paths cross-validate each other
+  (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
+  591 decided, **all agreeing**, zero disagreements. Design rationale and the algorithm
   survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
   (RQ6).
 

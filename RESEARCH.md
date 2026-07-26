@@ -621,10 +621,18 @@ timeouts; the survivors need better refinements, not more rounds.
 
 Validation: four differential families (both dispatch paths, deep
 prefixes, and all eight core option combinations) against the
-brute-force oracle at 20–30k cases each, plus cross-validation on a
-real multi-block corpus — the expansion dispatch and the pure-CEGAR
-loops share almost nothing but the leaf oracle, so `--no-expansion`
-turns them into a differential check where brute force cannot follow.
+brute-force oracle at 20–30k cases each. Beyond the reach of brute
+force, the two dispatch paths validate *each other*: the expansion
+dispatch and the pure-CEGAR loops share almost nothing but the leaf
+oracle, so `--no-expansion` turns a real instance into a differential
+check. Over 701 multi-block instances of the `reduction-finding`
+corpus (hundreds of variables each), run through three configurations
+— default, no-expansion, and no-CEGAR/no-case-splits — **591 reached a
+verdict and all 591 agreed** (249 satisfiable, 342 unsatisfiable, zero
+disagreements); the remaining 109 hit the 10 s timeout or the
+recursion budget in at least one configuration. That is ~2100 real
+solves' worth of agreement on the youngest code in the tree, against
+the 33 instances the CADET suite contributes.
 
 Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
 assumption support in the core), strong dual refinements (regions of
