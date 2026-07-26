@@ -172,6 +172,16 @@ fn main() -> Result<SolverResult> {
                 );
             }
             let result = booleanium::alternation::solve(&qcnf, args.options());
+            #[cfg(feature = "probe")]
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                eprintln!(
+                    "leaf solves: {} over {} vars / {} clauses",
+                    booleanium::alternation::LEAF_CALLS.load(Relaxed),
+                    booleanium::alternation::LEAF_VARS.load(Relaxed),
+                    booleanium::alternation::LEAF_CLAUSES.load(Relaxed),
+                );
+            }
             println!("result status: {result}");
             return Ok(result);
         }

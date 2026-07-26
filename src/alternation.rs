@@ -41,6 +41,15 @@ use crate::{
 };
 use std::collections::{HashMap, HashSet};
 
+#[cfg(feature = "probe")]
+pub static LEAF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static LEAF_VARS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static LEAF_CLAUSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static ROUNDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Clause budget for ∀-expansion: a universal block is enumerated away
 /// when the expanded matrix stays below this size. Enumerating a small
 /// block is far cheaper than reasoning about it, and it removes a
@@ -55,19 +64,52 @@ const EXPANSION_BUDGET: usize = 2_000_000;
 /// 30 s timeout into 3 s on `BLOCKS4iii.7`).
 const MAX_EXPANDED_BLOCK: usize = 8;
 
+/// Budget for a *speculative* expansion — one that leaves more than two
+/// blocks, so the result still goes through the per-level simplification
+/// and the candidate loops rather than straight to the core. Those pay
+/// per clause many times over, so they get far less room than an
+/// expansion that collapses the prefix outright (measured: expanding
+/// the depth-6 arbiter to 1.5M clauses left the loops unable to reach a
+/// single leaf solve, while `BLOCKS4iii` happily hands 1.45M clauses to
+/// the core because its expansion leaves one block).
+const SPECULATIVE_EXPANSION_BUDGET: usize = 50_000;
+
 /// Solves a prenex QBF with any number of quantifier blocks.
 #[must_use]
 pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
-    let qcnf = normalized(qcnf);
-    solve_normalized(&qcnf, options, EXPANSION_BUDGET).0
+    solve_with_expansion_budget(qcnf, options, EXPANSION_BUDGET)
 }
 
 /// Solves with an explicit ∀-expansion budget; `0` disables expansion
 /// (used by the differential tests to exercise the CEGAR loops).
 #[must_use]
 pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult {
-    let qcnf = normalized(qcnf);
-    solve_normalized(&qcnf, options, budget).0
+    // ∀-expansion is a *global* transformation: it depends on the
+    // instance, not on any candidate. Running it once here, to a
+    // fixpoint interleaved with simplification, is the difference
+    // between transforming the instance and transforming it again for
+    // every candidate of every enclosing loop — with `expand` left
+    // inside the recursion, deep prefixes (a 22-block `lights3`, the
+    // depth-6 arbiter) never reached a single leaf solve because each
+    // level redid the matrix doubling.
+    let mut current = normalized(qcnf);
+    loop {
+        if current.prefix.len() <= 2 {
+            break;
+        }
+        let Some(reduced) = simplify(&current) else {
+            return SolverResult::Unsatisfiable;
+        };
+        if reduced.matrix.is_empty() {
+            return SolverResult::Satisfiable;
+        }
+        current = normalized(&reduced);
+        let Some(block) = expandable_block(&current, budget) else {
+            break;
+        };
+        current = normalized(&expand_universal_block(&current, block));
+    }
+    solve_normalized(&current, options).0
 }
 
 /// The internal solve additionally returns, on an unsatisfiable
@@ -75,11 +117,7 @@ pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize)
 /// of that block — the expansion witness of the ∃-loop one level up
 /// (already computed by the ∀-loop and by the 2QBF core; threading it
 /// upgrades deep recursion from blocking-only to strong refinements).
-fn solve_normalized(
-    qcnf: &QCNF,
-    options: Options,
-    budget: usize,
-) -> (SolverResult, Option<Vec<Lit>>) {
+fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
     // Restrictions and expansions manufacture units and pure literals by
     // the hundred, so simplify before dispatching; without this every
     // recursion level rediscovers them. The 2QBF core does its own
@@ -98,18 +136,22 @@ fn solve_normalized(
     } else {
         qcnf
     };
-    if qcnf.prefix.len() > 2 {
-        // enumerating a small innermost universal block beats reasoning
-        // about it, and removes an alternation outright
-        if let Some(block) = expandable_block(qcnf, budget) {
-            // a normalized prefix alternates, so the innermost universal
-            // block is never block 0 here and this level's witness
-            // survives the expansion
-            let expanded = normalized(&expand_universal_block(qcnf, block));
-            return solve_normalized(&expanded, options, budget);
-        }
-    }
     if qcnf.prefix.len() <= 2 {
+        #[cfg(feature = "probe")]
+        {
+            let n = LEAF_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n % 2048 == 0 {
+                eprintln!(
+                    "probe: {n} leaf solves, {} abstraction rounds",
+                    ROUNDS.load(std::sync::atomic::Ordering::Relaxed)
+                );
+            }
+            LEAF_VARS.fetch_add(
+                qcnf.prefix.iter().map(|(_, v)| v.len()).sum::<usize>(),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            LEAF_CLAUSES.fetch_add(qcnf.matrix.len(), std::sync::atomic::Ordering::Relaxed);
+        }
         let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
         let verdict = solver.solve();
         let witness = if verdict == SolverResult::Unsatisfiable
@@ -122,8 +164,8 @@ fn solve_normalized(
         return (verdict, witness);
     }
     match qcnf.prefix[0].0 {
-        QuantTy::Exists => (expansion_loop(qcnf, options, budget), None),
-        QuantTy::Forall => forall_loop(qcnf, options, budget),
+        QuantTy::Exists => (expansion_loop(qcnf, options), None),
+        QuantTy::Forall => forall_loop(qcnf, options),
     }
 }
 
@@ -133,7 +175,7 @@ fn solve_normalized(
 /// recursion and blow up; the dual loop keeps the matrix fixed. Strong
 /// dual refinements would need regions of answered candidates — future
 /// work, the weak blocking clause keeps the loop total.)
-fn forall_loop(qcnf: &QCNF, options: Options, budget: usize) -> (SolverResult, Option<Vec<Lit>>) {
+fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -150,6 +192,8 @@ fn forall_loop(qcnf: &QCNF, options: Options, budget: usize) -> (SolverResult, O
     let mut rounds = 0u32;
     loop {
         rounds += 1;
+        #[cfg(feature = "probe")]
+        ROUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if rounds > 4096 {
             tracing::warn!("universal candidate budget exhausted");
             return (SolverResult::Unknown, None);
@@ -175,7 +219,7 @@ fn forall_loop(qcnf: &QCNF, options: Options, budget: usize) -> (SolverResult, O
             })
             .collect();
         let restricted = normalized(&restrict(qcnf, &candidate, 1));
-        match solve_normalized(&restricted, options, budget).0 {
+        match solve_normalized(&restricted, options).0 {
             // the candidate is a winning universal prefix move — and the
             // expansion witness for the ∃-loop above
             SolverResult::Unsatisfiable => return (SolverResult::Unsatisfiable, Some(candidate)),
@@ -342,7 +386,11 @@ fn expandable_block(qcnf: &QCNF, budget: usize) -> Option<usize> {
         qcnf.prefix[block + 1..].iter().map(|(_, vars)| vars.len()).sum::<usize>();
     let clauses = copies.checked_mul(qcnf.matrix.len())?;
     let fresh = copies.checked_mul(copied_vars)?;
-    (clauses <= budget && fresh <= budget).then_some(block)
+    // expanding the innermost block removes one alternation; only when
+    // at most two remain does the instance go straight to the core
+    let collapses = qcnf.prefix.len() <= 3;
+    let limit = if collapses { budget } else { budget.min(SPECULATIVE_EXPANSION_BUDGET) };
+    (clauses <= limit && fresh <= limit).then_some(block)
 }
 
 /// ∀-expansion of one universal block: the block is replaced by a
@@ -457,7 +505,7 @@ fn normalized(qcnf: &QCNF) -> QCNF {
 /// at least three blocks.
 // the loop reads best as one piece: oracle setup, candidates, refinements
 #[allow(clippy::too_many_lines)]
-fn expansion_loop(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult {
+fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -526,6 +574,8 @@ fn expansion_loop(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult 
     let mut rounds = 0u32;
     loop {
         rounds += 1;
+        #[cfg(feature = "probe")]
+        ROUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if rounds > 4096 || added_literals > 8_000_000 {
             tracing::warn!("expansion budget exhausted after {rounds} refinements");
             return SolverResult::Unknown;
@@ -572,7 +622,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult 
                 // block below, which is exactly this loop's expansion
                 // witness
                 let restricted = restrict(qcnf, &candidate, 1);
-                solve_normalized(&normalized(&restricted), options, budget)
+                solve_normalized(&normalized(&restricted), options)
             }
         };
         match verdict {
