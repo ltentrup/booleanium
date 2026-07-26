@@ -369,8 +369,14 @@ increasing order of ambition:
   CEGAR's relevant-assignment enumeration wins, measured at 17x on
   `p10-1.pddl`), and a per-level QBF simplification pass (universal
   reduction, units, pure literals) propagates what the restrictions
-  and expansions manufacture. CADET suite: 93 + 27 = **120 correct, 0
-  wrong**, 4 alternation instances beyond the 30 s budget. Design rationale and the algorithm
+  and expansions manufacture, once per level. Expansion itself is
+  hoisted to a single top-level fixpoint — reapplying it inside the
+  recursion made deep prefixes redo the matrix doubling per candidate,
+  which a leaf-solve probe caught as *zero* leaf solves in twenty
+  seconds — and speculative expansions (those leaving more than two
+  blocks, so the result still goes through the loops) get a much
+  smaller budget than collapsing ones. CADET suite: 93 + 29 = **122
+  correct, 0 wrong**, 2 alternation instances beyond the 30 s budget. Design rationale and the algorithm
   survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
   (RQ6).
 

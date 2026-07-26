@@ -556,9 +556,10 @@ honest resource budget that returns `Unknown` instead of expanding
 into the ground. Validated by 20k-case differential proptests against
 the brute-force oracle on random 1–6-block instances. On the CADET
 suite the prototype lifts the score from 93 correct + 33 unsupported
-to **120 correct, 0 wrong**: 27 of the 33 alternation instances solve
+to **122 correct, 0 wrong**: 29 of the 33 alternation instances solve
 within 30 s (both `pec_adder` pairs, `adder2`-class, planning,
-blocks-world, 7-block circuit equivalence). Two
+blocks-world, 7-block circuit equivalence, a 22-block lights-out
+puzzle). Two
 refinement lessons along the way: the blocking clause for a refuted
 candidate is added *unconditionally* (the oracle proved it
 unanswerable — sound, and it guarantees progress), which frees the
@@ -566,9 +567,9 @@ expansion point to be the *unverified* recorded witness candidate
 (any universal assignment is a sound expansion constraint;
 verification only mattered for exclusion) — that change took
 `p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The holdouts
-then fell one group at a time to the rounds below; four remain (`biu`
-and the depth-4 arbiter on the recursion budget, the depth-6 arbiter
-and 22-block `lights3` on time). A second round threaded the expansion
+then fell one group at a time to the rounds below; two remain (`biu`,
+∃48 over 46–47-variable universal blocks, on the recursion budget, and
+the depth-6 arbiter on time). A second round threaded the expansion
 witnesses through the recursion (the ∀-loop's refuting candidate and
 the core's recorded witness now reach the ∃-loop above, so deep
 recursion gets strong refinements too — sound at any depth because
@@ -608,7 +609,28 @@ compounds down the recursion and solved two more instances outright:
 `biubug` (7 blocks) in 0.19 s and `ev-pr-4x4` in 0.08 s, both
 previously budget-bound; it also made the differential fuzz 3x faster,
 since many generated instances now resolve in the pass itself.
-**120 correct, 0 wrong.** Next steps
+**120 correct, 0 wrong.**
+
+A fifth round started from a *measurement* rather than a design. A
+feature-gated leaf-solve counter (`--features probe`) showed the
+remaining hard instances reaching **zero** leaf solves in twenty
+seconds: the time was not in solving at all, so the persistent-oracle
+redesign that looked like the obvious next step would have bought
+nothing. The cause was structural — ∀-expansion is a *global*
+transformation, but it was being reapplied at every recursion level,
+and because a restricted sub-instance is smaller it looked profitable
+again each time, so every candidate of every enclosing loop redid the
+matrix doubling. Hoisting the simplify/expand fixpoint to a single
+top-level pass leaves the recursion doing only restrict-and-simplify.
+That exposed the other half of the rule: a big expansion is fine when
+it collapses the prefix to ≤2 blocks, because the instance then goes
+*straight to the core* (`BLOCKS4iii` hands it 950k clauses happily),
+and ruinous otherwise, because the result pays for per-level
+simplification and abstraction seeding on every candidate — so
+*speculative* expansions (leaving >2 blocks) get a 50k clause budget
+instead of 2M. Two more instances solve: 22-block `lights3` (21.9 s)
+and the depth-4 arbiter (0.39 s). **122 correct, 0 wrong**; the two
+survivors are `biu` and the depth-6 arbiter. Next steps
 in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
 support in the core), strong dual refinements (regions of answered
 universal candidates), the determinize-then-dispatch hybrid, and
