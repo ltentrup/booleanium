@@ -556,19 +556,19 @@ honest resource budget that returns `Unknown` instead of expanding
 into the ground. Validated by 20k-case differential proptests against
 the brute-force oracle on random 1–6-block instances. On the CADET
 suite the prototype lifts the score from 93 correct + 33 unsupported
-to **118 correct, 0 wrong**: 25 of the 33 alternation instances solve
+to **120 correct, 0 wrong**: 27 of the 33 alternation instances solve
 within 30 s (both `pec_adder` pairs, `adder2`-class, planning,
-blocks-world). Two
+blocks-world, 7-block circuit equivalence). Two
 refinement lessons along the way: the blocking clause for a refuted
 candidate is added *unconditionally* (the oracle proved it
 unanswerable — sound, and it guarantees progress), which frees the
 expansion point to be the *unverified* recorded witness candidate
 (any universal assignment is a sound expansion constraint;
 verification only mattered for exclusion) — that change took
-`p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The remaining
-8 split into three 7-block `biu`-family give-ups (recursion-bound)
-and three deep-recursion timeouts (the depth-4/6 arbiters, 22-block
-`lights3`). A second round threaded the expansion
+`p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The holdouts
+then fell one group at a time to the rounds below; four remain (`biu`
+and the depth-4 arbiter on the recursion budget, the depth-6 arbiter
+and 22-block `lights3` on time). A second round threaded the expansion
 witnesses through the recursion (the ∀-loop's refuting candidate and
 the core's recorded witness now reach the ∃-loop above, so deep
 recursion gets strong refinements too — sound at any depth because
@@ -596,7 +596,19 @@ only the *relevant* assignments of a block rather than all of them: a
 13.3 s), so blocks are capped at eight variables alongside the clause
 and variable budgets. With the cap, `BLOCKS4iii.7` (∃288 ∀7 ∃560)
 drops from a 30 s timeout to 2.4 s while `p10-1` keeps its search
-path — **118 correct, 0 wrong**. Next steps
+path.
+
+A fourth round found the front-end's real structural gap: it passed
+*raw* instances down the recursion. `restrict` fixes an entire block
+and `expand_universal_block` copies a matrix per assignment, so both
+manufacture units and pure literals in bulk — and every level was
+rediscovering them. A per-level `simplify` pass (universal reduction,
+unit propagation, pure literals in both directions, to a fixpoint)
+compounds down the recursion and solved two more instances outright:
+`biubug` (7 blocks) in 0.19 s and `ev-pr-4x4` in 0.08 s, both
+previously budget-bound; it also made the differential fuzz 3x faster,
+since many generated instances now resolve in the pass itself.
+**120 correct, 0 wrong.** Next steps
 in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
 support in the core), strong dual refinements (regions of answered
 universal candidates), the determinize-then-dispatch hybrid, and

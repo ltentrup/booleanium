@@ -367,9 +367,10 @@ increasing order of ambition:
   A ∀-expansion dispatch enumerates small innermost universal blocks
   instead of searching them (capped at eight variables: beyond that
   CEGAR's relevant-assignment enumeration wins, measured at 17x on
-  `p10-1.pddl`). CADET suite: 93 + 25 = **118 correct, 0 wrong**, 8
-  alternation instances beyond the 30 s budget (three 7-block
-  give-ups, three deep-recursion timeouts). Design rationale and the algorithm
+  `p10-1.pddl`), and a per-level QBF simplification pass (universal
+  reduction, units, pure literals) propagates what the restrictions
+  and expansions manufacture. CADET suite: 93 + 27 = **120 correct, 0
+  wrong**, 4 alternation instances beyond the 30 s budget. Design rationale and the algorithm
   survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
   (RQ6).
 
