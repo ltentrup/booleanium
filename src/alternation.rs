@@ -20,6 +20,11 @@
 //! keeps the matrix fixed instead of cascading negation gates through
 //! the recursion.
 //!
+//! Every level first *simplifies* its instance ([`simplify`]): the
+//! restrictions and expansions the recursion performs manufacture units
+//! and pure literals in bulk, and propagating them once per level
+//! compounds all the way down.
+//!
 //! Before either loop runs, a *small innermost universal block* is
 //! enumerated away instead ([`expand_universal_block`]): ∀-expansion
 //! removes an alternation outright, and at the innermost block only the
@@ -75,6 +80,24 @@ fn solve_normalized(
     options: Options,
     budget: usize,
 ) -> (SolverResult, Option<Vec<Lit>>) {
+    // Restrictions and expansions manufacture units and pure literals by
+    // the hundred, so simplify before dispatching; without this every
+    // recursion level rediscovers them. The 2QBF core does its own
+    // preprocessing (and owns the certified path), so leaves are left
+    // alone.
+    let simplified;
+    let qcnf = if qcnf.prefix.len() > 2 {
+        let Some(reduced) = simplify(qcnf) else {
+            return (SolverResult::Unsatisfiable, None);
+        };
+        if reduced.matrix.is_empty() {
+            return (SolverResult::Satisfiable, None);
+        }
+        simplified = normalized(&reduced);
+        &simplified
+    } else {
+        qcnf
+    };
     if qcnf.prefix.len() > 2 {
         // enumerating a small innermost universal block beats reasoning
         // about it, and removes an alternation outright
@@ -163,6 +186,123 @@ fn forall_loop(qcnf: &QCNF, options: Options, budget: usize) -> (SolverResult, O
             }
         }
     }
+}
+
+/// Simplifies a *normalized* instance to a fixpoint with the standard
+/// sound QBF rules, and returns `None` when the instance is refuted
+/// outright (a clause reduces to empty). An empty matrix means
+/// satisfiable.
+///
+/// * **Universal reduction**: a universal literal with no existential
+///   literal of a later block in its clause is dropped — the ∀ player
+///   moves last on it, so it can always falsify it.
+/// * **Unit propagation**: after universal reduction every unit clause
+///   is existential and forces its literal.
+/// * **Pure literals**: an existential occurring in one polarity only
+///   takes that polarity (nothing is harmed); a universal occurring in
+///   one polarity only takes the *opposite* one (the ∀ player never
+///   benefits from satisfying clauses).
+///
+/// The alternation front-end needs this because [`restrict`] and
+/// [`expand_universal_block`] manufacture units and pure literals by
+/// the hundred — a restriction fixes a whole block — and without a
+/// simplification pass every recursion level rediscovers them from
+/// scratch.
+fn simplify(qcnf: &QCNF) -> Option<QCNF> {
+    let mut prefix = qcnf.prefix.clone();
+    let mut matrix = qcnf.matrix.clone();
+    loop {
+        let mut block_of: HashMap<Var, (usize, QuantTy)> = HashMap::new();
+        for (block, (quant, vars)) in prefix.iter().enumerate() {
+            for &v in vars {
+                block_of.insert(v, (block, *quant));
+            }
+        }
+        let universal = |l: &Lit| matches!(block_of.get(&l.var()), Some((_, QuantTy::Forall)));
+        let block = |l: &Lit| block_of.get(&l.var()).map_or(0, |&(b, _)| b);
+
+        // clause-local rules: duplicates, tautologies, universal reduction
+        let mut changed = false;
+        let mut reduced: Vec<Vec<Lit>> = Vec::with_capacity(matrix.len());
+        for clause in &matrix {
+            let mut lits = clause.clone();
+            lits.sort_unstable_by_key(|l| l.to_dimacs());
+            lits.dedup();
+            if lits.len() != clause.len() {
+                changed = true;
+            }
+            if lits.iter().any(|l| lits.contains(&!*l)) {
+                changed = true;
+                continue;
+            }
+            let innermost_existential = lits.iter().filter(|l| !universal(l)).map(block).max();
+            let before = lits.len();
+            match innermost_existential {
+                Some(bound) => lits.retain(|l| !universal(l) || block(l) < bound),
+                None => lits.clear(),
+            }
+            if lits.len() != before {
+                changed = true;
+            }
+            if lits.is_empty() {
+                return None;
+            }
+            reduced.push(lits);
+        }
+        matrix = reduced;
+        if matrix.is_empty() {
+            break;
+        }
+
+        // forced literals: existential units, then pure literals
+        let mut forced: HashSet<Lit> =
+            matrix.iter().filter(|clause| clause.len() == 1).map(|clause| clause[0]).collect();
+        if forced.iter().any(|l| forced.contains(&!*l)) {
+            return None;
+        }
+        if forced.is_empty() {
+            let mut seen: HashSet<Lit> = HashSet::new();
+            for clause in &matrix {
+                seen.extend(clause.iter().copied());
+            }
+            for &lit in &seen {
+                if seen.contains(&!lit) {
+                    continue;
+                }
+                // the existential takes the polarity it occurs in, the
+                // universal the opposite one
+                forced.insert(if universal(&lit) { !lit } else { lit });
+            }
+        }
+        if forced.is_empty() {
+            if !changed {
+                break;
+            }
+            continue;
+        }
+
+        let mut next: Vec<Vec<Lit>> = Vec::with_capacity(matrix.len());
+        for clause in &matrix {
+            if clause.iter().any(|l| forced.contains(l)) {
+                continue;
+            }
+            let lits: Vec<Lit> =
+                clause.iter().copied().filter(|l| !forced.contains(&!*l)).collect();
+            if lits.is_empty() {
+                return None;
+            }
+            next.push(lits);
+        }
+        matrix = next;
+        let assigned: HashSet<Var> = forced.iter().map(|l| l.var()).collect();
+        for (_, vars) in &mut prefix {
+            vars.retain(|v| !assigned.contains(v));
+        }
+        if matrix.is_empty() {
+            break;
+        }
+    }
+    Some(QCNF { prefix, matrix })
 }
 
 /// The *innermost* universal block, if enumerating it fits the budget.
