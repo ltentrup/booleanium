@@ -524,11 +524,11 @@ judged against what this codebase already has:
   abstraction (guaranteed to exclude `X*` precisely because the
   witness is verified); when the witness is unavailable (the recorded
   candidate failed verification), the weak refinement `¬X*` keeps the
-  loop total. A ∀-outermost prefix is handled by negation (Tseitin of
-  the negated matrix; gate variables join the innermost existential
-  block), the same self-duality trick the ∃∀ frontends use; deeper
-  prefixes recurse, with strong refinements available whenever the
-  inner problem bottoms out at the 2QBF oracle. What no existing
+  loop total. A ∀-outermost prefix gets the dual loop (enumerate
+  refuting outer assignments, block answered ones); negating the
+  matrix instead — the self-duality trick the ∃∀ frontends use — was
+  tried and abandoned, see below. Deeper prefixes recurse, with strong
+  refinements available at every level. What no existing
   expansion solver has: an inner oracle with persistent learning,
   certified inner strategies (composable toward alternation
   certificates: `X*` constants + the 2QBF Skolem functions), and
@@ -544,97 +544,94 @@ judged against what this codebase already has:
   the genuinely strategic variables. Natural second step once the
   expansion loop exists.
 
-**Status: the expansion route is prototyped and validated**
-(`src/alternation.rs`, wired into the CLI for `>2`-block QDIMACS):
-outermost-∃ expansion loop over a varisat abstraction with the
-persistent 2QBF oracle at depth three (verified-witness expansions,
-`¬X*` fallback); a *dual candidate loop* for ∀-outermost blocks — the
-first cut negated the matrix instead, and the Tseitin gates cascading
-through the recursion blew memory; enumeration keeps the matrix fixed
-— and recursion (weak refinements only) beyond three blocks, with an
-honest resource budget that returns `Unknown` instead of expanding
-into the ground. Validated by 20k-case differential proptests against
-the brute-force oracle on random 1–6-block instances. On the CADET
-suite the prototype lifts the score from 93 correct + 33 unsupported
-to **122 correct, 0 wrong**: 29 of the 33 alternation instances solve
-within 30 s (both `pec_adder` pairs, `adder2`-class, planning,
-blocks-world, 7-block circuit equivalence, a 22-block lights-out
-puzzle). Two
-refinement lessons along the way: the blocking clause for a refuted
-candidate is added *unconditionally* (the oracle proved it
-unanswerable — sound, and it guarantees progress), which frees the
-expansion point to be the *unverified* recorded witness candidate
-(any universal assignment is a sound expansion constraint;
-verification only mattered for exclusion) — that change took
-`p10-1.pddl` from budget exhaustion to unsat in 0.77 s. The holdouts
-then fell one group at a time to the rounds below; two remain (`biu`,
-∃48 over 46–47-variable universal blocks, on the recursion budget, and
-the depth-6 arbiter on time). A second round threaded the expansion
-witnesses through the recursion (the ∀-loop's refuting candidate and
-the core's recorded witness now reach the ∃-loop above, so deep
-recursion gets strong refinements too — sound at any depth because
-the propositional copy existentially relaxes every inner variable)
-and seeded each abstraction with one relaxed matrix copy;
-suite-neutral at the 30 s budget, structural groundwork for the
-hard instances.
+**Status: implemented, validated, and measured** (`src/alternation.rs`,
+CLI-dispatched for QDIMACS beyond two blocks). On the CADET suite it
+lifts the score from 93 correct + 33 unsupported to **122 correct, 0
+wrong** — 29 of the 33 alternation instances solve within 30 s (both
+`pec_adder` pairs, `adder2`-class, planning, blocks-world, 7-block
+circuit equivalence, a 22-block lights-out puzzle). Two survive: `biu`
+(∃48 over 46–47-variable universal blocks — neither expansion nor
+blocking-based refinement dents 2⁴⁸) and the depth-6 arbiter (six
+alternations of 5-variable ∀ blocks, each expansion affordable but
+too many of them).
 
-A third round added **∀-expansion dispatch**: the *innermost*
-universal block is enumerated away before either loop runs (one copy
-of everything bound after it per assignment of the block), which
-removes an alternation and — at the innermost block, where only the
-final existential block is copied — collapses a three-block prefix to
-plain SAT. Soundness: each copy's conjunct mentions only that copy's
-variables, so a strategy for the expansion projects back by fixing
-the other copies' universals arbitrarily; the cross-copy dependencies
-that merging the per-level copies allows are never needed. Both
-halves of the dispatch rule came from measurement. Expanding an
-*outer* block removes an alternation too, but multiplies every
-survivor by `2^|Y|` — the fuzz produced instances that solve directly
-yet exhaust the budget once their 3-variable blocks became
-24-variable ones. And large blocks lose to CEGAR, which enumerates
-only the *relevant* assignments of a block rather than all of them: a
-10-variable block made `p10-1.pddl` 17x slower expanded (0.78 s →
-13.3 s), so blocks are capped at eight variables alongside the clause
-and variable budgets. With the cap, `BLOCKS4iii.7` (∃288 ∀7 ∃560)
-drops from a 30 s timeout to 2.4 s while `p10-1` keeps its search
-path.
+The pipeline, outermost first:
 
-A fourth round found the front-end's real structural gap: it passed
-*raw* instances down the recursion. `restrict` fixes an entire block
-and `expand_universal_block` copies a matrix per assignment, so both
-manufacture units and pure literals in bulk — and every level was
-rediscovering them. A per-level `simplify` pass (universal reduction,
-unit propagation, pure literals in both directions, to a fixpoint)
-compounds down the recursion and solved two more instances outright:
-`biubug` (7 blocks) in 0.19 s and `ev-pr-4x4` in 0.08 s, both
-previously budget-bound; it also made the differential fuzz 3x faster,
-since many generated instances now resolve in the pass itself.
-**120 correct, 0 wrong.**
+1. **Transform once, globally** — simplify and ∀-expand to a fixpoint
+   *before* any candidate loop starts.
+2. **Enumerate small innermost universal blocks** rather than
+   reasoning about them, which removes an alternation outright.
+3. **CEGAR at the outermost block** — ∃ blocks propose candidates over
+   a SAT abstraction, ∀ blocks enumerate refuting candidates — with
+   the recursion simplifying each restricted sub-instance.
+4. **The 2QBF core as a persistent oracle** at three-block leaves: one
+   `IncrementalSolver`, one `solve_with_assumptions` per candidate,
+   learning carried across all of them.
 
-A fifth round started from a *measurement* rather than a design. A
-feature-gated leaf-solve counter (`--features probe`) showed the
-remaining hard instances reaching **zero** leaf solves in twenty
-seconds: the time was not in solving at all, so the persistent-oracle
-redesign that looked like the obvious next step would have bought
-nothing. The cause was structural — ∀-expansion is a *global*
-transformation, but it was being reapplied at every recursion level,
-and because a restricted sub-instance is smaller it looked profitable
-again each time, so every candidate of every enclosing loop redid the
-matrix doubling. Hoisting the simplify/expand fixpoint to a single
-top-level pass leaves the recursion doing only restrict-and-simplify.
-That exposed the other half of the rule: a big expansion is fine when
-it collapses the prefix to ≤2 blocks, because the instance then goes
-*straight to the core* (`BLOCKS4iii` hands it 950k clauses happily),
-and ruinous otherwise, because the result pays for per-level
-simplification and abstraction seeding on every candidate — so
-*speculative* expansions (leaving >2 blocks) get a 50k clause budget
-instead of 2M. Two more instances solve: 22-block `lights3` (21.9 s)
-and the depth-4 arbiter (0.39 s). **122 correct, 0 wrong**; the two
-survivors are `biu` and the depth-6 arbiter. Next steps
-in order of leverage: ∀-side persistent oracles (needs ∃∀ assumption
-support in the core), strong dual refinements (regions of answered
-universal candidates), the determinize-then-dispatch hybrid, and
-certificate composition (outer constants + inner Skolem functions).
+Soundness rests on three arguments. *Expansion*: each copy's conjunct
+mentions only that copy's variables, so a strategy for the expansion
+projects back to the original by fixing the other copies' universals
+arbitrarily — the cross-copy dependencies that merging per-level
+copies allows are never needed. *Refinements*: a refuted candidate's
+blocking clause is always sound, and an expansion point may be **any**
+universal assignment, so the *unverified* recorded witness serves
+(verification only ever mattered for exclusion). *Relaxation*: the
+propositional copies existentially relax every inner variable, an
+over-approximation, which is what makes strong refinements legal at
+any recursion depth.
+
+Five things measurement decided, several against the obvious design:
+
+* **Measure before redesigning.** A feature-gated leaf-solve counter
+  (`--features probe`) showed the hard instances reaching *zero* leaf
+  solves in twenty seconds — so the persistent-oracle redesign that
+  looked like the clear next step would have bought nothing. The real
+  fault was that a *global* transformation was being reapplied per
+  candidate.
+* **Transform once, not per candidate.** With expansion inside the
+  recursion, a restricted sub-instance looked profitable to expand
+  again, so every candidate of every enclosing loop redid the matrix
+  doubling. Hoisting it solved 22-block `lights3` (21.9 s) and the
+  depth-4 arbiter (0.39 s).
+* **Expand the innermost block only, and only when small.** Expanding
+  an *outer* block also removes an alternation but multiplies every
+  survivor by `2^|Y|` — the fuzz found instances that solve directly
+  yet exhaust the budget once 3-variable blocks became 24-variable
+  ones. And CEGAR beats expansion on large blocks because it
+  enumerates only the *relevant* assignments: a 10-variable block made
+  `p10-1.pddl` 17x slower expanded, so blocks are capped at eight.
+* **A big expansion is only safe if it collapses the prefix.** At ≤2
+  blocks the instance goes straight to the core (`BLOCKS4iii` hands it
+  950k clauses happily, 30 s timeout → 1.9 s); otherwise it pays for
+  per-level simplification and abstraction seeding on every candidate,
+  so *speculative* expansions get a 50k clause budget instead of 2M.
+* **Simplify every level.** `restrict` fixes a whole block and
+  expansion copies matrices, both manufacturing units and pure
+  literals in bulk that every level was rediscovering. A per-level
+  pass (universal reduction, units, pure literals both directions, to
+  a fixpoint, plus dropping variables that no longer occur) solved
+  `biubug` (0.19 s → 7 ms after the occurrence check) and `ev-pr-4x4`,
+  and made the differential fuzz 3x faster.
+
+Two dead ends are worth recording. Negating the matrix for
+∀-outermost prefixes cascades Tseitin gates through the recursion and
+exhausts memory — the dual candidate loop keeps the matrix fixed
+instead. And raising the round budget only converts give-ups into
+timeouts; the survivors need better refinements, not more rounds.
+
+Validation: four differential families (both dispatch paths, deep
+prefixes, and all eight core option combinations) against the
+brute-force oracle at 20–30k cases each, plus cross-validation on a
+real multi-block corpus — the expansion dispatch and the pure-CEGAR
+loops share almost nothing but the leaf oracle, so `--no-expansion`
+turns them into a differential check where brute force cannot follow.
+
+Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
+assumption support in the core), strong dual refinements (regions of
+answered universal candidates rather than one blocking clause each),
+the determinize-then-dispatch hybrid, and certificate composition
+(outer constants + inner Skolem functions, inverting the
+simplification and expansion transformations).
 
 ## Suggested experiment order
 
