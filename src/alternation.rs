@@ -302,6 +302,14 @@ fn simplify(qcnf: &QCNF) -> Option<QCNF> {
             break;
         }
     }
+    // Variables that no longer occur are irrelevant: an existential can
+    // take any value, and a universal cannot influence anything. Keeping
+    // them would make the candidate loops enumerate over them (universal
+    // reduction and clause deletion strand them by the dozen).
+    let occurring: HashSet<Var> = matrix.iter().flatten().map(|l| l.var()).collect();
+    for (_, vars) in &mut prefix {
+        vars.retain(|v| occurring.contains(v));
+    }
     Some(QCNF { prefix, matrix })
 }
 
@@ -719,8 +727,41 @@ mod test {
         assert_eq!(solve(&qcnf, Options::default()), SolverResult::Satisfiable);
     }
 
+    /// The alternation front-end drives the 2QBF core through its
+    /// assumption-query and CEGAR paths, whose behavior depends on the
+    /// core options; the verdict must not.
+    fn check_all_options(qcnf: &QCNF) -> Result<(), TestCaseError> {
+        let expected = qcnf.brute_force();
+        for flags in 0..8 {
+            let options = Options {
+                cegar: flags & 1 != 0,
+                case_splits: flags & 2 != 0,
+                clause_deletion: flags & 4 != 0,
+                // split almost immediately to exercise the machinery
+                case_split_threshold: 2,
+                ..Options::default()
+            };
+            let actual = solve(qcnf, options);
+            prop_assert_eq!(
+                actual,
+                expected,
+                "alternation solver with {:?} disagrees on:\n{}",
+                options,
+                qcnf
+            );
+        }
+        Ok(())
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
+        /// Every core option combination, on prefixes deep enough to
+        /// exercise the recursion.
+        #[test]
+        fn differential_alternation_options(qcnf in strategy::qcnf(3..=5, 1..=3, 2..=12, 2..=4)) {
+            check_all_options(&qcnf)?;
+        }
+
         /// Random instances with one to four quantifier blocks against
         /// the brute-force oracle.
         #[test]
