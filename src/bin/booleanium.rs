@@ -61,6 +61,13 @@ struct Args {
     /// derivations the clausal proof rules cannot express).
     #[arg(long, value_name = "PATH")]
     proof: Option<PathBuf>,
+
+    /// Solve prefixes beyond two blocks without ∀-expansion, i.e. purely
+    /// by the CEGAR loops. The two dispatch paths share almost nothing
+    /// but the 2QBF oracle, so running both is a differential check on
+    /// real instances.
+    #[arg(long)]
+    no_expansion: bool,
 }
 
 impl Args {
@@ -171,7 +178,10 @@ fn main() -> Result<SolverResult> {
                     "certificates, strategies, and proofs are not available beyond 2QBF"
                 );
             }
-            let result = booleanium::alternation::solve(&qcnf, args.options());
+            let budget =
+                if args.no_expansion { 0 } else { booleanium::alternation::EXPANSION_BUDGET };
+            let result =
+                booleanium::alternation::solve_with_expansion_budget(&qcnf, args.options(), budget);
             #[cfg(feature = "probe")]
             {
                 use std::sync::atomic::Ordering::Relaxed;

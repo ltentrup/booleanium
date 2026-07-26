@@ -54,7 +54,7 @@ pub static ROUNDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// when the expanded matrix stays below this size. Enumerating a small
 /// block is far cheaper than reasoning about it, and it removes a
 /// quantifier alternation outright.
-const EXPANSION_BUDGET: usize = 2_000_000;
+pub const EXPANSION_BUDGET: usize = 2_000_000;
 
 /// Largest universal block that is enumerated rather than reasoned
 /// about. Beyond this the CEGAR loop usually wins: it enumerates only
