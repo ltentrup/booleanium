@@ -722,10 +722,46 @@ off a sweep that had not finished; the pre-inversion coverage was
 worse than 7/19, not better.) The suite itself is unchanged at 123
 correct, 0 wrong.
 
+**Strong dual refinements — implemented, measured, rejected.** The
+∀-loop blocks one *point* per round: it proposes a universal candidate,
+recurses, and on a satisfiable answer adds the single blocking clause
+`¬candidate`. The obvious upgrade is region learning — block the whole
+cube the answer covers — and the certificate machinery makes it a
+one-liner: the answered candidate comes with a winning sub-strategy, so
+asking the falsification query "is some clause falsifiable under this
+strategy, assuming the candidate?" with the candidate as *assumptions*
+returns an unsatisfiable core, and the assumptions the refutation used
+are exactly the literals the strategy needs. Everything else
+generalizes away, soundly, for one SAT call per round.
+
+It does not pay, for a reason the design did not anticipate: **the
+∀-loop's cubes are too short to generalize.** On `lights3` (22 blocks,
+the deepest suite instance) the 254 generalization queries had **0 of
+254** cube literals to drop — every candidate cube was a *single*
+literal, because by the time the recursion reaches a ∀-loop the
+expansion dispatch has eaten the small universal blocks and
+`normalized`/`restrict` hand each level one block at a time. On
+`ev-pr-4x4` it dropped 3 of 21 literals across 7 queries and saved
+exactly one round of 14. Rounds on `lights3`: 631 before, 631 after.
+
+The cost, meanwhile, is quadratic in the very loop it was meant to
+shorten: the query encodes the *composed sub-strategy*, whose size
+grows with the rounds already taken (8.6M strategy nodes and 7.4M
+clauses across those 254 queries, ~34k nodes each), which turned
+`lights3` from 24 s into 49 s. Reverted. Region learning needs
+strategies built to be universal-independent — a dual-CEGAR
+abstraction in CAQE's sense — not point strategies generalized after
+the fact.
+
+One byproduct worth recording: across those 261 queries the
+sub-strategy was confirmed valid every time, which is 261 independent
+strategy verifications at *every* recursion level of two real
+instances, not just at the top.
+
 Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
-assumption support in the core); strong dual refinements (regions of
-answered universal candidates rather than one blocking clause each);
-and the determinize-then-dispatch hybrid.
+assumption support in the core), which is also the prerequisite for
+doing dual refinement properly; and the determinize-then-dispatch
+hybrid.
 
 ## Suggested experiment order
 
