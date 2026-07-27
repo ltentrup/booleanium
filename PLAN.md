@@ -384,11 +384,13 @@ increasing order of ambition:
   (`alternation::solve_certified`) built from the pipeline's own
   pieces — simplification's forced literals, an ∃-loop's winning
   constants, a ∀-loop's per-cube sub-strategies, and the core's
-  certified Skolem models at the leaves — verified exhaustively in the
-  fuzz and available for 97% of satisfiable results (all but the
-  ∀-expanded ones). See `RESEARCH.md` (RQ6). Design rationale and the algorithm
-  survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
-  (RQ6).
+  certified Skolem models at the leaves — rendered as an AIGER
+  strategy circuit (`Strategy::to_aiger`) through the same builder the
+  2QBF emitter uses, verified by one SAT call
+  (`alternation::verify_strategy`) as well as exhaustively in the
+  fuzz, and available for 97% of satisfiable fuzz results (all but the
+  ∀-expanded ones). Design rationale and the algorithm survey
+  (dependency-aware ID, expansion, hybrids) in `RESEARCH.md` (RQ6).
 
 ### 2. Certificates
 
@@ -445,6 +447,16 @@ increasing order of ambition:
   same normalization the solver's preprocessing applies). The old
   half-finished `qrat` parser stub was removed, superseded by the
   emitter and checker.
+* **Certificates beyond 2QBF — done for the non-expanded slice**
+  (`alternation::Strategy`, `solve_certified`, `verify_strategy`, CLI
+  `--certify` / `--strategy` on any prefix depth): a satisfiable
+  answer to a prefix with more than two blocks carries a winning
+  strategy composed out of the pipeline, rendered in the same AIGER
+  format as a 2QBF result and checked by a single SAT call — the
+  exhaustive pointwise check the fuzz uses cannot survive a
+  47-variable universal block. 7 of the 13 satisfiable multi-block
+  instances of the CADET suite certify; the other 6 took a
+  ∀-expansion, which is not yet inverted. See `RESEARCH.md` (RQ6).
 
 ### 3. Performance
 

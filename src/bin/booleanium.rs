@@ -3,7 +3,7 @@ use booleanium::{
     incdet::{IncDet, Options},
     qcir,
     qdimacs::{ExtendedParseError, QdimacsParser},
-    smtlib, SolverResult,
+    smtlib, QuantTy, SolverResult,
 };
 use clap::Parser;
 use miette::{IntoDiagnostic, Result};
@@ -172,16 +172,15 @@ fn main() -> Result<SolverResult> {
         let blocks = qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
         if blocks > 2 {
             // alternations beyond 2QBF: recursive expansion over the
-            // 2QBF core (no certificates, strategies, or proofs yet)
-            if args.certify || args.strategy.is_some() || args.proof.is_some() {
-                tracing::warn!(
-                    "certificates, strategies, and proofs are not available beyond 2QBF"
-                );
+            // 2QBF core, with a composed strategy where the pipeline can
+            // build one (no refutation proofs yet)
+            if args.proof.is_some() {
+                tracing::warn!("proofs are not available beyond 2QBF");
             }
             let budget =
                 if args.no_expansion { 0 } else { booleanium::alternation::EXPANSION_BUDGET };
-            let result =
-                booleanium::alternation::solve_with_expansion_budget(&qcnf, args.options(), budget);
+            let (result, strategy) =
+                booleanium::alternation::solve_certified(&qcnf, args.options(), budget);
             #[cfg(feature = "probe")]
             {
                 use std::sync::atomic::Ordering::Relaxed;
@@ -193,6 +192,37 @@ fn main() -> Result<SolverResult> {
                 );
             }
             println!("result status: {result}");
+            if args.certify || args.strategy.is_some() {
+                let Some(strategy) = &strategy else {
+                    if result == SolverResult::Satisfiable {
+                        // the pipeline took a route it cannot invert
+                        // (∀-expansion); the verdict still stands
+                        println!("strategy: NOT AVAILABLE");
+                    } else {
+                        tracing::warn!("no strategy: the result is not satisfiable");
+                    }
+                    return Ok(result);
+                };
+                if args.certify {
+                    if booleanium::alternation::verify_strategy(&qcnf, strategy) {
+                        println!("certificate: valid");
+                    } else {
+                        println!("certificate: INVALID");
+                        return Ok(SolverResult::Unknown);
+                    }
+                }
+                if let Some(path) = &args.strategy {
+                    let universals: Vec<_> = qcnf
+                        .prefix
+                        .iter()
+                        .filter(|(q, _)| *q == QuantTy::Forall)
+                        .flat_map(|(_, vars)| vars.iter().copied())
+                        .collect();
+                    std::fs::write(path, strategy.to_aiger(&universals, &|_| None))
+                        .into_diagnostic()?;
+                    println!("strategy written to {}", path.display());
+                }
+            }
             return Ok(result);
         }
         solver = IncDet::from_qcnf_with_options(&qcnf, args.options());

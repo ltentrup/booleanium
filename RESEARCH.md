@@ -660,13 +660,46 @@ strategy entry: a strategy valid at the eliminated value stays valid
 at the other, since the clauses containing that literal are satisfied
 by the literal itself.
 
-Next steps in order of leverage: emitting composed strategies as AIGER
-circuits and verifying them by SAT rather than exhaustively (the
-exhaustive check does not scale past the fuzz range); inverting
-∀-expansion to close the last 3%; ∀-side persistent oracles (needs ∃∀
-assumption support in the core); strong dual refinements (regions of
-answered universal candidates rather than one blocking clause each);
-and the determinize-then-dispatch hybrid.
+**Composed strategies as circuits, checked by SAT.** A composed
+strategy is now also a *circuit*: `Strategy::to_aiger` renders it in
+the same ASCII AIGER format `SkolemModel::to_aiger` emits for a 2QBF
+result, over the same shared AIG builder, so a caller sees one
+artifact format regardless of prefix depth. `Fixed` and `Choose`
+become constant wires, `Split` a priority multiplexer over its cube
+conjunctions, and `Leaf` the 2QBF encoding verbatim
+(`SkolemModel::build_into`, factored out of `to_aiger` so the two
+cannot drift).
+
+That circuit is what makes the certificate checkable at real scale.
+`verify_strategy` encodes it into CNF alongside the matrix and asks
+for a universal assignment falsifying some clause: unsatisfiable means
+the strategy wins everywhere. One SAT call replaces `2^|Y|`
+evaluations, which is the difference between checking the fuzz range
+and checking an instance with a 47-variable universal block. Both the
+universals and the existentials the strategy leaves undetermined stay
+free, so the check reads "for *all* universal assignments *and all*
+values of the undetermined variables" — the strong form, which is
+sound because a variable is only left out when the solve found it
+irrelevant. Wired to `--certify` and `--strategy`, it validates 7 of
+the 13 satisfiable multi-block instances of the CADET suite (the other
+6 needed a ∀-expansion, see below).
+
+The two checks now run side by side in the fuzz: the exhaustive
+pointwise one, the SAT one, and — because the SAT check works on the
+AIG rather than on the rendered text — a third that parses the emitted
+AIGER back and simulates it. All three agreed across 300 000 cases per
+family after one real bug: the multiplexer skipped a variable when
+every branch agreed with the value *before* the split, which silently
+dropped variables that only the branches define.
+
+Next steps in order of leverage: inverting ∀-expansion, which is worth
+much more than the 3% the fuzz suggests — the fuzz instances are small
+enough that the CEGAR loops usually win, while on real instances
+expansion is the *common* dispatch, so it accounts for 6 of the 13
+suite cases; ∀-side persistent oracles (needs ∃∀ assumption support in
+the core); strong dual refinements (regions of answered universal
+candidates rather than one blocking clause each); and the
+determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 

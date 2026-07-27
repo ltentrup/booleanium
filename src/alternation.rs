@@ -42,7 +42,7 @@
 //! just the relevant assignments while expansion pays for all of them.
 
 use crate::{
-    incdet::{IncDet, Options},
+    incdet::{model::AigBuilder, IncDet, Options},
     incremental::IncrementalSolver,
     literal::{Lit, Var},
     qcnf::QCNF,
@@ -144,6 +144,210 @@ impl Strategy {
             }
         }
     }
+
+    /// Renders the strategy as a *strategy circuit* in ASCII AIGER
+    /// format over the given universal variables (one input each, in
+    /// order): the same externally checkable artifact
+    /// [`SkolemModel::to_aiger`](crate::incdet::model::SkolemModel::to_aiger)
+    /// produces for a 2QBF result, for a prefix of any depth.
+    #[must_use]
+    pub fn to_aiger(&self, universals: &[Var], name: &dyn Fn(i32) -> Option<String>) -> String {
+        let (aig, values) = self.build(universals);
+        // deterministic output order, and one output per defined variable
+        let mut outputs: Vec<(Var, u64)> = values.into_iter().collect();
+        outputs.sort_unstable();
+        crate::incdet::model::render(&aig, &outputs, universals, name)
+    }
+
+    /// Builds the strategy into a fresh AIG whose inputs are the given
+    /// universal variables, and returns it together with the output wire
+    /// of every variable the strategy determines.
+    fn build(&self, universals: &[Var]) -> (AigBuilder, HashMap<Var, u64>) {
+        let mut aig = AigBuilder::new(universals.len());
+        let inputs: HashMap<Var, u64> =
+            universals.iter().enumerate().map(|(i, &v)| (v, AigBuilder::input(i))).collect();
+        let mut values = HashMap::new();
+        self.build_into(&mut aig, &inputs, &mut values);
+        (aig, values)
+    }
+
+    /// The circuit counterpart of [`Strategy::evaluate`]: instead of
+    /// values under one universal assignment it accumulates *wires* that
+    /// compute those values under every assignment at once. The two must
+    /// agree pointwise, which the fuzz harness checks by running both.
+    fn build_into(
+        &self,
+        aig: &mut AigBuilder,
+        inputs: &HashMap<Var, u64>,
+        values: &mut HashMap<Var, u64>,
+    ) {
+        match self {
+            Strategy::Done => {}
+            Strategy::Fixed { assignments, rest }
+            | Strategy::Choose { constants: assignments, rest } => {
+                for l in assignments {
+                    values.insert(l.var(), u64::from(l.is_positive()));
+                }
+                rest.build_into(aig, inputs, values);
+            }
+            Strategy::Split { cases } => {
+                // the first case whose cube holds wins, as in `evaluate`;
+                // each case is built over its own copy of the values so
+                // far and the copies are muxed back together afterwards
+                let mut no_earlier = 1u64;
+                let mut branches: Vec<(u64, HashMap<Var, u64>)> = Vec::new();
+                for (cube, sub) in cases {
+                    let lits: Vec<u64> = cube
+                        .iter()
+                        .map(|&l| {
+                            // an unknown variable makes the literal
+                            // false whatever its polarity, as in
+                            // `evaluate`
+                            match inputs.get(&l.var()).or_else(|| values.get(&l.var())) {
+                                Some(&base) => base ^ u64::from(l.is_negative()),
+                                None => 0,
+                            }
+                        })
+                        .collect();
+                    let holds = aig.and_all(&lits);
+                    let select = aig.and(no_earlier, holds);
+                    no_earlier = aig.and(no_earlier, holds ^ 1);
+                    let mut branch = values.clone();
+                    sub.build_into(aig, inputs, &mut branch);
+                    branches.push((select, branch));
+                }
+                let mut defined: Vec<Var> =
+                    branches.iter().flat_map(|(_, b)| b.keys().copied()).collect();
+                defined.sort_unstable();
+                defined.dedup();
+                for var in defined {
+                    // outside every cube the value is whatever held
+                    // before the split (`evaluate` leaves it alone;
+                    // a variable no branch inherited reads false)
+                    let before = values.get(&var).copied();
+                    if branches.iter().all(|(_, b)| b.get(&var).copied() == before) {
+                        continue;
+                    }
+                    let base = before.unwrap_or(0);
+                    let mut terms = vec![aig.and(no_earlier, base)];
+                    for (select, branch) in &branches {
+                        let value = branch.get(&var).copied().unwrap_or(base);
+                        terms.push(aig.and(*select, value));
+                    }
+                    let merged = aig.or_all(&terms);
+                    values.insert(var, merged);
+                }
+            }
+            Strategy::Leaf(model) => {
+                // a leaf universal outside the outer ones reads false,
+                // matching `evaluate`
+                let leaf_inputs: HashMap<Var, u64> = model
+                    .universals()
+                    .into_iter()
+                    .map(|v| {
+                        let var = Lit::from_dimacs(v).var();
+                        (var, inputs.get(&var).copied().unwrap_or(0))
+                    })
+                    .collect();
+                values.extend(model.build_into(aig, &leaf_inputs));
+            }
+        }
+    }
+}
+
+/// Verifies a composed [`Strategy`] against the original instance with a
+/// single SAT call: the strategy circuit is encoded into CNF alongside
+/// the matrix, and the query asks for an assignment of the universal
+/// variables that falsifies some clause. Unsatisfiable means the
+/// strategy wins everywhere, which is exactly the claim a satisfiable
+/// verdict makes.
+///
+/// The universal variables and the existentials the strategy leaves
+/// undetermined are left free, so the check reads "for *all* universal
+/// assignments and *all* values of the undetermined variables" — the
+/// strong form, since a variable is only left out when the solve found
+/// it irrelevant.
+///
+/// This is the scalable counterpart of evaluating the strategy at every
+/// universal assignment, which the fuzz harness does but which is
+/// hopeless on real instances (their universal blocks run to dozens of
+/// variables).
+#[must_use]
+pub fn verify_strategy(qcnf: &QCNF, strategy: &Strategy) -> bool {
+    use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
+    type SatLit = <Varisat as SatSolver>::Lit;
+
+    let universals: Vec<Var> = qcnf
+        .prefix
+        .iter()
+        .filter(|(q, _)| *q == QuantTy::Forall)
+        .flat_map(|(_, vars)| vars.iter().copied())
+        .collect();
+    let (aig, values) = strategy.build(&universals);
+
+    let mut solver = LookupSolver::<Varisat>::default();
+    let var_count = qcnf
+        .prefix
+        .iter()
+        .flat_map(|(_, vars)| vars.iter().copied())
+        .chain(qcnf.matrix.iter().flatten().map(|l| l.var()))
+        .map(|v| v.as_index() + 2)
+        .max()
+        .unwrap_or(0);
+    solver.set_var_count(var_count);
+
+    // AIG literals into solver literals: constants through a unit-fixed
+    // variable, inputs through the universal variables themselves, gates
+    // through fresh variables with the usual Tseitin clauses
+    let one = solver.add_variable();
+    solver.add_clause(&[one]);
+    let mut wires: HashMap<u64, SatLit> = HashMap::new();
+    for (position, &v) in universals.iter().enumerate() {
+        wires.insert(AigBuilder::input(position) / 2, solver.lookup(Lit::positive(v)));
+    }
+    let sat_of = |lit: u64, wires: &HashMap<u64, SatLit>| -> SatLit {
+        match lit {
+            0 => !one,
+            1 => one,
+            _ => {
+                let base = wires[&(lit / 2)];
+                if lit & 1 == 1 {
+                    !base
+                } else {
+                    base
+                }
+            }
+        }
+    };
+    for &(lhs, rhs0, rhs1) in aig.gates() {
+        let gate = solver.add_variable();
+        let (a, b) = (sat_of(rhs0, &wires), sat_of(rhs1, &wires));
+        solver.add_clause(&[!gate, a]);
+        solver.add_clause(&[!gate, b]);
+        solver.add_clause(&[gate, !a, !b]);
+        wires.insert(lhs / 2, gate);
+    }
+    // tie every determined existential to the wire computing it
+    for (var, wire) in values {
+        let value = sat_of(wire, &wires);
+        let var = solver.lookup(Lit::positive(var));
+        solver.add_clause(&[!var, value]);
+        solver.add_clause(&[var, !value]);
+    }
+
+    // "some clause of the matrix is falsified"
+    let mut falsified = Vec::with_capacity(qcnf.matrix.len());
+    for clause in &qcnf.matrix {
+        let selector = solver.add_variable();
+        for &l in clause {
+            let l = solver.lookup(l);
+            solver.add_clause(&[!selector, !l]);
+        }
+        falsified.push(selector);
+    }
+    solver.add_clause(&falsified);
+
+    !solver.solve().expect("the strategy check is a plain SAT query")
 }
 
 /// The result of an internal solve: the verdict, the refuting
@@ -919,6 +1123,18 @@ mod test {
                 if let Some(strategy) = strategy {
                     STRATEGIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     check_strategy(qcnf, &strategy)?;
+                    // the same claim, checked through the circuit
+                    // encoding instead of pointwise evaluation: a
+                    // disagreement is a bug in whichever of the two is
+                    // wrong, and only the circuit scales to real
+                    // instances
+                    prop_assert!(
+                        verify_strategy(qcnf, &strategy),
+                        "the SAT check rejects a strategy the exhaustive check accepts on:\n{}\nstrategy: {:?}",
+                        qcnf,
+                        strategy
+                    );
+                    check_circuit(qcnf, &strategy)?;
                 }
             } else {
                 prop_assert!(
@@ -929,6 +1145,91 @@ mod test {
             }
         }
         Ok(())
+    }
+
+    /// The emitted strategy circuit must compute what
+    /// [`super::Strategy::evaluate`] prescribes. This goes through the
+    /// rendered AIGER text — parsed and simulated here by a few lines
+    /// that share nothing with the emitter — so it also covers the
+    /// rendering, which the SAT check bypasses.
+    fn check_circuit(qcnf: &QCNF, strategy: &super::Strategy) -> Result<(), TestCaseError> {
+        let universals: Vec<Var> = qcnf
+            .prefix
+            .iter()
+            .filter(|(q, _)| *q == QuantTy::Forall)
+            .flat_map(|(_, vars)| vars.iter().copied())
+            .collect();
+        let text = strategy.to_aiger(&universals, &|_| None);
+        for point in 0..1u32 << universals.len() {
+            let bits: Vec<bool> = (0..universals.len()).map(|i| point >> i & 1 == 1).collect();
+            let outputs = simulate(&text, &bits);
+            let assignment: Vec<i32> = universals
+                .iter()
+                .zip(&bits)
+                .map(|(v, &b)| if b { v.to_dimacs() } else { -v.to_dimacs() })
+                .collect();
+            let mut expected: HashMap<i32, bool> = HashMap::new();
+            strategy.evaluate(&assignment, &mut expected);
+            for (var, value) in &expected {
+                prop_assert_eq!(
+                    outputs.get(var),
+                    Some(value),
+                    "strategy circuit disagrees on variable {} at {:?} on:\n{}\ncircuit:\n{}",
+                    var,
+                    &assignment,
+                    qcnf,
+                    text
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Simulates an ASCII AIGER combinational circuit, returning the
+    /// value of every output indexed by the DIMACS variable in its
+    /// symbol-table name.
+    fn simulate(text: &str, inputs: &[bool]) -> HashMap<i32, bool> {
+        let mut lines = text.lines();
+        let header: Vec<usize> = lines
+            .next()
+            .expect("a header")
+            .split_whitespace()
+            .skip(1)
+            .map(|f| f.parse().expect("a numeric header field"))
+            .collect();
+        let (max_var, num_inputs, num_outputs, num_ands) =
+            (header[0], header[1], header[3], header[4]);
+        // index 0 stays false, so literal 0 reads false and literal 1 true
+        let mut values = vec![false; max_var + 1];
+        let read = |line: Option<&str>| -> usize {
+            line.expect("a literal line").trim().parse().expect("a numeric literal")
+        };
+        for &input in inputs.iter().take(num_inputs) {
+            let lit = read(lines.next());
+            values[lit / 2] = input;
+        }
+        let outputs: Vec<usize> = (0..num_outputs).map(|_| read(lines.next())).collect();
+        let truth = |lit: usize, values: &[bool]| values[lit / 2] ^ (lit & 1 == 1);
+        for _ in 0..num_ands {
+            let gate: Vec<usize> = lines
+                .next()
+                .expect("an and line")
+                .split_whitespace()
+                .map(|f| f.parse().expect("a numeric literal"))
+                .collect();
+            values[gate[0] / 2] = truth(gate[1], &values) && truth(gate[2], &values);
+        }
+        // the symbol table names each output by its DIMACS variable
+        let mut named = HashMap::new();
+        for line in lines {
+            let Some(rest) = line.strip_prefix('o') else {
+                continue;
+            };
+            let (position, name) = rest.split_once(' ').expect("a named output");
+            let position: usize = position.parse().expect("an output position");
+            named.insert(name.parse().expect("a DIMACS name"), truth(outputs[position], &values));
+        }
+        named
     }
 
     /// A composed strategy must satisfy the *original* matrix at every

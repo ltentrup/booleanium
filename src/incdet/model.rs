@@ -347,8 +347,21 @@ impl SkolemModel {
         let mut aig = AigBuilder::new(self.universals.len());
         let inputs: HashMap<Var, u64> =
             self.universals.iter().enumerate().map(|(i, &v)| (v, AigBuilder::input(i))).collect();
+        let outputs = self.build_into(&mut aig, &inputs);
+        render(&aig, &outputs, &self.universals, name)
+    }
 
-        let final_wires = build_chain(&mut aig, &self.final_chain, &inputs);
+    /// Builds this model's functions into an existing AIG over the
+    /// given input wires (one per universal variable it reads) and
+    /// returns the output wire of every variable it defines. Shared by
+    /// [`SkolemModel::to_aiger`] and by the composed strategies of the
+    /// alternation front-end, so both use exactly the same encoding.
+    pub(crate) fn build_into(
+        &self,
+        aig: &mut AigBuilder,
+        inputs: &HashMap<Var, u64>,
+    ) -> Vec<(Var, u64)> {
+        let final_wires = build_chain(aig, &self.final_chain, inputs);
 
         // region selection: the first region whose cube holds wins
         let mut no_earlier = 1u64;
@@ -356,13 +369,13 @@ impl SkolemModel {
         let mut region_wires: Vec<Option<HashMap<Var, u64>>> = Vec::new();
         for region in &self.regions {
             let cube: Vec<u64> =
-                region.cube().iter().map(|&l| wire(l, &final_wires, &inputs)).collect();
+                region.cube().iter().map(|&l| wire(l, &final_wires, inputs)).collect();
             let holds = aig.and_all(&cube);
             selected.push(aig.and(no_earlier, holds));
             no_earlier = aig.and(no_earlier, holds ^ 1);
             region_wires.push(match region {
                 Region::Response { .. } => None,
-                Region::Closed { chain, .. } => Some(build_chain(&mut aig, chain, &inputs)),
+                Region::Closed { chain, .. } => Some(build_chain(aig, chain, inputs)),
             });
         }
 
@@ -389,29 +402,37 @@ impl SkolemModel {
             }
             outputs.push((var, aig.or_all(&terms)));
         }
-
-        let mut out = String::new();
-        let max_var = aig.next_var - 1;
-        let _ =
-            writeln!(out, "aag {max_var} {} 0 {} {}", aig.inputs, outputs.len(), aig.ands.len());
-        for position in 0..aig.inputs {
-            let _ = writeln!(out, "{}", AigBuilder::input(position));
-        }
-        for (_, lit) in &outputs {
-            let _ = writeln!(out, "{lit}");
-        }
-        for (lhs, rhs0, rhs1) in &aig.ands {
-            let _ = writeln!(out, "{lhs} {rhs0} {rhs1}");
-        }
-        let label = |v: Var| name(v.to_dimacs()).unwrap_or_else(|| v.to_dimacs().to_string());
-        for (position, &v) in self.universals.iter().enumerate() {
-            let _ = writeln!(out, "i{position} {}", label(v));
-        }
-        for (position, (v, _)) in outputs.iter().enumerate() {
-            let _ = writeln!(out, "o{position} {}", label(*v));
-        }
-        out
+        outputs
     }
+}
+
+/// Renders an AIG with named outputs as ASCII AIGER.
+pub(crate) fn render(
+    aig: &AigBuilder,
+    outputs: &[(Var, u64)],
+    universals: &[Var],
+    name: &dyn Fn(i32) -> Option<String>,
+) -> String {
+    let mut out = String::new();
+    let max_var = aig.next_var - 1;
+    let _ = writeln!(out, "aag {max_var} {} 0 {} {}", aig.inputs, outputs.len(), aig.ands.len());
+    for position in 0..aig.inputs {
+        let _ = writeln!(out, "{}", AigBuilder::input(position));
+    }
+    for (_, lit) in outputs {
+        let _ = writeln!(out, "{lit}");
+    }
+    for (lhs, rhs0, rhs1) in &aig.ands {
+        let _ = writeln!(out, "{lhs} {rhs0} {rhs1}");
+    }
+    let label = |v: Var| name(v.to_dimacs()).unwrap_or_else(|| v.to_dimacs().to_string());
+    for (position, &v) in universals.iter().enumerate() {
+        let _ = writeln!(out, "i{position} {}", label(v));
+    }
+    for (position, (v, _)) in outputs.iter().enumerate() {
+        let _ = writeln!(out, "o{position} {}", label(*v));
+    }
+    out
 }
 
 fn finish(universals: &[Var], mut values: HashMap<Var, bool>) -> HashMap<i32, bool> {
@@ -424,22 +445,30 @@ fn finish(universals: &[Var], mut values: HashMap<Var, bool>) -> HashMap<i32, bo
 /// A tiny combinational AIG builder with constant folding; AIGER literal
 /// conventions (`0` false, `1` true, variable `v` as literals `2v` and
 /// `2v + 1`).
-struct AigBuilder {
+pub(crate) struct AigBuilder {
     inputs: usize,
     ands: Vec<(u64, u64, u64)>,
     next_var: u64,
 }
 
 impl AigBuilder {
-    fn new(inputs: usize) -> Self {
+    pub(crate) fn new(inputs: usize) -> Self {
         Self { inputs, ands: Vec::new(), next_var: inputs as u64 + 1 }
     }
 
-    fn input(position: usize) -> u64 {
+    pub(crate) fn input(position: usize) -> u64 {
         2 * (position as u64 + 1)
     }
 
-    fn and(&mut self, a: u64, b: u64) -> u64 {
+    /// The and-gates in definition order, as AIGER `(lhs, rhs0, rhs1)`
+    /// triples: `lhs` is always a positive literal of a variable defined
+    /// here for the first time, `rhs0` and `rhs1` refer to inputs,
+    /// constants, or earlier gates.
+    pub(crate) fn gates(&self) -> &[(u64, u64, u64)] {
+        &self.ands
+    }
+
+    pub(crate) fn and(&mut self, a: u64, b: u64) -> u64 {
         if a == 0 || b == 0 || a == b ^ 1 {
             return 0;
         }
@@ -455,11 +484,11 @@ impl AigBuilder {
         lhs
     }
 
-    fn and_all(&mut self, lits: &[u64]) -> u64 {
+    pub(crate) fn and_all(&mut self, lits: &[u64]) -> u64 {
         lits.iter().fold(1, |acc, &l| self.and(acc, l))
     }
 
-    fn or_all(&mut self, lits: &[u64]) -> u64 {
+    pub(crate) fn or_all(&mut self, lits: &[u64]) -> u64 {
         lits.iter().fold(0, |acc, &l| self.and(acc ^ 1, l ^ 1) ^ 1)
     }
 }
