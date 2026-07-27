@@ -388,8 +388,10 @@ increasing order of ambition:
   strategy circuit (`Strategy::to_aiger`) through the same builder the
   2QBF emitter uses, verified by one SAT call
   (`alternation::verify_strategy`) as well as exhaustively in the
-  fuzz, and available for 97% of satisfiable fuzz results (all but the
-  ∀-expanded ones). Design rationale and the algorithm survey
+  fuzz, and available for *every* satisfiable result now that
+  ∀-expansion is inverted too (`Strategy::Expanded` replays the
+  renaming of the copy the actual assignment of the enumerated block
+  selects). Design rationale and the algorithm survey
   (dependency-aware ID, expansion, hybrids) in `RESEARCH.md` (RQ6).
 
 ### 2. Certificates
@@ -447,16 +449,17 @@ increasing order of ambition:
   same normalization the solver's preprocessing applies). The old
   half-finished `qrat` parser stub was removed, superseded by the
   emitter and checker.
-* **Certificates beyond 2QBF — done for the non-expanded slice**
+* **Certificates beyond 2QBF — done**
   (`alternation::Strategy`, `solve_certified`, `verify_strategy`, CLI
   `--certify` / `--strategy` on any prefix depth): a satisfiable
   answer to a prefix with more than two blocks carries a winning
   strategy composed out of the pipeline, rendered in the same AIGER
   format as a 2QBF result and checked by a single SAT call — the
   exhaustive pointwise check the fuzz uses cannot survive a
-  47-variable universal block. 7 of the 13 satisfiable multi-block
-  instances of the CADET suite certify; the other 6 took a
-  ∀-expansion, which is not yet inverted. See `RESEARCH.md` (RQ6).
+  47-variable universal block. All 19 solved satisfiable multi-block
+  instances of the CADET suite certify, by the internal check and
+  independently by the external AIGER simulator. See `RESEARCH.md`
+  (RQ6).
 
 ### 3. Performance
 

@@ -30,9 +30,9 @@
 //! build one: simplification contributes the literals it forced, an
 //! ∃-loop the constants of its winning candidate, a ∀-loop one
 //! sub-strategy per enumerated cube (exhaustive, since the loop only
-//! succeeds once every candidate is answered), and a leaf the core's
-//! certified Skolem model. Inverting ∀-expansion is not implemented,
-//! so an instance that needed one answers `None`.
+//! succeeds once every candidate is answered), a leaf the core's
+//! certified Skolem model, and a ∀-expansion a multiplexer selecting
+//! the copy the actual assignment of the enumerated block picks.
 //!
 //! Before either loop runs, a *small innermost universal block* is
 //! enumerated away instead ([`expand_universal_block`]): ∀-expansion
@@ -83,6 +83,14 @@ const MAX_EXPANDED_BLOCK: usize = 8;
 /// the core because its expansion leaves one block).
 const SPECULATIVE_EXPANSION_BUDGET: usize = 50_000;
 
+/// The inverse of one ∀-expansion: for every assignment of the
+/// enumerated block, the cube selecting it and the renaming that maps
+/// each variable bound after the block to its copy in the expanded
+/// instance. Applying the renaming of the copy the actual assignment
+/// selects turns a strategy for the expansion into one for the
+/// original.
+type Copies = Vec<(Vec<Lit>, HashMap<Var, Var>)>;
+
 /// A winning strategy for the existential player, composed through the
 /// recursion. Evaluated against a full assignment of the *original*
 /// universal variables, it yields a value for every existential the
@@ -103,6 +111,11 @@ pub enum Strategy {
     Choose { constants: Vec<Lit>, rest: Box<Strategy> },
     /// one sub-strategy per enumerated cube of a universal block
     Split { cases: Vec<(Vec<Lit>, Strategy)> },
+    /// the inverse of a ∀-expansion: the sub-strategy plays all copies
+    /// of the variables bound after the enumerated block at once, and
+    /// the copy the actual assignment of the block selects supplies
+    /// the value
+    Expanded { copies: Copies, rest: Box<Strategy> },
     /// the certified Skolem functions of a 2QBF leaf
     Leaf(Box<crate::incdet::model::SkolemModel>),
     /// nothing left to decide
@@ -131,6 +144,29 @@ impl Strategy {
                 };
                 if let Some((_, sub)) = cases.iter().find(|(cube, _)| holds(cube)) {
                     sub.evaluate(universal, values);
+                }
+            }
+            Strategy::Expanded { copies, rest } => {
+                rest.evaluate(universal, values);
+                // the expanded block is universal, so the selecting
+                // cube is read straight off the assignment
+                let selected = copies
+                    .iter()
+                    .find(|(cube, _)| cube.iter().all(|l| universal.contains(&l.to_dimacs())));
+                if let Some((_, rename)) = selected {
+                    let projected: Vec<(i32, bool)> = rename
+                        .iter()
+                        .filter_map(|(original, copy)| {
+                            Some((original.to_dimacs(), *values.get(&copy.to_dimacs())?))
+                        })
+                        .collect();
+                    values.extend(projected);
+                }
+                // the copies are internal to the expansion
+                for (_, rename) in copies {
+                    for copy in rename.values() {
+                        values.remove(&copy.to_dimacs());
+                    }
                 }
             }
             Strategy::Leaf(model) => {
@@ -237,6 +273,46 @@ impl Strategy {
                     let merged = aig.or_all(&terms);
                     values.insert(var, merged);
                 }
+            }
+            Strategy::Expanded { copies, rest } => {
+                rest.build_into(aig, inputs, values);
+                let mut no_earlier = 1u64;
+                let mut selected: Vec<u64> = Vec::new();
+                for (cube, _) in copies {
+                    let lits: Vec<u64> = cube
+                        .iter()
+                        .map(|&l| match inputs.get(&l.var()) {
+                            Some(&wire) => wire ^ u64::from(l.is_negative()),
+                            None => 0,
+                        })
+                        .collect();
+                    let holds = aig.and_all(&lits);
+                    selected.push(aig.and(no_earlier, holds));
+                    no_earlier = aig.and(no_earlier, holds ^ 1);
+                }
+                let mut originals: Vec<Var> =
+                    copies.iter().flat_map(|(_, r)| r.keys().copied()).collect();
+                originals.sort_unstable();
+                originals.dedup();
+                let mut projected: Vec<(Var, u64)> = Vec::new();
+                for var in originals {
+                    let base = values.get(&var).copied().unwrap_or(0);
+                    let mut terms = vec![aig.and(no_earlier, base)];
+                    for (&select, (_, rename)) in selected.iter().zip(copies) {
+                        let value = rename
+                            .get(&var)
+                            .and_then(|copy| values.get(copy).copied())
+                            .unwrap_or(base);
+                        terms.push(aig.and(select, value));
+                    }
+                    projected.push((var, aig.or_all(&terms)));
+                }
+                for (_, rename) in copies {
+                    for copy in rename.values() {
+                        values.remove(copy);
+                    }
+                }
+                values.extend(projected);
             }
             Strategy::Leaf(model) => {
                 // a leaf universal outside the outer ones reads false,
@@ -403,7 +479,10 @@ pub fn solve_certified(
     // level redid the matrix doubling.
     let mut current = normalized(qcnf);
     let mut forced: Vec<Lit> = Vec::new();
-    let mut expanded = false;
+    // one entry per expansion performed, outermost first; each undoes
+    // its own renaming when the strategy is composed back up
+    let mut inversions: Vec<Copies> = Vec::new();
+    let mut floor = max_var(qcnf) + 1;
     loop {
         if current.prefix.len() <= 2 {
             break;
@@ -413,25 +492,42 @@ pub fn solve_certified(
         };
         forced.extend(assigned);
         if reduced.matrix.is_empty() {
-            let strategy = (!expanded).then(|| Strategy::Fixed {
-                assignments: forced.clone(),
-                rest: Box::new(Strategy::Done),
-            });
-            return (SolverResult::Satisfiable, strategy);
+            let strategy = invert(&inversions, Strategy::Done);
+            return (SolverResult::Satisfiable, Some(wrap(forced, Some(strategy)).unwrap()));
         }
         current = normalized(&reduced);
         let Some(block) = expandable_block(&current, budget) else {
             break;
         };
-        expanded = true;
-        current = normalized(&expand_universal_block(&current, block));
+        let (expanded, copies) = expand_universal_block(&current, block, floor);
+        floor = max_var(&expanded) + 1;
+        inversions.push(copies);
+        current = normalized(&expanded);
     }
     let outcome = solve_normalized(&current, options);
-    let strategy = outcome
-        .strategy
-        .filter(|_| !expanded)
-        .map(|rest| Strategy::Fixed { assignments: forced.clone(), rest: Box::new(rest) });
+    let strategy = wrap(forced, outcome.strategy.map(|rest| invert(&inversions, rest)));
     (outcome.verdict, strategy)
+}
+
+/// Undoes the expansions, innermost first, around a strategy for the
+/// fully expanded instance.
+fn invert(inversions: &[Copies], mut strategy: Strategy) -> Strategy {
+    for copies in inversions.iter().rev() {
+        strategy = Strategy::Expanded { copies: copies.clone(), rest: Box::new(strategy) };
+    }
+    strategy
+}
+
+/// The largest variable the instance declares or mentions, in DIMACS
+/// numbering.
+fn max_var(qcnf: &QCNF) -> i32 {
+    qcnf.prefix
+        .iter()
+        .flat_map(|(_, vars)| vars.iter().copied())
+        .chain(qcnf.matrix.iter().flatten().map(|l| l.var()))
+        .map(Var::to_dimacs)
+        .max()
+        .unwrap_or(0)
 }
 
 /// The internal solve additionally returns, on an unsatisfiable
@@ -767,25 +863,32 @@ fn expandable_block(qcnf: &QCNF, budget: usize) -> Option<usize> {
 /// the original by fixing the other copies' universals arbitrarily —
 /// the cross-copy dependencies the merged blocks allow are never
 /// needed.
-fn expand_universal_block(qcnf: &QCNF, block: usize) -> QCNF {
+///
+/// Alongside the expanded instance it returns the [`Copies`] that undo
+/// the transformation on a strategy, and fresh variables start above
+/// `floor` so the copies can never collide with a variable of the
+/// *original* instance that simplification dropped along the way.
+fn expand_universal_block(qcnf: &QCNF, block: usize, floor: i32) -> (QCNF, Copies) {
     let ys: Vec<Var> = qcnf.prefix[block].1.clone();
     let after: Vec<(QuantTy, Vec<Var>)> = qcnf.prefix[block + 1..].to_vec();
     let after_set: HashSet<Var> = after.iter().flat_map(|(_, vars)| vars.iter().copied()).collect();
     let y_set: HashSet<Var> = ys.iter().copied().collect();
     let declared = qcnf.prefix.iter().flat_map(|(_, vars)| vars.iter()).map(|v| v.to_dimacs());
     let mentioned = qcnf.matrix.iter().flatten().map(|l| l.var().to_dimacs());
-    let mut next = declared.chain(mentioned).max().unwrap_or(0) + 1;
+    let mut next = declared.chain(mentioned).max().unwrap_or(0).max(floor - 1) + 1;
 
+    let mut copies: Copies = Vec::new();
     let mut copied_blocks: Vec<Vec<Var>> = vec![Vec::new(); after.len()];
     let mut matrix: Vec<Vec<Lit>> = Vec::new();
     for point in 0..1u64 << ys.len() {
         // the assignment of this copy, and fresh names for everything
         // bound after the expanded block
-        let assigned: HashSet<Lit> = ys
+        let cube: Vec<Lit> = ys
             .iter()
             .enumerate()
             .map(|(i, &v)| if point >> i & 1 == 1 { Lit::positive(v) } else { Lit::negative(v) })
             .collect();
+        let assigned: HashSet<Lit> = cube.iter().copied().collect();
         let mut rename: HashMap<Var, Var> = HashMap::new();
         for (index, (_, vars)) in after.iter().enumerate() {
             for &v in vars {
@@ -822,13 +925,14 @@ fn expand_universal_block(qcnf: &QCNF, block: usize) -> QCNF {
                 .collect();
             matrix.push(lits);
         }
+        copies.push((cube, rename));
     }
 
     let mut prefix: Vec<(QuantTy, Vec<Var>)> = qcnf.prefix[..block].to_vec();
     for ((quant, _), vars) in after.iter().zip(copied_blocks) {
         prefix.push((*quant, vars));
     }
-    QCNF { prefix, matrix }
+    (QCNF { prefix, matrix }, copies)
 }
 
 /// Drops empty blocks, merges adjacent blocks of the same quantifier,
@@ -1141,6 +1245,15 @@ mod test {
                     strategy.is_none(),
                     "a strategy was produced for an unsatisfiable instance:\n{}",
                     qcnf
+                );
+            }
+            #[cfg(feature = "probe")]
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                eprintln!(
+                    "strategies {} / {} satisfiable",
+                    STRATEGIES.load(Relaxed),
+                    SAT_RESULTS.load(Relaxed)
                 );
             }
         }

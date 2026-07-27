@@ -634,7 +634,7 @@ recursion budget in at least one configuration. That is ~2100 real
 solves' worth of agreement on the youngest code in the tree, against
 the 33 instances the CADET suite contributes.
 
-**Certificates beyond 2QBF — done for the non-expanded slice**
+**Certificates beyond 2QBF — done**
 (`Strategy`, `solve_certified`). A satisfiable alternation answer used
 to come with nothing at all, which was the largest hole in the
 project's own thesis (certified function output is the claimed niche).
@@ -680,9 +680,8 @@ universals and the existentials the strategy leaves undetermined stay
 free, so the check reads "for *all* universal assignments *and all*
 values of the undetermined variables" — the strong form, which is
 sound because a variable is only left out when the solve found it
-irrelevant. Wired to `--certify` and `--strategy`, it validates 7 of
-the 13 satisfiable multi-block instances of the CADET suite (the other
-6 needed a ∀-expansion, see below).
+irrelevant. It is wired to `--certify` and `--strategy` for any prefix
+depth.
 
 The two checks now run side by side in the fuzz: the exhaustive
 pointwise one, the SAT one, and — because the SAT check works on the
@@ -692,14 +691,41 @@ family after one real bug: the multiplexer skipped a variable when
 every branch agreed with the value *before* the split, which silently
 dropped variables that only the branches define.
 
-Next steps in order of leverage: inverting ∀-expansion, which is worth
-much more than the 3% the fuzz suggests — the fuzz instances are small
-enough that the CEGAR loops usually win, while on real instances
-expansion is the *common* dispatch, so it accounts for 6 of the 13
-suite cases; ∀-side persistent oracles (needs ∃∀ assumption support in
-the core); strong dual refinements (regions of answered universal
-candidates rather than one blocking clause each); and the
-determinize-then-dispatch hybrid.
+**Inverting ∀-expansion — the last gap, now closed.** Expansion was
+the one dispatch that produced no strategy, and on real instances it
+is the *common* dispatch, not the 3% corner the fuzz suggested (the
+generated instances are small enough that the CEGAR loops usually
+win). Inverting it is cheap once the bookkeeping exists:
+`expand_universal_block` already builds, per assignment `σ` of the
+enumerated block, a renaming of every variable bound after it, so it
+now returns those renamings and `Strategy::Expanded` replays them —
+the sub-strategy plays all copies at once, and the copy `σ` the actual
+assignment of the block selects supplies the value. Nested expansions
+nest as `Expanded` nodes, innermost applied first.
+
+Soundness is the projection argument the expansion itself rests on: if
+`S` wins the expansion, then `Z(u, b) := Z^b(u)` wins the original,
+because the conjunct for `σ = b` is exactly `M[B := b]` over `Z^b`,
+and `Z` may legally depend on `b` since it is bound after the block.
+One trap worth recording: fresh copy variables were numbered above the
+*current* instance's maximum, and simplification can drop the
+original's highest variable, so a copy could collide with an original
+variable that the composed strategy also assigns. Expansion now takes
+a floor carried across the fixpoint.
+
+With that, **every satisfiable fuzz result carries a strategy**
+(174 084 of 174 084, up from 97%) and all **19 solved satisfiable
+multi-block instances of the CADET suite certify** — by the internal
+SAT check and independently by the external Python simulator sampling
+the emitted AIGER. (An earlier count of 7 of 13 recorded here was read
+off a sweep that had not finished; the pre-inversion coverage was
+worse than 7/19, not better.) The suite itself is unchanged at 123
+correct, 0 wrong.
+
+Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
+assumption support in the core); strong dual refinements (regions of
+answered universal candidates rather than one blocking clause each);
+and the determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 
