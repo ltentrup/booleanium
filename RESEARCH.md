@@ -634,12 +634,39 @@ recursion budget in at least one configuration. That is ~2100 real
 solves' worth of agreement on the youngest code in the tree, against
 the 33 instances the CADET suite contributes.
 
-Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
-assumption support in the core), strong dual refinements (regions of
-answered universal candidates rather than one blocking clause each),
-the determinize-then-dispatch hybrid, and certificate composition
-(outer constants + inner Skolem functions, inverting the
-simplification and expansion transformations).
+**Certificates beyond 2QBF — done for the non-expanded slice**
+(`Strategy`, `solve_certified`). A satisfiable alternation answer used
+to come with nothing at all, which was the largest hole in the
+project's own thesis (certified function output is the claimed niche).
+The strategy is now *composed* out of the pipeline: simplification
+contributes the literals it forced, an ∃-loop the constants of its
+winning candidate, a ∀-loop one sub-strategy per enumerated cube
+(exhaustive, because that loop only succeeds once every candidate of
+the block is answered), and a leaf the core's certified Skolem model.
+Verified exhaustively in the differential fuzz — every composed
+strategy is evaluated at *every* universal assignment against the
+*original* matrix — and produced for **97% of satisfiable results**
+(25 000 of 25 809); the remainder are instances that needed a
+∀-expansion, whose copies would have to be folded back into a
+multiplexer over the expanded block.
+
+The verification paid for itself immediately: the first version
+recovered simplification's assignments by inspecting occurrence
+patterns afterwards, which is wrong as soon as the fixpoint cascades
+(a variable occurring in both polarities becomes pure only after
+earlier assignments delete clauses). `simplify` now *reports* what it
+forced. Note also that eliminating a *universal* pure literal needs no
+strategy entry: a strategy valid at the eliminated value stays valid
+at the other, since the clauses containing that literal are satisfied
+by the literal itself.
+
+Next steps in order of leverage: emitting composed strategies as AIGER
+circuits and verifying them by SAT rather than exhaustively (the
+exhaustive check does not scale past the fuzz range); inverting
+∀-expansion to close the last 3%; ∀-side persistent oracles (needs ∃∀
+assumption support in the core); strong dual refinements (regions of
+answered universal candidates rather than one blocking clause each);
+and the determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 

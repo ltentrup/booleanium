@@ -25,6 +25,15 @@
 //! and pure literals in bulk, and propagating them once per level
 //! compounds all the way down.
 //!
+//! Satisfiable answers come with a composed winning strategy
+//! ([`Strategy`], via [`solve_certified`]) wherever the pipeline can
+//! build one: simplification contributes the literals it forced, an
+//! ∃-loop the constants of its winning candidate, a ∀-loop one
+//! sub-strategy per enumerated cube (exhaustive, since the loop only
+//! succeeds once every candidate is answered), and a leaf the core's
+//! certified Skolem model. Inverting ∀-expansion is not implemented,
+//! so an instance that needed one answers `None`.
+//!
 //! Before either loop runs, a *small innermost universal block* is
 //! enumerated away instead ([`expand_universal_block`]): ∀-expansion
 //! removes an alternation outright, and at the innermost block only the
@@ -74,6 +83,88 @@ const MAX_EXPANDED_BLOCK: usize = 8;
 /// the core because its expansion leaves one block).
 const SPECULATIVE_EXPANSION_BUDGET: usize = 50_000;
 
+/// A winning strategy for the existential player, composed through the
+/// recursion. Evaluated against a full assignment of the *original*
+/// universal variables, it yields a value for every existential the
+/// solve determined; variables it leaves out were dropped as
+/// irrelevant and may take any value.
+///
+/// The shapes mirror the pipeline: [`Strategy::Fixed`] carries what
+/// simplification forced, [`Strategy::Choose`] the constants an ∃-loop
+/// candidate committed to, [`Strategy::Split`] one sub-strategy per
+/// universal candidate a ∀-loop enumerated (exhaustive, because that
+/// loop only succeeds once every candidate is answered), and
+/// [`Strategy::Leaf`] a 2QBF Skolem model.
+#[derive(Debug, Clone)]
+pub enum Strategy {
+    /// values a simplification pass forced (units, pure literals)
+    Fixed { assignments: Vec<Lit>, rest: Box<Strategy> },
+    /// the constants an outermost existential block committed to
+    Choose { constants: Vec<Lit>, rest: Box<Strategy> },
+    /// one sub-strategy per enumerated cube of a universal block
+    Split { cases: Vec<(Vec<Lit>, Strategy)> },
+    /// the certified Skolem functions of a 2QBF leaf
+    Leaf(Box<crate::incdet::model::SkolemModel>),
+    /// nothing left to decide
+    Done,
+}
+
+impl Strategy {
+    /// Collects the existential values this strategy prescribes under a
+    /// full universal assignment (DIMACS literals).
+    pub fn evaluate(&self, universal: &[i32], values: &mut HashMap<i32, bool>) {
+        match self {
+            Strategy::Done => {}
+            Strategy::Fixed { assignments, rest }
+            | Strategy::Choose { constants: assignments, rest } => {
+                for l in assignments {
+                    values.insert(l.var().to_dimacs(), l.is_positive());
+                }
+                rest.evaluate(universal, values);
+            }
+            Strategy::Split { cases } => {
+                let holds = |cube: &[Lit]| {
+                    cube.iter().all(|l| {
+                        universal.contains(&l.to_dimacs())
+                            || values.get(&l.var().to_dimacs()) == Some(&l.is_positive())
+                    })
+                };
+                if let Some((_, sub)) = cases.iter().find(|(cube, _)| holds(cube)) {
+                    sub.evaluate(universal, values);
+                }
+            }
+            Strategy::Leaf(model) => {
+                // the leaf's universals are a subset of the outer ones
+                let leaf: Vec<i32> = model
+                    .universals()
+                    .into_iter()
+                    .map(|v| if universal.contains(&v) { v } else { -v })
+                    .collect();
+                values.extend(model.evaluate(&leaf));
+            }
+        }
+    }
+}
+
+/// The result of an internal solve: the verdict, the refuting
+/// assignment of an outermost universal block (for the ∃-loop above),
+/// and a composed winning strategy when one is available.
+struct Outcome {
+    verdict: SolverResult,
+    witness: Option<Vec<Lit>>,
+    strategy: Option<Strategy>,
+}
+
+impl Outcome {
+    fn verdict(verdict: SolverResult) -> Self {
+        Self { verdict, witness: None, strategy: None }
+    }
+
+    fn sat(strategy: Option<Strategy>) -> Self {
+        Self { verdict: SolverResult::Satisfiable, witness: None, strategy }
+    }
+}
+
 /// Solves a prenex QBF with any number of quantifier blocks.
 #[must_use]
 pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
@@ -84,6 +175,20 @@ pub fn solve(qcnf: &QCNF, options: Options) -> SolverResult {
 /// (used by the differential tests to exercise the CEGAR loops).
 #[must_use]
 pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize) -> SolverResult {
+    solve_certified(qcnf, options, budget).0
+}
+
+/// Solves and, on a satisfiable verdict, returns a winning existential
+/// strategy when the pipeline could compose one. Strategy composition
+/// does not yet invert ∀-expansion (the expanded copies would have to
+/// be folded back into a multiplexer over the expanded block), so an
+/// instance that needed an expansion answers `None`.
+#[must_use]
+pub fn solve_certified(
+    qcnf: &QCNF,
+    options: Options,
+    budget: usize,
+) -> (SolverResult, Option<Strategy>) {
     // ∀-expansion is a *global* transformation: it depends on the
     // instance, not on any candidate. Running it once here, to a
     // fixpoint interleaved with simplification, is the difference
@@ -93,23 +198,36 @@ pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize)
     // depth-6 arbiter) never reached a single leaf solve because each
     // level redid the matrix doubling.
     let mut current = normalized(qcnf);
+    let mut forced: Vec<Lit> = Vec::new();
+    let mut expanded = false;
     loop {
         if current.prefix.len() <= 2 {
             break;
         }
-        let Some(reduced) = simplify(&current) else {
-            return SolverResult::Unsatisfiable;
+        let Some((reduced, assigned)) = simplify(&current) else {
+            return (SolverResult::Unsatisfiable, None);
         };
+        forced.extend(assigned);
         if reduced.matrix.is_empty() {
-            return SolverResult::Satisfiable;
+            let strategy = (!expanded).then(|| Strategy::Fixed {
+                assignments: forced.clone(),
+                rest: Box::new(Strategy::Done),
+            });
+            return (SolverResult::Satisfiable, strategy);
         }
         current = normalized(&reduced);
         let Some(block) = expandable_block(&current, budget) else {
             break;
         };
+        expanded = true;
         current = normalized(&expand_universal_block(&current, block));
     }
-    solve_normalized(&current, options).0
+    let outcome = solve_normalized(&current, options);
+    let strategy = outcome
+        .strategy
+        .filter(|_| !expanded)
+        .map(|rest| Strategy::Fixed { assignments: forced.clone(), rest: Box::new(rest) });
+    (outcome.verdict, strategy)
 }
 
 /// The internal solve additionally returns, on an unsatisfiable
@@ -117,19 +235,24 @@ pub fn solve_with_expansion_budget(qcnf: &QCNF, options: Options, budget: usize)
 /// of that block — the expansion witness of the ∃-loop one level up
 /// (already computed by the ∀-loop and by the 2QBF core; threading it
 /// upgrades deep recursion from blocking-only to strong refinements).
-fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
+fn solve_normalized(qcnf: &QCNF, options: Options) -> Outcome {
     // Restrictions and expansions manufacture units and pure literals by
     // the hundred, so simplify before dispatching; without this every
     // recursion level rediscovers them. The 2QBF core does its own
     // preprocessing (and owns the certified path), so leaves are left
     // alone.
     let simplified;
+    let mut forced: Vec<Lit> = Vec::new();
     let qcnf = if qcnf.prefix.len() > 2 {
-        let Some(reduced) = simplify(qcnf) else {
-            return (SolverResult::Unsatisfiable, None);
+        let Some((reduced, assigned)) = simplify(qcnf) else {
+            return Outcome::verdict(SolverResult::Unsatisfiable);
         };
+        forced.extend(assigned);
         if reduced.matrix.is_empty() {
-            return (SolverResult::Satisfiable, None);
+            return Outcome::sat(Some(Strategy::Fixed {
+                assignments: forced,
+                rest: Box::new(Strategy::Done),
+            }));
         }
         simplified = normalized(&reduced);
         &simplified
@@ -161,12 +284,24 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<
         } else {
             None
         };
-        return (verdict, witness);
+        let strategy = (verdict == SolverResult::Satisfiable)
+            .then(|| Strategy::Leaf(Box::new(solver.skolem_model())));
+        return Outcome { verdict, witness, strategy: wrap(forced, strategy) };
     }
-    match qcnf.prefix[0].0 {
-        QuantTy::Exists => (expansion_loop(qcnf, options), None),
+    let inner = match qcnf.prefix[0].0 {
+        QuantTy::Exists => expansion_loop(qcnf, options),
         QuantTy::Forall => forall_loop(qcnf, options),
+    };
+    Outcome { strategy: wrap(forced, inner.strategy), ..inner }
+}
+
+/// Prefixes a strategy with the literals a simplification pass forced.
+fn wrap(forced: Vec<Lit>, strategy: Option<Strategy>) -> Option<Strategy> {
+    let strategy = strategy?;
+    if forced.is_empty() {
+        return Some(strategy);
     }
+    Some(Strategy::Fixed { assignments: forced, rest: Box::new(strategy) })
 }
 
 /// The dual candidate loop at a ∀-outermost block: search for a
@@ -175,7 +310,7 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<
 /// recursion and blow up; the dual loop keeps the matrix fixed. Strong
 /// dual refinements would need regions of answered candidates — future
 /// work, the weak blocking clause keeps the loop total.)
-fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>) {
+fn forall_loop(qcnf: &QCNF, options: Options) -> Outcome {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -189,6 +324,11 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
         let l = alpha.lookup(Lit::positive(v));
         alpha.add_clause(&[l, !l]);
     }
+    // one sub-strategy per answered candidate; the loop only succeeds
+    // once every assignment of the block has been enumerated, so the
+    // cases partition it
+    let mut cases: Vec<(Vec<Lit>, Strategy)> = Vec::new();
+    let mut composable = true;
     let mut rounds = 0u32;
     loop {
         rounds += 1;
@@ -196,11 +336,11 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
         ROUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if rounds > 4096 {
             tracing::warn!("universal candidate budget exhausted");
-            return (SolverResult::Unknown, None);
+            return Outcome::verdict(SolverResult::Unknown);
         }
         if !alpha.solve().unwrap() {
             // every universal choice is answered
-            return (SolverResult::Satisfiable, None);
+            return Outcome::sat(composable.then_some(Strategy::Split { cases }));
         }
         let model: HashMap<Var, bool> = alpha
             .orig_model()
@@ -219,12 +359,23 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
             })
             .collect();
         let restricted = normalized(&restrict(qcnf, &candidate, 1));
-        match solve_normalized(&restricted, options).0 {
+        let outcome = solve_normalized(&restricted, options);
+        match outcome.verdict {
             // the candidate is a winning universal prefix move — and the
             // expansion witness for the ∃-loop above
-            SolverResult::Unsatisfiable => return (SolverResult::Unsatisfiable, Some(candidate)),
-            SolverResult::Unknown => return (SolverResult::Unknown, None),
+            SolverResult::Unsatisfiable => {
+                return Outcome {
+                    verdict: SolverResult::Unsatisfiable,
+                    witness: Some(candidate),
+                    strategy: None,
+                }
+            }
+            SolverResult::Unknown => return Outcome::verdict(SolverResult::Unknown),
             SolverResult::Satisfiable => {
+                match outcome.strategy {
+                    Some(sub) => cases.push((candidate.clone(), sub)),
+                    None => composable = false,
+                }
                 let blocking: Vec<_> = candidate.iter().map(|&l| alpha.lookup(!l)).collect();
                 alpha.add_clause(&blocking);
             }
@@ -252,9 +403,14 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> (SolverResult, Option<Vec<Lit>>
 /// the hundred — a restriction fixes a whole block — and without a
 /// simplification pass every recursion level rediscovers them from
 /// scratch.
-fn simplify(qcnf: &QCNF) -> Option<QCNF> {
+fn simplify(qcnf: &QCNF) -> Option<(QCNF, Vec<Lit>)> {
     let mut prefix = qcnf.prefix.clone();
     let mut matrix = qcnf.matrix.clone();
+    // the existential literals the pass fixes, in application order:
+    // a composed strategy replays them as constants (guessing them
+    // afterwards from occurrence patterns is wrong once the fixpoint
+    // cascades — the differential checker caught exactly that)
+    let mut assigned_existentials: Vec<Lit> = Vec::new();
     loop {
         let mut block_of: HashMap<Var, (usize, QuantTy)> = HashMap::new();
         for (block, (quant, vars)) in prefix.iter().enumerate() {
@@ -338,6 +494,7 @@ fn simplify(qcnf: &QCNF) -> Option<QCNF> {
             next.push(lits);
         }
         matrix = next;
+        assigned_existentials.extend(forced.iter().filter(|l| !universal(l)));
         let assigned: HashSet<Var> = forced.iter().map(|l| l.var()).collect();
         for (_, vars) in &mut prefix {
             vars.retain(|v| !assigned.contains(v));
@@ -354,7 +511,7 @@ fn simplify(qcnf: &QCNF) -> Option<QCNF> {
     for (_, vars) in &mut prefix {
         vars.retain(|v| occurring.contains(v));
     }
-    Some(QCNF { prefix, matrix })
+    Some((QCNF { prefix, matrix }, assigned_existentials))
 }
 
 /// The *innermost* universal block, if enumerating it fits the budget.
@@ -505,7 +662,7 @@ fn normalized(qcnf: &QCNF) -> QCNF {
 /// at least three blocks.
 // the loop reads best as one piece: oracle setup, candidates, refinements
 #[allow(clippy::too_many_lines)]
-fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
+fn expansion_loop(qcnf: &QCNF, options: Options) -> Outcome {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -578,10 +735,10 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
         ROUNDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if rounds > 4096 || added_literals > 8_000_000 {
             tracing::warn!("expansion budget exhausted after {rounds} refinements");
-            return SolverResult::Unknown;
+            return Outcome::verdict(SolverResult::Unknown);
         }
         if !alpha.solve().unwrap() {
-            return SolverResult::Unsatisfiable;
+            return Outcome::verdict(SolverResult::Unsatisfiable);
         }
         let model: HashMap<Var, bool> = alpha
             .orig_model()
@@ -604,7 +761,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
         // room for one refinement round of fresh copies
         alpha.set_var_count(usize::try_from(next_copy_var).expect("fits") + total_vars + 2);
 
-        let (verdict, witness) = match &mut oracle {
+        let (verdict, witness, sub_strategy) = match &mut oracle {
             Some(solver) => {
                 let assumptions: Vec<i32> = candidate.iter().map(|l| l.to_dimacs()).collect();
                 let verdict = solver.solve_with_assumptions(&assumptions);
@@ -615,19 +772,32 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
                 let witness = solver
                     .universal_witness_candidate()
                     .map(|w| w.into_iter().map(Lit::from_dimacs).collect::<Vec<_>>());
-                (verdict, witness)
+                let strategy = (verdict == SolverResult::Satisfiable)
+                    .then(|| solver.skolem_model().map(|m| Strategy::Leaf(Box::new(m))))
+                    .flatten();
+                (verdict, witness, strategy)
             }
             None => {
                 // the recursion hands back the refuting assignment of the
                 // block below, which is exactly this loop's expansion
                 // witness
                 let restricted = restrict(qcnf, &candidate, 1);
-                solve_normalized(&normalized(&restricted), options)
+                let outcome = solve_normalized(&normalized(&restricted), options);
+                (outcome.verdict, outcome.witness, outcome.strategy)
             }
         };
         match verdict {
-            SolverResult::Satisfiable => return SolverResult::Satisfiable,
-            SolverResult::Unknown => return SolverResult::Unknown,
+            SolverResult::Satisfiable => {
+                // this candidate wins: it commits the outer block to
+                // constants, the sub-strategy handles the rest
+                return Outcome::sat(
+                    sub_strategy.map(|rest| Strategy::Choose {
+                        constants: candidate,
+                        rest: Box::new(rest),
+                    }),
+                );
+            }
+            SolverResult::Unknown => return Outcome::verdict(SolverResult::Unknown),
             SolverResult::Unsatisfiable => {}
         }
 
@@ -650,7 +820,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> SolverResult {
             ) {
                 // some clause is falsified by the witness alone: no
                 // outer choice can answer it
-                return SolverResult::Unsatisfiable;
+                return Outcome::verdict(SolverResult::Unsatisfiable);
             }
         }
     }
@@ -726,13 +896,17 @@ mod test {
     use crate::qcnf::strategy;
     use proptest::prelude::*;
 
+    static STRATEGIES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    static SAT_RESULTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     /// Checks both dispatch paths: with ∀-expansion enabled (the
     /// production default, which the small generated blocks always
     /// trigger) and with it disabled, so the CEGAR loops stay covered.
+    /// Every composed strategy is verified exhaustively.
     fn check(qcnf: &QCNF) -> Result<(), TestCaseError> {
         let expected = qcnf.brute_force();
         for budget in [EXPANSION_BUDGET, 0] {
-            let actual = solve_with_expansion_budget(qcnf, Options::default(), budget);
+            let (actual, strategy) = solve_certified(qcnf, Options::default(), budget);
             prop_assert_eq!(
                 actual,
                 expected,
@@ -740,6 +914,70 @@ mod test {
                 budget,
                 qcnf
             );
+            if actual == SolverResult::Satisfiable {
+                SAT_RESULTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if let Some(strategy) = strategy {
+                    STRATEGIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    check_strategy(qcnf, &strategy)?;
+                }
+            } else {
+                prop_assert!(
+                    strategy.is_none(),
+                    "a strategy was produced for an unsatisfiable instance:\n{}",
+                    qcnf
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// A composed strategy must satisfy the *original* matrix at every
+    /// universal assignment. Variables the strategy leaves undetermined
+    /// were dropped as irrelevant, so any value must do — checked by
+    /// trying both.
+    fn check_strategy(qcnf: &QCNF, strategy: &super::Strategy) -> Result<(), TestCaseError> {
+        let universals: Vec<i32> = qcnf
+            .prefix
+            .iter()
+            .filter(|(q, _)| *q == QuantTy::Forall)
+            .flat_map(|(_, vars)| vars.iter().map(|v| v.to_dimacs()))
+            .collect();
+        let all: Vec<i32> = qcnf
+            .prefix
+            .iter()
+            .flat_map(|(_, vars)| vars.iter().map(|v| v.to_dimacs()))
+            .chain(qcnf.matrix.iter().flatten().map(|l| l.var().to_dimacs()))
+            .collect();
+        for point in 0..1u32 << universals.len() {
+            let assignment: Vec<i32> = universals
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| if point >> i & 1 == 1 { v } else { -v })
+                .collect();
+            let mut values: HashMap<i32, bool> = HashMap::new();
+            strategy.evaluate(&assignment, &mut values);
+            for &l in &assignment {
+                values.insert(l.abs(), l > 0);
+            }
+            // undetermined variables are irrelevant; default them
+            let undetermined: Vec<i32> =
+                all.iter().copied().filter(|v| !values.contains_key(v)).collect();
+            for v in undetermined {
+                values.insert(v, false);
+            }
+            for clause in &qcnf.matrix {
+                let satisfied = clause
+                    .iter()
+                    .any(|l| values.get(&l.var().to_dimacs()) == Some(&l.is_positive()));
+                prop_assert!(
+                    satisfied,
+                    "strategy falsifies clause {:?} at {:?} on:\n{}\nstrategy: {:?}",
+                    clause,
+                    &assignment,
+                    qcnf,
+                    strategy
+                );
+            }
         }
         Ok(())
     }

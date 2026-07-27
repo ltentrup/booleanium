@@ -379,7 +379,14 @@ increasing order of ambition:
   correct, 0 wrong**, 2 alternation instances beyond the 30 s budget.
   Beyond the suite, the dispatch paths cross-validate each other
   (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
-  591 decided, **all agreeing**, zero disagreements. Design rationale and the algorithm
+  591 decided, **all agreeing**, zero disagreements. Satisfiable
+  answers now carry a **composed winning strategy**
+  (`alternation::solve_certified`) built from the pipeline's own
+  pieces — simplification's forced literals, an ∃-loop's winning
+  constants, a ∀-loop's per-cube sub-strategies, and the core's
+  certified Skolem models at the leaves — verified exhaustively in the
+  fuzz and available for 97% of satisfiable results (all but the
+  ∀-expanded ones). See `RESEARCH.md` (RQ6). Design rationale and the algorithm
   survey (dependency-aware ID, expansion, hybrids) in `RESEARCH.md`
   (RQ6).
 
