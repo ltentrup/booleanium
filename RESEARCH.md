@@ -733,29 +733,57 @@ returns an unsatisfiable core, and the assumptions the refutation used
 are exactly the literals the strategy needs. Everything else
 generalizes away, soundly, for one SAT call per round.
 
-It does not pay, for a reason the design did not anticipate: **the
-∀-loop's cubes are too short to generalize.** On `lights3` (22 blocks,
-the deepest suite instance) the 254 generalization queries had **0 of
-254** cube literals to drop — every candidate cube was a *single*
-literal, because by the time the recursion reaches a ∀-loop the
-expansion dispatch has eaten the small universal blocks and
-`normalized`/`restrict` hand each level one block at a time. On
-`ev-pr-4x4` it dropped 3 of 21 literals across 7 queries and saved
-exactly one round of 14. Rounds on `lights3`: 631 before, 631 after.
+How much it generalizes is decided entirely by **the width of the
+universal block**, and the two ends of that range were both measured.
 
-The cost, meanwhile, is quadratic in the very loop it was meant to
-shorten: the query encodes the *composed sub-strategy*, whose size
-grows with the rounds already taken (8.6M strategy nodes and 7.4M
-clauses across those 254 queries, ~34k nodes each), which turned
-`lights3` from 24 s into 49 s. Reverted. Region learning needs
-strategies built to be universal-independent — a dual-CEGAR
-abstraction in CAQE's sense — not point strategies generalized after
-the fact.
+| instance | block width | cube literals dropped |
+|---|---|---|
+| `lights3_021_0_009` | 1 | **0 of 254** |
+| `ev-pr-4x4` | ~3 | 3 of 21 |
+| `biu` | 46–47 | **828 188 of 955 933 (87%)** |
 
-One byproduct worth recording: across those 261 queries the
-sub-strategy was confirmed valid every time, which is 261 independent
-strategy verifications at *every* recursion level of two real
-instances, not just at the top.
+At width 1 there is nothing to drop — by the time the recursion
+reaches a ∀-loop, the expansion dispatch has eaten the small universal
+blocks and `normalized`/`restrict` hand each level one block at a
+time — and the query is pure overhead: `lights3` went from 24 s to
+49 s, its rounds unchanged at 631, because the query encodes the
+*composed sub-strategy*, whose size grows with the rounds already
+taken (8.6M strategy nodes across 254 queries). That cost is quadratic
+in the loop the technique is meant to shorten.
+
+Gating on block width fixes the overhead — narrow blocks skip the
+query, and `lights3` stays at 1.0 s — and on `biu`, the one suite
+instance with wide ∀ blocks, the mechanism works exactly as designed:
+cubes of ~30 literals shrink to ~4. It still does not crack the
+instance. Blocking 87%-shorter cubes out of 2⁴⁷ turned "gives up after
+4096 rounds in 2.2 s" into "still running after 120 s", same verdict.
+Reverted a second time.
+
+So the honest statement is not "the cubes are too short" — that is
+only the `lights3` half. It is: *region learning from a point strategy
+works, in proportion to block width, and no instance available to this
+project is both wide enough to benefit and close enough to solvable
+for the benefit to matter.* Reviving it needs a corpus with wide ∀
+blocks at recursion depth ≥ 4; the whole 701-instance
+`reduction-finding` corpus is at most three blocks with an outermost
+∃, so its ∀-loops never run at all. The version that would pay
+regardless is strategies built to be universal-independent — a
+dual-CEGAR abstraction in CAQE's sense — rather than point strategies
+generalized after the fact.
+
+One byproduct worth recording: across every one of those queries the
+sub-strategy was confirmed valid, which is thousands of independent
+strategy verifications at *every* recursion level of real instances,
+not just at the top.
+
+**On `biu`.** It is the only CADET-suite instance booleanium does not
+decide, and it is worth stating plainly that **CADET does not decide
+it either** (it gives up in 0.25 s; the suite's expected verdict comes
+from elsewhere). ∃48 ∀47 ∃52 ∀47 ∃49 ∀46 ∃498 defeats expansion (the
+blocks are 6x the expansion cap), memoization (4 sub-solves, no
+repeats), and region learning (above). It is not a tuning target for
+this architecture, which puts the suite effectively at **125 of 125
+decidable**.
 
 **Memoizing the recursion — the largest single win in RQ6.** The
 candidate loops restrict one block at a time, so an *outer* loop
@@ -803,12 +831,13 @@ so is every other suite instance — this is a pure win on the deep
 prefixes and invisible elsewhere. `biu` is now the only CADET instance
 the solver does not decide.
 
-Next steps in order of leverage: `biu`, which needs something
-genuinely new (∃48 over 46–47-variable ∀ blocks defeats expansion,
-blocking, and now memoization — 4102 rounds in a single loop with *no*
-repeated sub-solves); ∀-side persistent oracles (needs ∃∀ assumption
-support in the core), which is also the prerequisite for doing dual
-refinement properly; and the determinize-then-dispatch hybrid.
+Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
+assumption support in the core), which is also the prerequisite for
+doing dual refinement properly; and the determinize-then-dispatch
+hybrid. Neither has a failing instance to aim at any more — the suite
+is decided apart from `biu`, which is out of reach for the family —
+so both should be judged on a corpus with deeper prefixes than
+anything currently in the tree.
 
 ## Suggested experiment order
 

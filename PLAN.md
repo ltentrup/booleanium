@@ -381,7 +381,8 @@ increasing order of ambition:
   sub-solves repeat on the 22-block `lights3`, which went from 24.2 s
   to 1.0 s; the depth-6 arbiter from a timeout to 2.9 s). CADET suite:
   93 + 32 = **125 correct, 0 wrong, 0 timeouts**, `biu` the only
-  instance left undecided.
+  instance left undecided — and CADET does not decide `biu` either,
+  so the suite is effectively complete.
   Beyond the suite, the dispatch paths cross-validate each other
   (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
   591 decided, **all agreeing**, zero disagreements. Satisfiable
