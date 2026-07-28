@@ -442,6 +442,28 @@ of which a one-shot QDIMACS call can express.
   satisfiable and correctly rejected. Remaining gap to full
   realizability: a causal bounded strategy certifies the bound only —
   unbounded synthesis still needs an inductive argument on top.
+* **The alternating encoding closes the same gap at the source**
+  (`Unroller::alternating`, now that the solver handles deep
+  prefixes): unroll with *one quantifier alternation per step*,
+  `∀I₀ ∃C₀ ∀I₁ ∃C₁ …`, putting the gate, latch, and controllable
+  variables of step `t` in the existential block of that step.
+  Causality then holds by construction — it is a property of the
+  prefix, not something to audit afterwards — so a satisfiable answer
+  *is* realizability for the depth. The price is `2·depth` blocks
+  instead of two, which is exactly the capability RQ6 built. The two
+  encodings provably differ: on a "announce the next input" spec the
+  flat prefix is satisfiable at every depth while the reactive one is
+  refuted from depth 2, and the solver matches an independent
+  reactive-game oracle at each depth.
+
+  Worth recording, because it explains the causality results above:
+  across **20 000 random specs / 39 979 depth verdicts** the two
+  encodings *never once* disagreed. Clairvoyance is real but rare —
+  random sequential circuits essentially never reward seeing the
+  future — which is why the post-check kept answering "causal" on
+  everything except the hand-built swap-timing games. The honest
+  encoding is cheap to prefer now, but the flat one was not
+  misleading in practice.
 * **Which artifacts transfer across game depths — answered** (the RQ2
   dependency question, measured end to end): *learnt clauses* transfer
   (rebuilds are seeded with them; both modes benefit equally);
@@ -831,13 +853,37 @@ so is every other suite instance — this is a pure win on the deep
 prefixes and invisible elsewhere. `biu` is now the only CADET instance
 the solver does not decide.
 
-Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
-assumption support in the core), which is also the prerequisite for
-doing dual refinement properly; and the determinize-then-dispatch
-hybrid. Neither has a failing instance to aim at any more — the suite
-is decided apart from `biu`, which is out of reach for the family —
-so both should be judged on a corpus with deeper prefixes than
-anything currently in the tree.
+**A depth-scaling instrument** (`bench_games scale`). The suite is
+decided apart from `biu`, and every corpus in reach is 2QBF or 3QBF,
+so the remaining alternation work had nothing to be judged on. The
+reactive unrolling supplies it: a family generator with depth as a
+dial and verdicts known independently from the game oracle. Solving
+each depth and verifying each strategy:
+
+| family | verdict | deepest in ≤20 s | blocks | time |
+|---|---|---|---|---|
+| `arbiter-3-2` | unsat from depth 3 | 12 | **24** | 92 ms |
+| `ring-4` | sat | 12 | **24** | 2.0 s |
+| `arbiter-2-2` | sat | 8 | 16 | 22.1 s |
+| `corridor-4-stay` | sat | 7 | 14 | 6.5 s |
+
+Two things fall out. **Depth alone is not the difficulty**: the
+unsatisfiable arbiter runs essentially *linearly* to 24 blocks (5 ms
+at 6 blocks, 92 ms at 24) because a refutation is found near the front
+of the prefix and never has to enumerate what is behind it. What costs
+is a satisfiable answer, which has to build a strategy through every
+block: `arbiter-2-2` goes 67 ms → 1.05 s → 22.1 s across depths 6, 7,
+8, and `ring-4` grows ~2.5x per depth. And **every satisfiable answer
+at every depth carried a strategy that verified** — thirty-odd
+certified strategies at up to 24 blocks, well past anything the CADET
+suite (7 blocks at most) exercises.
+
+Next steps in order of leverage, now with a place to measure them:
+∀-side persistent oracles (needs ∃∀ assumption support in the core),
+which is also the prerequisite for doing dual refinement properly, and
+the determinize-then-dispatch hybrid. The scaling table says where to
+aim — the satisfiable families, which is where strategy construction
+dominates.
 
 ## Suggested experiment order
 

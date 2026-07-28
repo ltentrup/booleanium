@@ -436,6 +436,125 @@ impl Unroller {
         self.depth += 1;
     }
 
+    /// Unrolls the specification into a *reactive* QBF: one quantifier
+    /// alternation per time step, `∀I₀ ∃C₀ ∀I₁ ∃C₁ …`, with the gate,
+    /// latch, and controllable variables of step `t` in the existential
+    /// block of that step. A controllable input may therefore depend
+    /// only on the uncontrollable inputs of its own step and earlier —
+    /// which is what the game actually grants the controller.
+    ///
+    /// This is the honest counterpart of the flat ∀∃ unrolling
+    /// [`Unroller::step`] builds. That one puts every universal input
+    /// ahead of every controllable one, so its Skolem functions may
+    /// read the future; a satisfiable answer is only *necessary* for
+    /// realizability and needs [`Unroller::strategy_is_causal`]
+    /// afterwards. Here causality is a property of the prefix, so a
+    /// satisfiable answer *is* realizability for the depth — paid for
+    /// with `2·depth` quantifier blocks instead of two.
+    ///
+    /// The two encodings genuinely disagree: a pursuit game whose
+    /// obstacle can stand still is lost by a reactive robot but won by
+    /// a clairvoyant one that times its swaps around a known obstacle
+    /// sequence, so the flat unrolling reports satisfiable where this
+    /// one reports unsatisfiable (see `RESEARCH.md`, RQ5).
+    #[must_use]
+    pub fn alternating(&self, depth: u32) -> QCNF {
+        use crate::literal::{Lit, Var};
+        let var = Var::from_dimacs;
+
+        let mut prefix: Vec<(QuantTy, Vec<Var>)> = Vec::new();
+        let mut matrix: Vec<Vec<i32>> = Vec::new();
+        let mut next: i32 = 1;
+        let fresh = |next: &mut i32| {
+            let v = *next;
+            *next += 1;
+            v
+        };
+
+        // constants: the true literal and the latch reset values. They
+        // are quantifier-independent, so they ride in the first
+        // existential block.
+        let true_var = fresh(&mut next);
+        let mut existential: Vec<Var> = vec![var(true_var)];
+        matrix.push(vec![true_var]);
+        let mut latch_vars: Vec<i32> = Vec::new();
+        for latch in &self.aiger.latches {
+            let v = fresh(&mut next);
+            existential.push(var(v));
+            matrix.push(vec![if latch.reset == 1 { v } else { -v }]);
+            latch_vars.push(v);
+        }
+
+        for _ in 0..depth {
+            let mut universal: Vec<Var> = Vec::new();
+            let mut input_vars: Vec<i32> = Vec::with_capacity(self.aiger.inputs.len());
+            for &controllable in &self.controllable {
+                let v = fresh(&mut next);
+                if controllable {
+                    existential.push(var(v));
+                } else {
+                    universal.push(var(v));
+                }
+                input_vars.push(v);
+            }
+            let mut gate_vars: Vec<i32> = Vec::with_capacity(self.aiger.ands.len());
+            for _ in &self.aiger.ands {
+                let v = fresh(&mut next);
+                existential.push(var(v));
+                gate_vars.push(v);
+            }
+            // an AIGER literal at this step, as a DIMACS literal
+            let lit = |aiger_lit: u64| -> i32 {
+                let v = match aiger_lit {
+                    0 => return -true_var,
+                    1 => return true_var,
+                    _ => {
+                        let index = usize::try_from(aiger_lit / 2).expect("fits");
+                        match self.classes[index].expect("defined variable") {
+                            Class::Input(pos) => input_vars[pos],
+                            Class::Latch(idx) => latch_vars[idx],
+                            Class::Gate(idx) => gate_vars[idx],
+                        }
+                    }
+                };
+                if aiger_lit % 2 == 0 {
+                    v
+                } else {
+                    -v
+                }
+            };
+            for (idx, and) in self.aiger.ands.iter().enumerate() {
+                let lhs = gate_vars[idx];
+                matrix.push(vec![-lhs, lit(and.rhs0)]);
+                matrix.push(vec![-lhs, lit(and.rhs1)]);
+                matrix.push(vec![lhs, -lit(and.rhs0), -lit(and.rhs1)]);
+            }
+            // no error signal may fire at this step
+            for &out in &self.aiger.outputs {
+                matrix.push(vec![-lit(out)]);
+            }
+            // the next state, defined from this step and read by the next
+            let mut advanced: Vec<i32> = Vec::with_capacity(self.aiger.latches.len());
+            for latch in &self.aiger.latches {
+                let v = fresh(&mut next);
+                existential.push(var(v));
+                matrix.push(vec![-v, lit(latch.next)]);
+                matrix.push(vec![v, -lit(latch.next)]);
+                advanced.push(v);
+            }
+            latch_vars = advanced;
+            prefix.push((QuantTy::Forall, universal));
+            prefix.push((QuantTy::Exists, std::mem::take(&mut existential)));
+        }
+        QCNF {
+            prefix,
+            matrix: matrix
+                .into_iter()
+                .map(|clause| clause.into_iter().map(Lit::from_dimacs).collect())
+                .collect(),
+        }
+    }
+
     /// Checks whether a strategy circuit for this unrolling (an ASCII
     /// AIGER emitted by `SkolemModel::to_aiger` with numeric labels) is
     /// *causal*: every controllable input's value depends only on
@@ -643,6 +762,65 @@ mod test {
         true
     }
 
+    /// The *reactive* bounded-safety oracle matching the alternating
+    /// unrolling: at every step the environment moves first and the
+    /// controller answers, so the controller's move may depend on the
+    /// environment's moves so far but not on its future ones. Played
+    /// out recursively over the concrete latch state, which is what
+    /// makes it independent of everything the solver does.
+    fn reactive_safe(aiger: &Aiger, is_controllable: &[bool], k: u32) -> bool {
+        let positions = |want: bool| -> Vec<usize> {
+            is_controllable
+                .iter()
+                .enumerate()
+                .filter(|&(_, &c)| c == want)
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let (uncontrollable, controllable) = (positions(false), positions(true));
+        let state: Vec<bool> = aiger.latches.iter().map(|l| l.reset == 1).collect();
+        reactive_from(aiger, &uncontrollable, &controllable, &state, k)
+    }
+
+    /// One step of [`reactive_safe`] from a concrete state: for every
+    /// environment move there must be a controller move that stays safe
+    /// now and keeps the remaining steps winnable.
+    fn reactive_from(
+        aiger: &Aiger,
+        uncontrollable: &[usize],
+        controllable: &[usize],
+        state: &[bool],
+        k: u32,
+    ) -> bool {
+        if k == 0 {
+            return true;
+        }
+        let var = |l: u64| usize::try_from(l / 2).unwrap();
+        (0..1u64 << uncontrollable.len()).all(|env| {
+            (0..1u64 << controllable.len()).any(|ctl| {
+                let mut values = vec![false; usize::try_from(aiger.max_var).unwrap() + 1];
+                for (bit, &pos) in uncontrollable.iter().enumerate() {
+                    values[var(aiger.inputs[pos])] = env >> bit & 1 == 1;
+                }
+                for (bit, &pos) in controllable.iter().enumerate() {
+                    values[var(aiger.inputs[pos])] = ctl >> bit & 1 == 1;
+                }
+                for (idx, latch) in aiger.latches.iter().enumerate() {
+                    values[var(latch.lit)] = state[idx];
+                }
+                for and in &aiger.ands {
+                    values[var(and.lhs)] = litval(&values, and.rhs0) && litval(&values, and.rhs1);
+                }
+                if aiger.outputs.iter().any(|&out| litval(&values, out)) {
+                    return false;
+                }
+                let next: Vec<bool> =
+                    aiger.latches.iter().map(|l| litval(&values, l.next)).collect();
+                reactive_from(aiger, uncontrollable, controllable, &next, k - 1)
+            })
+        })
+    }
+
     /// The clairvoyant bounded-safety oracle matching the ∀∃ unrolling
     /// semantics: for every uncontrollable input sequence there must be a
     /// controllable input sequence keeping every step safe.
@@ -691,6 +869,116 @@ mod test {
             verdicts.push(result);
         }
         verdicts
+    }
+
+    #[cfg(feature = "probe")]
+    static ALT_DEPTHS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    #[cfg(feature = "probe")]
+    static ALT_DISAGREE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    /// Solves the alternating unrolling of a spec at every depth up to
+    /// `k` and checks each verdict against the reactive game oracle,
+    /// which shares no code with the solver. Satisfiable results carry
+    /// a composed strategy, verified against the instance.
+    fn check_alternating(text: &str, k: u32) -> Vec<SolverResult> {
+        let aiger = parse_aag(text).expect("parses");
+        let is_controllable: Vec<bool> =
+            aiger.input_names.iter().map(|n| n.as_deref().is_some_and(is_controllable)).collect();
+        let unroller = Unroller::new(text).expect("parses");
+        let mut verdicts = Vec::new();
+        for t in 1..=k {
+            let qcnf = unroller.alternating(t);
+            let (result, strategy) = crate::alternation::solve_certified(
+                &qcnf,
+                crate::incdet::Options::default(),
+                crate::alternation::EXPANSION_BUDGET,
+            );
+            let expected = if reactive_safe(&aiger, &is_controllable, t) {
+                SolverResult::Satisfiable
+            } else {
+                SolverResult::Unsatisfiable
+            };
+            assert_eq!(result, expected, "depth {t} of:\n{text}");
+            #[cfg(feature = "probe")]
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                ALT_DEPTHS.fetch_add(1, Relaxed);
+                if clairvoyant_safe(&aiger, &is_controllable, t)
+                    != (expected == SolverResult::Satisfiable)
+                {
+                    ALT_DISAGREE.fetch_add(1, Relaxed);
+                }
+            }
+            if result == SolverResult::Satisfiable {
+                let strategy = strategy.expect("a satisfiable answer carries a strategy");
+                assert!(
+                    crate::alternation::verify_strategy(&qcnf, &strategy),
+                    "strategy at depth {t} of:\n{text}"
+                );
+            }
+            verdicts.push(result);
+        }
+        verdicts
+    }
+
+    #[test]
+    fn alternating_latch_delay() {
+        // the same specs as the flat unrolling, now with one alternation
+        // per step: the reactive oracle and the solver must agree
+        let text = "aag 2 1 1 1 0\n2\n4 2\n4\ni0 u\n";
+        assert_eq!(
+            check_alternating(text, 2),
+            [SolverResult::Satisfiable, SolverResult::Unsatisfiable]
+        );
+    }
+
+    #[test]
+    fn alternating_copycat() {
+        // c_t = u_t keeps the error false, and it is causal, so the
+        // reactive prefix is satisfiable at every depth just like the
+        // flat one
+        let text = "aag 5 2 0 1 3\n2\n4\n10\n6 2 5\n8 3 4\n10 7 9\ni0 u\ni1 controllable_c\n";
+        assert!(check_alternating(text, 4).iter().all(|&v| v == SolverResult::Satisfiable));
+    }
+
+    #[test]
+    fn alternating_refuses_clairvoyance() {
+        // The controller must announce the *next* input: latch0 stores
+        // c, a "started" latch masks the first step, and the error is
+        // `started AND (latch0 xor u)`. A reactive controller picks c_t
+        // before seeing u_{t+1} and the environment answers it, so the
+        // game is lost from depth 2; a clairvoyant one reads the whole
+        // input sequence up front and simply copies it.
+        let text = concat!(
+            "aag 8 2 2 1 4\n",
+            "2\n4\n",             // u, controllable_c
+            "6 4 0\n",            // latch0 := c
+            "8 1 0\n",            // started := true
+            "16\n",               // error
+            "10 6 3\n",           // latch0 AND not u
+            "12 7 2\n",           // not latch0 AND u
+            "14 11 13\n",         // NOR of the two, so 15 is the xor
+            "16 8 15\n",          // started AND xor
+            "i0 u\ni1 controllable_c\n"
+        );
+        let aiger = parse_aag(text).expect("parses");
+        let is_controllable: Vec<bool> =
+            aiger.input_names.iter().map(|n| n.as_deref().is_some_and(is_controllable)).collect();
+
+        // the flat ∀∃ prefix lets the Skolem functions read the future
+        for k in 1..=3 {
+            assert!(clairvoyant_safe(&aiger, &is_controllable, k), "clairvoyant depth {k}");
+        }
+        // the alternating prefix does not, and the solver agrees with
+        // the reactive oracle at every depth
+        assert_eq!(
+            check_alternating(text, 3),
+            [
+                SolverResult::Satisfiable,
+                SolverResult::Unsatisfiable,
+                SolverResult::Unsatisfiable
+            ]
+        );
     }
 
     #[test]
@@ -789,6 +1077,20 @@ mod test {
                 text.push_str(&format!("i{i} {name}{i}\n"));
             }
             check_unrolling(&text, k, continuation);
+            // the same spec through the reactive prefix, against the
+            // reactive oracle: one alternation per step exercises the
+            // alternation front-end on structured deep prefixes, which
+            // the random-QCNF fuzz does not produce
+            check_alternating(&text, k);
+            #[cfg(feature = "probe")]
+            {
+                use std::sync::atomic::Ordering::Relaxed;
+                eprintln!(
+                    "alternating: {} depths, {} disagree with the clairvoyant encoding",
+                    ALT_DEPTHS.load(Relaxed),
+                    ALT_DISAGREE.load(Relaxed)
+                );
+            }
         }
     }
 

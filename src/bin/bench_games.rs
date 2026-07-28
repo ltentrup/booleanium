@@ -5,7 +5,9 @@
 //! on the access pattern of a bounded synthesis loop. Run with
 //! `cargo run --release --bin bench_games`.
 
-use booleanium::{aiger::Unroller, incdet::Options, incremental::IncrementalSolver, SolverResult};
+use booleanium::{
+    aiger::Unroller, alternation, incdet::Options, incremental::IncrementalSolver, SolverResult,
+};
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -335,6 +337,62 @@ fn main() {
         let strategy = solver.skolem_model().expect("satisfiable").to_aiger(&|_| None);
         let causal = unroller.strategy_is_causal(&strategy).expect("strategy parses");
         println!("{name:<24} strategy causal: {causal}");
+    }
+
+    // Depth scaling of the *reactive* encoding: one quantifier
+    // alternation per step, so the prefix grows with the depth instead
+    // of staying at two blocks. This is the project's only source of
+    // deep prefixes with independently known verdicts — the CADET suite
+    // tops out at seven blocks and every corpus in reach is 2QBF or
+    // 3QBF — so it is what the remaining alternation work has to be
+    // judged on.
+    println!();
+    for (name, text) in [
+        ("scale-arbiter-2-2", arbiter(2, 2)),
+        ("scale-arbiter-3-2", arbiter(3, 2)),
+        ("scale-ring-4", pursuit(4, true, false)),
+        ("scale-corridor-4-stay", pursuit(4, false, true)),
+    ] {
+        if let Some(filter) = std::env::args().nth(1) {
+            if !name.contains(&filter) {
+                continue;
+            }
+        }
+        let unroller = Unroller::new(&text).expect("generated spec parses");
+        for depth in 1..=12 {
+            let qcnf = unroller.alternating(depth);
+            let blocks = qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
+            let start = Instant::now();
+            let (result, strategy) = alternation::solve_certified(
+                &qcnf,
+                Options::default(),
+                alternation::EXPANSION_BUDGET,
+            );
+            let elapsed = start.elapsed();
+            let certified = match &strategy {
+                Some(strategy) => {
+                    if alternation::verify_strategy(&qcnf, strategy) {
+                        "certified"
+                    } else {
+                        "INVALID"
+                    }
+                }
+                None => "",
+            };
+            let verdict = match result {
+                SolverResult::Satisfiable => "sat",
+                SolverResult::Unsatisfiable => "unsat",
+                SolverResult::Unknown => "unknown",
+            };
+            println!(
+                "{name:<16} depth {depth:>2} {blocks:>3} blocks {:>6} vars {:>7} clauses                  {verdict:>7} {elapsed:>12.3?} {certified}",
+                qcnf.prefix.iter().map(|(_, vars)| vars.len()).sum::<usize>(),
+                qcnf.matrix.len(),
+            );
+            if elapsed.as_secs_f64() > 20.0 || result == SolverResult::Unknown {
+                break;
+            }
+        }
     }
     println!("total: {:.3?}", total.elapsed());
 }

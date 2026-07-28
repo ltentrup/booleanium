@@ -382,7 +382,12 @@ increasing order of ambition:
   to 1.0 s; the depth-6 arbiter from a timeout to 2.9 s). CADET suite:
   93 + 32 = **125 correct, 0 wrong, 0 timeouts**, `biu` the only
   instance left undecided — and CADET does not decide `biu` either,
-  so the suite is effectively complete.
+  so the suite is effectively complete. Beyond it, the *reactive*
+  game unrolling (`Unroller::alternating`, one alternation per time
+  step) supplies deep prefixes with independently known verdicts:
+  **24 quantifier blocks** solved and certified (`bench_games scale`),
+  with unsatisfiable depths scaling linearly and satisfiable ones
+  paying for strategy construction.
   Beyond the suite, the dispatch paths cross-validate each other
   (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
   591 decided, **all agreeing**, zero disagreements. Satisfiable
