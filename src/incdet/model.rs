@@ -151,6 +151,30 @@ impl SkolemModel {
         vars
     }
 
+    /// A rough node count of the encoded functions.
+    pub(crate) fn size(&self) -> usize {
+        let chain = |chain: &[(Lit, Function)]| {
+            chain
+                .iter()
+                .map(|(_, f)| match f {
+                    Function::Constant => 1,
+                    Function::Implications(clauses) => {
+                        clauses.iter().map(Vec::len).sum::<usize>() + 1
+                    }
+                })
+                .sum::<usize>()
+        };
+        chain(&self.final_chain)
+            + self
+                .regions
+                .iter()
+                .map(|region| match region {
+                    Region::Response { cube, response } => cube.len() + response.len(),
+                    Region::Closed { cube, chain: c } => cube.len() + chain(c),
+                })
+                .sum::<usize>()
+    }
+
     /// Evaluates the model at the given universal assignment (DIMACS
     /// literals; every universal variable must be covered). Returns the
     /// values of all existential variables the model defines.

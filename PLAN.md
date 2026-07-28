@@ -375,8 +375,13 @@ increasing order of ambition:
   which a leaf-solve probe caught as *zero* leaf solves in twenty
   seconds — and speculative expansions (those leaving more than two
   blocks, so the result still goes through the loops) get a much
-  smaller budget than collapsing ones. CADET suite: 93 + 29 = **122
-  correct, 0 wrong**, 2 alternation instances beyond the 30 s budget.
+  smaller budget than collapsing ones. Finally, the recursion is
+  *memoized* on a 128-bit fingerprint of each simplified sub-instance,
+  because the candidate loops re-trigger whole subtrees (363 of 377
+  sub-solves repeat on the 22-block `lights3`, which went from 24.2 s
+  to 1.0 s; the depth-6 arbiter from a timeout to 2.9 s). CADET suite:
+  93 + 32 = **125 correct, 0 wrong, 0 timeouts**, `biu` the only
+  instance left undecided.
   Beyond the suite, the dispatch paths cross-validate each other
   (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
   591 decided, **all agreeing**, zero disagreements. Satisfiable

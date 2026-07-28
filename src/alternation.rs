@@ -57,6 +57,15 @@ pub static LEAF_VARS: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 #[cfg(feature = "probe")]
 pub static LEAF_CLAUSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(feature = "probe")]
+pub static MEMO_PROBES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static MEMO_HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static MEMO_KEY_UNITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
+pub static MEMO_STRATEGY_UNITS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+#[cfg(feature = "probe")]
 pub static ROUNDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Clause budget for ∀-expansion: a universal block is enumerated away
@@ -178,6 +187,25 @@ impl Strategy {
                     .collect();
                 values.extend(model.evaluate(&leaf));
             }
+        }
+    }
+
+    /// A rough node count, used to keep the sub-solve memo within its
+    /// size budget.
+    fn size(&self) -> usize {
+        match self {
+            Strategy::Done => 1,
+            Strategy::Fixed { assignments, rest }
+            | Strategy::Choose { constants: assignments, rest } => {
+                assignments.len() + rest.size()
+            }
+            Strategy::Split { cases } => {
+                cases.iter().map(|(cube, sub)| cube.len() + sub.size()).sum::<usize>() + 1
+            }
+            Strategy::Expanded { copies, rest } => {
+                copies.iter().map(|(cube, r)| cube.len() + r.len()).sum::<usize>() + rest.size()
+            }
+            Strategy::Leaf(model) => model.size(),
         }
     }
 
@@ -429,6 +457,7 @@ pub fn verify_strategy(qcnf: &QCNF, strategy: &Strategy) -> bool {
 /// The result of an internal solve: the verdict, the refuting
 /// assignment of an outermost universal block (for the ∃-loop above),
 /// and a composed winning strategy when one is available.
+#[derive(Clone)]
 struct Outcome {
     verdict: SolverResult,
     witness: Option<Vec<Lit>>,
@@ -442,6 +471,119 @@ impl Outcome {
 
     fn sat(strategy: Option<Strategy>) -> Self {
         Self { verdict: SolverResult::Satisfiable, witness: None, strategy }
+    }
+}
+
+/// A memo key: a 128-bit fingerprint of the instance's canonical form
+/// — the prefix in order, and the matrix as a *multiset* of clauses,
+/// each with its literals sorted, combined commutatively so the clause
+/// order does not matter.
+///
+/// Fingerprints rather than the canonical form itself, because the
+/// form is as large as the instance and the recursion holds hundreds
+/// of them: storing 16 bytes instead of a matrix copy is what makes
+/// the memo affordable. Two distinct instances collide with
+/// probability under `n^2 / 2^129`, i.e. below 1e-25 for the largest
+/// tables this ever builds — many orders of magnitude below the rate
+/// at which the hardware miscomputes the same answer.
+type CacheKey = u128;
+
+fn cache_key(qcnf: &QCNF) -> CacheKey {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // two independently salted passes over the same canonical form
+    let digest = |salt: u8, clause: &[i32]| {
+        let mut hasher = DefaultHasher::new();
+        salt.hash(&mut hasher);
+        clause.hash(&mut hasher);
+        hasher.finish()
+    };
+    let mut clauses: u128 = 0;
+    let mut lits: Vec<i32> = Vec::new();
+    for clause in &qcnf.matrix {
+        lits.clear();
+        lits.extend(clause.iter().map(|l| l.to_dimacs()));
+        lits.sort_unstable();
+        lits.dedup();
+        let wide = u128::from(digest(0, &lits)) << 64 | u128::from(digest(1, &lits));
+        // commutative, and duplicated clauses stay distinguishable
+        clauses = clauses.wrapping_add(wide);
+    }
+    let prefix: Vec<i32> = qcnf
+        .prefix
+        .iter()
+        .flat_map(|(q, vars)| {
+            std::iter::once(if *q == QuantTy::Forall { -1 } else { 0 })
+                .chain(vars.iter().map(|v| v.to_dimacs()))
+        })
+        .collect();
+    let mut hasher = DefaultHasher::new();
+    clauses.hash(&mut hasher);
+    prefix.hash(&mut hasher);
+    let low = hasher.finish();
+    let mut hasher = DefaultHasher::new();
+    2u8.hash(&mut hasher);
+    clauses.hash(&mut hasher);
+    prefix.hash(&mut hasher);
+    u128::from(hasher.finish()) << 64 | u128::from(low)
+}
+
+/// Memo of the recursion's sub-solves. The candidate loops restrict
+/// one block at a time, and different candidates of an *outer* loop
+/// routinely restrict to the same inner instance — on the deepest
+/// suite instance 363 of 377 sub-solves repeat one already answered —
+/// so every level looks up its simplified instance before dispatching.
+///
+/// The keys are over *simplified, normalized* instances, which is
+/// where the repeats become visible: distinct restrictions collapse
+/// onto the same instance only after their units and pure literals are
+/// propagated away.
+///
+/// Two guards keep it from costing more than it saves: the table stops
+/// growing once the strategies it holds reach [`MEMO_BUDGET`] nodes,
+/// and a recursion whose sub-solves simply do not repeat switches the
+/// memo off rather than paying for a fingerprint per call.
+#[derive(Default)]
+struct Cache {
+    entries: HashMap<CacheKey, Outcome>,
+    stored: usize,
+    probes: usize,
+    hits: usize,
+}
+
+/// Strategy nodes the memo may hold before it stops growing. The
+/// fingerprints themselves are 16 bytes each, so the cached strategies
+/// are all that can grow.
+const MEMO_BUDGET: usize = 32_000_000;
+
+/// Probes to take before judging the hit rate, and the reciprocal of
+/// the rate below which the memo switches itself off.
+const MEMO_WARMUP: usize = 256;
+const MEMO_MIN_RATE: usize = 8;
+
+impl Cache {
+    /// Looks the instance up, returning its key when the caller should
+    /// insert the result afterwards.
+    fn probe(&mut self, qcnf: &QCNF) -> (Option<Outcome>, Option<CacheKey>) {
+        let cold = self.probes > MEMO_WARMUP && self.hits * MEMO_MIN_RATE < self.probes;
+        if self.stored >= MEMO_BUDGET || cold {
+            return (None, None);
+        }
+        self.probes += 1;
+        let key = cache_key(qcnf);
+        match self.entries.get(&key) {
+            Some(hit) => {
+                self.hits += 1;
+                (Some(hit.clone()), None)
+            }
+            None => (None, Some(key)),
+        }
+    }
+
+    fn insert(&mut self, key: CacheKey, outcome: &Outcome) {
+        self.stored += outcome.strategy.as_ref().map_or(0, Strategy::size);
+        self.entries.insert(key, outcome.clone());
     }
 }
 
@@ -504,7 +646,7 @@ pub fn solve_certified(
         inversions.push(copies);
         current = normalized(&expanded);
     }
-    let outcome = solve_normalized(&current, options);
+    let outcome = solve_normalized(&current, options, &mut Cache::default());
     let strategy = wrap(forced, outcome.strategy.map(|rest| invert(&inversions, rest)));
     (outcome.verdict, strategy)
 }
@@ -535,7 +677,7 @@ fn max_var(qcnf: &QCNF) -> i32 {
 /// of that block — the expansion witness of the ∃-loop one level up
 /// (already computed by the ∀-loop and by the 2QBF core; threading it
 /// upgrades deep recursion from blocking-only to strong refinements).
-fn solve_normalized(qcnf: &QCNF, options: Options) -> Outcome {
+fn solve_normalized(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
     // Restrictions and expansions manufacture units and pure literals by
     // the hundred, so simplify before dispatching; without this every
     // recursion level rediscovers them. The 2QBF core does its own
@@ -588,9 +730,18 @@ fn solve_normalized(qcnf: &QCNF, options: Options) -> Outcome {
             .then(|| Strategy::Leaf(Box::new(solver.skolem_model())));
         return Outcome { verdict, witness, strategy: wrap(forced, strategy) };
     }
-    let inner = match qcnf.prefix[0].0 {
-        QuantTy::Exists => expansion_loop(qcnf, options),
-        QuantTy::Forall => forall_loop(qcnf, options),
+    let (hit, key) = cache.probe(qcnf);
+    let inner = if let Some(hit) = hit {
+        hit
+    } else {
+        let inner = match qcnf.prefix[0].0 {
+            QuantTy::Exists => expansion_loop(qcnf, options, cache),
+            QuantTy::Forall => forall_loop(qcnf, options, cache),
+        };
+        if let Some(key) = key {
+            cache.insert(key, &inner);
+        }
+        inner
     };
     Outcome { strategy: wrap(forced, inner.strategy), ..inner }
 }
@@ -610,7 +761,7 @@ fn wrap(forced: Vec<Lit>, strategy: Option<Strategy>) -> Option<Strategy> {
 /// recursion and blow up; the dual loop keeps the matrix fixed. Strong
 /// dual refinements would need regions of answered candidates — future
 /// work, the weak blocking clause keeps the loop total.)
-fn forall_loop(qcnf: &QCNF, options: Options) -> Outcome {
+fn forall_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -659,7 +810,7 @@ fn forall_loop(qcnf: &QCNF, options: Options) -> Outcome {
             })
             .collect();
         let restricted = normalized(&restrict(qcnf, &candidate, 1));
-        let outcome = solve_normalized(&restricted, options);
+        let outcome = solve_normalized(&restricted, options, cache);
         match outcome.verdict {
             // the candidate is a winning universal prefix move — and the
             // expansion witness for the ∃-loop above
@@ -970,7 +1121,7 @@ fn normalized(qcnf: &QCNF) -> QCNF {
 /// at least three blocks.
 // the loop reads best as one piece: oracle setup, candidates, refinements
 #[allow(clippy::too_many_lines)]
-fn expansion_loop(qcnf: &QCNF, options: Options) -> Outcome {
+fn expansion_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
     use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
 
     let outer: Vec<Var> = qcnf.prefix[0].1.clone();
@@ -1090,7 +1241,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options) -> Outcome {
                 // block below, which is exactly this loop's expansion
                 // witness
                 let restricted = restrict(qcnf, &candidate, 1);
-                let outcome = solve_normalized(&normalized(&restricted), options);
+                let outcome = solve_normalized(&normalized(&restricted), options, cache);
                 (outcome.verdict, outcome.witness, outcome.strategy)
             }
         };

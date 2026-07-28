@@ -546,14 +546,13 @@ judged against what this codebase already has:
 
 **Status: implemented, validated, and measured** (`src/alternation.rs`,
 CLI-dispatched for QDIMACS beyond two blocks). On the CADET suite it
-lifts the score from 93 correct + 33 unsupported to **122 correct, 0
-wrong** — 29 of the 33 alternation instances solve within 30 s (both
-`pec_adder` pairs, `adder2`-class, planning, blocks-world, 7-block
-circuit equivalence, a 22-block lights-out puzzle). Two survive: `biu`
+lifts the score from 93 correct + 33 unsupported to **125 correct, 0
+wrong** — 32 of the 33 alternation instances solve within 30 s, and
+none of them by a narrow margin (both `pec_adder` pairs,
+`adder2`-class, planning, blocks-world, 7-block circuit equivalence, a
+22-block lights-out puzzle, the depth-6 arbiter). One survives: `biu`
 (∃48 over 46–47-variable universal blocks — neither expansion nor
-blocking-based refinement dents 2⁴⁸) and the depth-6 arbiter (six
-alternations of 5-variable ∀ blocks, each expansion affordable but
-too many of them).
+blocking-based refinement dents 2⁴⁸).
 
 The pipeline, outermost first:
 
@@ -720,7 +719,7 @@ SAT check and independently by the external Python simulator sampling
 the emitted AIGER. (An earlier count of 7 of 13 recorded here was read
 off a sweep that had not finished; the pre-inversion coverage was
 worse than 7/19, not better.) The suite itself is unchanged at 123
-correct, 0 wrong.
+correct, 0 wrong at the time (125 after the memo below).
 
 **Strong dual refinements — implemented, measured, rejected.** The
 ∀-loop blocks one *point* per round: it proposes a universal candidate,
@@ -758,10 +757,58 @@ sub-strategy was confirmed valid every time, which is 261 independent
 strategy verifications at *every* recursion level of two real
 instances, not just at the top.
 
-Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
-assumption support in the core), which is also the prerequisite for
-doing dual refinement properly; and the determinize-then-dispatch
-hybrid.
+**Memoizing the recursion — the largest single win in RQ6.** The
+candidate loops restrict one block at a time, so an *outer* loop
+re-triggers its whole subtree per candidate, and different candidates
+routinely restrict onto the same inner instance. A probe counting
+distinct sub-solves made the scale obvious: on the 22-block
+`lights3_021_0_009`, **363 of 377** recursive sub-solves repeat an
+instance already answered. `solve_normalized` now looks its instance
+up in a memo before dispatching.
+
+Two design choices decide whether it pays.
+
+*Key on the simplified, normalized instance.* That is where the
+repeats become visible — distinct restrictions collapse onto the same
+instance only after their units and pure literals are propagated away.
+Keying on the incoming instance would find almost nothing.
+
+*Store a fingerprint, not the instance.* The first version used the
+canonical form itself as the key, which is exactly as large as the
+instance: the memo blew a 4M-unit budget after **14 entries** and gave
+back only half the speedup (13.5 s instead of 1.0 s). The key is now a
+128-bit hash — clause literals sorted, clause hashes combined
+commutatively so clause order is irrelevant, addition rather than XOR
+so duplicated clauses stay distinguishable. Two distinct instances
+collide with probability under `n²/2^129`, below 1e-25 for the largest
+table this builds, which is many orders of magnitude under the rate at
+which the hardware miscomputes the same answer. With 16-byte keys the
+only thing that grows is the cached strategies, so the budget is on
+those, and a recursion whose sub-solves do not repeat switches the
+memo off after a warmup rather than paying a fingerprint per call.
+
+Measured:
+
+| | before | after |
+|---|---|---|
+| `lights3_021_0_009` (22 blocks) | 24.2 s, 143 MB | **1.0 s**, 122 MB |
+| `arbiter-05 …depth-6` | >30 s timeout | **2.9 s** |
+| `BLOCKS4iii.7` | 1.95 s | 1.99 s |
+| CADET suite | 123 correct, 2 timeouts | **125 correct, 0 timeouts** |
+
+Peak memory *falls* on `lights3` despite the table, because the memo
+also avoids rebuilding the intermediate instances. The 701-instance
+cross-validation is unchanged (591 decided, zero disagreements), and
+so is every other suite instance — this is a pure win on the deep
+prefixes and invisible elsewhere. `biu` is now the only CADET instance
+the solver does not decide.
+
+Next steps in order of leverage: `biu`, which needs something
+genuinely new (∃48 over 46–47-variable ∀ blocks defeats expansion,
+blocking, and now memoization — 4102 rounds in a single loop with *no*
+repeated sub-solves); ∀-side persistent oracles (needs ∃∀ assumption
+support in the core), which is also the prerequisite for doing dual
+refinement properly; and the determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 
