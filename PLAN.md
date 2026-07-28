@@ -373,9 +373,10 @@ increasing order of ambition:
   hoisted to a single top-level fixpoint — reapplying it inside the
   recursion made deep prefixes redo the matrix doubling per candidate,
   which a leaf-solve probe caught as *zero* leaf solves in twenty
-  seconds — and speculative expansions (those leaving more than two
-  blocks, so the result still goes through the loops) get a much
-  smaller budget than collapsing ones. Finally, the recursion is
+  seconds — and expansion is taken *only* when it collapses the prefix
+  onto the 2QBF core, never speculatively (measured: on a 16-block
+  reactive game the fixpoint grew 245 clauses into 46 602 and took
+  22 s, against 31 ms for the loops alone). Finally, the recursion is
   *memoized* on a 128-bit fingerprint of each simplified sub-instance,
   because the candidate loops re-trigger whole subtrees (363 of 377
   sub-solves repeat on the 22-block `lights3`, which went from 24.2 s
@@ -385,9 +386,13 @@ increasing order of ambition:
   so the suite is effectively complete. Beyond it, the *reactive*
   game unrolling (`Unroller::alternating`, one alternation per time
   step) supplies deep prefixes with independently known verdicts:
-  **24 quantifier blocks** solved and certified (`bench_games scale`),
-  with unsatisfiable depths scaling linearly and satisfiable ones
-  paying for strategy construction.
+  **32 quantifier blocks** solved in `bench_games scale` (unsat in
+  9.5 ms, sat in 198 ms), certified to 22 blocks. That family retired
+  *speculative* ∀-expansion — expanding a block whose result goes back
+  to the loops rather than to the core — which cost 22 s where the
+  loops alone take 31 ms, and it located the next bottleneck: the
+  composed strategy triples in size per alternation because
+  composition deep-clones sub-strategies instead of sharing them.
   Beyond the suite, the dispatch paths cross-validate each other
   (`--no-expansion`) on 701 multi-block `reduction-finding` instances:
   591 decided, **all agreeing**, zero disagreements. Satisfiable

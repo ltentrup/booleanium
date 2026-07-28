@@ -347,11 +347,16 @@ fn main() {
     // 3QBF — so it is what the remaining alternation work has to be
     // judged on.
     println!();
-    for (name, text) in [
-        ("scale-arbiter-2-2", arbiter(2, 2)),
-        ("scale-arbiter-3-2", arbiter(3, 2)),
-        ("scale-ring-4", pursuit(4, true, false)),
-        ("scale-corridor-4-stay", pursuit(4, false, true)),
+    // per-family depth caps; the solve stays cheap well past these,
+    // what stops the run first is the size of the composed strategy
+    /// Strategy nodes above which the benchmark reports the size and
+    /// skips the SAT check.
+    const VERIFY_LIMIT: usize = 100_000;
+    for (name, text, max_depth) in [
+        ("scale-arbiter-2-2", arbiter(2, 2), 12),
+        ("scale-arbiter-3-2", arbiter(3, 2), 16),
+        ("scale-ring-4", pursuit(4, true, false), 16),
+        ("scale-corridor-4-stay", pursuit(4, false, true), 10),
     ] {
         if let Some(filter) = std::env::args().nth(1) {
             if !name.contains(&filter) {
@@ -359,8 +364,15 @@ fn main() {
             }
         }
         let unroller = Unroller::new(&text).expect("generated spec parses");
-        for depth in 1..=12 {
+        for depth in 1..=max_depth {
             let qcnf = unroller.alternating(depth);
+            // `BENCH_DUMP=<dir>` writes the family out as QDIMACS, so
+            // the deep-prefix instances can be reproduced, profiled, or
+            // handed to another solver
+            if let Ok(dir) = std::env::var("BENCH_DUMP") {
+                let path = std::path::Path::new(&dir).join(format!("{name}-{depth:02}.qdimacs"));
+                std::fs::write(path, format!("{qcnf}")).expect("dump directory is writable");
+            }
             let blocks = qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
             let start = Instant::now();
             let (result, strategy) = alternation::solve_certified(
@@ -369,15 +381,22 @@ fn main() {
                 alternation::EXPANSION_BUDGET,
             );
             let elapsed = start.elapsed();
+            // Verification is reported separately because on deep
+            // prefixes it, not the solve, is the bottleneck: the
+            // composed strategy is deep-cloned into every case of
+            // every split, so its size explodes with depth while the
+            // solve stays in milliseconds. Above the threshold the
+            // check is skipped rather than allowed to run for minutes.
+            let size = strategy.as_ref().map_or(0, alternation::Strategy::size);
             let certified = match &strategy {
+                Some(_) if size > VERIFY_LIMIT => format!("{size} nodes, unverified"),
                 Some(strategy) => {
-                    if alternation::verify_strategy(&qcnf, strategy) {
-                        "certified"
-                    } else {
-                        "INVALID"
-                    }
+                    let start = Instant::now();
+                    let ok = alternation::verify_strategy(&qcnf, strategy);
+                    let verdict = if ok { "certified" } else { "INVALID" };
+                    format!("{size} nodes, {verdict} in {:.3?}", start.elapsed())
                 }
-                None => "",
+                None => String::new(),
             };
             let verdict = match result {
                 SolverResult::Satisfiable => "sat",

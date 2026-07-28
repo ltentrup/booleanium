@@ -621,11 +621,13 @@ Five things measurement decided, several against the obvious design:
   ones. And CEGAR beats expansion on large blocks because it
   enumerates only the *relevant* assignments: a 10-variable block made
   `p10-1.pddl` 17x slower expanded, so blocks are capped at eight.
-* **A big expansion is only safe if it collapses the prefix.** At ≤2
-  blocks the instance goes straight to the core (`BLOCKS4iii` hands it
-  950k clauses happily, 30 s timeout → 1.9 s); otherwise it pays for
-  per-level simplification and abstraction seeding on every candidate,
-  so *speculative* expansions get a 50k clause budget instead of 2M.
+* **An expansion is only worth doing if it collapses the prefix.** At
+  ≤2 blocks the instance goes straight to the core (`BLOCKS4iii` hands
+  it 950k clauses happily, 30 s timeout → 1.9 s); otherwise it pays
+  for per-level simplification and abstraction seeding on every
+  candidate. *Speculative* expansions first got a smaller budget and
+  were later dropped outright — see the deep-prefix measurement
+  below.
 * **Simplify every level.** `restrict` fixes a whole block and
   expansion copies matrices, both manufacturing units and pure
   literals in bulk that every level was rediscovering. A per-level
@@ -853,6 +855,41 @@ so is every other suite instance — this is a pure win on the deep
 prefixes and invisible elsewhere. `biu` is now the only CADET instance
 the solver does not decide.
 
+**Speculative ∀-expansion — removed, and it was the wall.** The
+scaling table above was the first thing the instrument paid for.
+Profiling the satisfiable arbiter at its cliff showed the run was not
+in the candidate loops at all: it was a *single* leaf solve over
+46 643 clauses, grown out of an instance with 245. The expansion
+dispatch had eaten the whole prefix.
+
+The fixpoint expands the innermost ∀ block whenever the result fits a
+budget, and on a deep prefix it does that once per remaining ∀ block,
+each multiplying the trailing material. Every individual step passed
+its 50k budget; the *product* was never bounded. The distinction the
+code already drew — a *collapsing* expansion hands its result to the
+2QBF core, a *speculative* one hands it back to the loops, which pay
+per clause many times over — turns out to be the whole story, and the
+speculative case has no business being taken at all:
+
+| | before | after |
+|---|---|---|
+| reactive `arbiter-2-2`, depth 8 | 22.0 s | **31 ms** |
+| reactive `ring-4`, depth 12 | 2.1 s | **38 ms** |
+| reactive `corridor-4-stay`, depth 7 | 6.5 s | **0.22 s** |
+| `lights3_021_0_009` | 0.85 s | **0.12 s** |
+| `BLOCKS4iii.7` (collapsing) | 1.55 s | 1.59 s |
+| `arbiter-05 …depth-6` | 2.27 s | 2.31 s |
+
+Collapsing expansions are untouched, so nothing that relied on them
+moves. The CADET suite is unchanged at 125 correct, all 19 satisfiable
+multi-block instances still certify, the 701-instance cross-validation
+decides 592 (one more than before) with zero disagreements, and the
+fuzz passes 300k cases per family. Worth noting what this says about
+tuning: the speculative budget was a *measured* parameter, fitted on
+the CADET suite, and it was fitted to a corpus that tops out at seven
+blocks. It took a family with 32 blocks to show that the whole branch
+was a loss.
+
 **A depth-scaling instrument** (`bench_games scale`). The suite is
 decided apart from `biu`, and every corpus in reach is 2QBF or 3QBF,
 so the remaining alternation work had nothing to be judged on. The
@@ -860,30 +897,54 @@ reactive unrolling supplies it: a family generator with depth as a
 dial and verdicts known independently from the game oracle. Solving
 each depth and verifying each strategy:
 
-| family | verdict | deepest in ≤20 s | blocks | time |
-|---|---|---|---|---|
-| `arbiter-3-2` | unsat from depth 3 | 12 | **24** | 92 ms |
-| `ring-4` | sat | 12 | **24** | 2.0 s |
-| `arbiter-2-2` | sat | 8 | 16 | 22.1 s |
-| `corridor-4-stay` | sat | 7 | 14 | 6.5 s |
+| family | verdict | blocks | solve | strategy | verify |
+|---|---|---|---|---|---|
+| `arbiter-3-2` | unsat | **32** | 9.5 ms | — | — |
+| `ring-4` | sat | **32** | 198 ms | 2 425 176 | (skipped) |
+| `ring-4` | sat | 22 | 31 ms | 76 005 | 4.8 s |
+| `corridor-4-stay` | sat | 18 | 815 ms | 7 423 078 | (skipped) |
+| `arbiter-2-2` | sat | 22 | 1.3 s | 12 093 332 | (skipped) |
+| `arbiter-2-2` | sat | 14 | 12 ms | 89 040 | 10.2 s |
 
-Two things fall out. **Depth alone is not the difficulty**: the
-unsatisfiable arbiter runs essentially *linearly* to 24 blocks (5 ms
-at 6 blocks, 92 ms at 24) because a refutation is found near the front
-of the prefix and never has to enumerate what is behind it. What costs
-is a satisfiable answer, which has to build a strategy through every
-block: `arbiter-2-2` goes 67 ms → 1.05 s → 22.1 s across depths 6, 7,
-8, and `ring-4` grows ~2.5x per depth. And **every satisfiable answer
-at every depth carried a strategy that verified** — thirty-odd
-certified strategies at up to 24 blocks, well past anything the CADET
-suite (7 blocks at most) exercises.
+**Depth alone is not the difficulty.** The unsatisfiable arbiter is
+essentially *flat* — 5.2 ms at 6 blocks, 9.5 ms at 32 — because a
+refutation is found near the front of the prefix and never has to
+enumerate what is behind it. The satisfiable families reach 32 blocks
+too, in a fifth of a second.
+
+**What grows is the composed strategy, not the search.** Its size
+roughly *triples per alternation* — `arbiter-2-2` goes 31, 187, 666,
+2249, 7662, 26 095, 89 040, … , 41 289 049 nodes across depths 1–12,
+while the solve stays in milliseconds until the sheer size of the
+object being built takes over. The reason is structural: composition
+deep-clones the sub-strategy into every case of every `Split` and
+every copy of every `Expanded`, so a strategy that a DAG would
+represent in linear space is materialized as a tree. The unsatisfiable
+family, which builds no strategy at all, stays flat — which is exactly
+the control this diagnosis needs.
+
+That also relocates the certification wall. Verification is a single
+SAT call, but it encodes the strategy, so it inherits the blowup:
+`ring-4` certifies at 22 blocks in 4.8 s and `arbiter-2-2` at 14
+blocks in 10.2 s, and past ~100k nodes the benchmark reports the size
+instead of running the check. Earlier drafts of this section reported
+those points as *solver* cliffs; they are not — solving those same
+instances takes 31 ms and 12 ms. The measurement that separated them
+was simply running the CLI with and without `--certify`.
+
+So the next piece of work is sharing: `Rc` in `Strategy` so composition
+stops copying, and a memo in `build_into` so the AIG sees the sharing
+too. Everything the strategy machinery does — verification, AIGER
+emission, the rejected region learning, which died of exactly this
+blowup — is linear in a size that is currently exponential in depth
+for no semantic reason.
 
 Next steps in order of leverage, now with a place to measure them:
-∀-side persistent oracles (needs ∃∀ assumption support in the core),
-which is also the prerequisite for doing dual refinement properly, and
-the determinize-then-dispatch hybrid. The scaling table says where to
-aim — the satisfiable families, which is where strategy construction
-dominates.
+structure sharing in `Strategy` (above), which is the bottleneck for
+everything certificate-shaped on deep prefixes; ∀-side persistent
+oracles (needs ∃∀ assumption support in the core), which is also the
+prerequisite for doing dual refinement properly; and the
+determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 

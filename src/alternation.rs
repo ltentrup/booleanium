@@ -39,7 +39,10 @@
 //! removes an alternation outright, and at the innermost block only the
 //! final existential block is copied — a three-block prefix collapses
 //! to plain SAT. Only small blocks qualify, because CEGAR enumerates
-//! just the relevant assignments while expansion pays for all of them.
+//! just the relevant assignments while expansion pays for all of them,
+//! and only the *collapsing* expansion qualifies at all: handing a
+//! multiplied matrix back to the loops instead of to the core loses by
+//! two orders of magnitude on deep prefixes.
 
 use crate::{
     incdet::{model::AigBuilder, IncDet, Options},
@@ -82,15 +85,6 @@ pub const EXPANSION_BUDGET: usize = 2_000_000;
 /// 30 s timeout into 3 s on `BLOCKS4iii.7`).
 const MAX_EXPANDED_BLOCK: usize = 8;
 
-/// Budget for a *speculative* expansion — one that leaves more than two
-/// blocks, so the result still goes through the per-level simplification
-/// and the candidate loops rather than straight to the core. Those pay
-/// per clause many times over, so they get far less room than an
-/// expansion that collapses the prefix outright (measured: expanding
-/// the depth-6 arbiter to 1.5M clauses left the loops unable to reach a
-/// single leaf solve, while `BLOCKS4iii` happily hands 1.45M clauses to
-/// the core because its expansion leaves one block).
-const SPECULATIVE_EXPANSION_BUDGET: usize = 50_000;
 
 /// The inverse of one ∀-expansion: for every assignment of the
 /// enumerated block, the cube selecting it and the renaming that maps
@@ -190,9 +184,11 @@ impl Strategy {
         }
     }
 
-    /// A rough node count, used to keep the sub-solve memo within its
-    /// size budget.
-    fn size(&self) -> usize {
+    /// A rough node count. Used to keep the sub-solve memo within its
+    /// size budget, and worth reporting: on deep prefixes the composed
+    /// strategy, not the solve, is what grows out of hand.
+    #[must_use]
+    pub fn size(&self) -> usize {
         match self {
             Strategy::Done => 1,
             Strategy::Fixed { assignments, rest }
@@ -989,16 +985,25 @@ fn expandable_block(qcnf: &QCNF, budget: usize) -> Option<usize> {
     if vars.len() > MAX_EXPANDED_BLOCK {
         return None;
     }
+    // Only an expansion that *collapses* the prefix is worth doing: the
+    // result goes straight to the 2QBF core, which is what the budget
+    // pays for. A speculative one — leaving more than two blocks —
+    // hands its multiplied matrix back to the loops, which pay per
+    // clause many times over, and on a deep prefix the fixpoint
+    // performs one per remaining ∀ block so the growth compounds. Each
+    // step passes a per-step budget while the product does not:
+    // measured on the reactive arbiter at depth 8, 245 clauses grew to
+    // 46 602 across the fixpoint and the run took 22 s, against 0.05 s
+    // for the same instance solved by the loops alone.
+    if qcnf.prefix.len() > 3 {
+        return None;
+    }
     let copies = 1usize << vars.len();
     let copied_vars: usize =
         qcnf.prefix[block + 1..].iter().map(|(_, vars)| vars.len()).sum::<usize>();
     let clauses = copies.checked_mul(qcnf.matrix.len())?;
     let fresh = copies.checked_mul(copied_vars)?;
-    // expanding the innermost block removes one alternation; only when
-    // at most two remain does the instance go straight to the core
-    let collapses = qcnf.prefix.len() <= 3;
-    let limit = if collapses { budget } else { budget.min(SPECULATIVE_EXPANSION_BUDGET) };
-    (clauses <= limit && fresh <= limit).then_some(block)
+    (clauses <= budget && fresh <= budget).then_some(block)
 }
 
 /// ∀-expansion of one universal block: the block is replaced by a
