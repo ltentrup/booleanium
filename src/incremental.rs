@@ -614,8 +614,22 @@ impl IncrementalSolver {
     /// (see [`IncDet::unsat_witness`]).
     #[must_use]
     pub fn universal_witness(&self) -> Option<Vec<i32>> {
+        self.universal_witness_minimized(&|_| false)
+    }
+
+    /// [`IncrementalSolver::universal_witness`] with the move minimized
+    /// over the variables the caller marks removable — see
+    /// [`IncDet::unsat_witness_minimized`] for why that choice belongs
+    /// to the caller.
+    #[must_use]
+    pub fn universal_witness_minimized(
+        &self,
+        removable: &dyn Fn(i32) -> bool,
+    ) -> Option<Vec<i32>> {
         match self.served() {
-            Some((SolverResult::Unsatisfiable, solver)) => solver.unsat_witness(),
+            Some((SolverResult::Unsatisfiable, solver)) => {
+                solver.unsat_witness_minimized(removable)
+            }
             _ => None,
         }
     }

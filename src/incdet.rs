@@ -575,6 +575,31 @@ impl IncDet {
     /// being exposed.
     #[must_use]
     pub fn unsat_witness(&self) -> Option<Vec<i32>> {
+        self.unsat_witness_minimized(&|_| false)
+    }
+
+    /// [`IncDet::unsat_witness`] with the move *minimized*, dropping
+    /// only the variables the caller marks as removable.
+    ///
+    /// Which literals a winning move keeps is not a matter of
+    /// aesthetics for a caller that only cares about *part* of the
+    /// assignment. A safety game's region refinement projects the move
+    /// onto the state variables and throws the environment's input
+    /// away, so every state literal dropped doubles the set of states
+    /// excluded that round, while dropping an input literal buys
+    /// nothing — and costs, since a more specific environment move
+    /// defeats more states. Marking the state variables removable and
+    /// the inputs not therefore aims the minimization at exactly the
+    /// generalization the caller can use.
+    ///
+    /// Each candidate removal is one SAT call asking whether the
+    /// remaining literals still admit no response, so the result is a
+    /// move that is still verified.
+    #[must_use]
+    pub fn unsat_witness_minimized(
+        &self,
+        removable: &dyn Fn(i32) -> bool,
+    ) -> Option<Vec<i32>> {
         use crate::sat::{LookupSolver, SatSolver};
         let witness = self.unsat_witness.as_ref()?;
         let mut solver = LookupSolver::<crate::sat::varisat::Varisat>::default();
@@ -592,7 +617,23 @@ impl IncDet {
             debug!("recorded universal witness is answerable, discarding");
             return None;
         }
-        Some(witness.iter().map(|l| l.to_dimacs()).collect())
+        // greedily drop the removable literals, keeping every drop that
+        // leaves the move unanswerable
+        let mut kept: Vec<Option<Lit>> = witness.iter().map(|&l| Some(l)).collect();
+        for position in 0..kept.len() {
+            let Some(lit) = kept[position] else { continue };
+            if !removable(lit.to_dimacs()) {
+                continue;
+            }
+            kept[position] = None;
+            let reduced: Vec<_> =
+                kept.iter().flatten().map(|&l| solver.lookup(l)).collect();
+            if solver.solve_with_assumptions(&reduced).unwrap() {
+                // the literal was load-bearing after all
+                kept[position] = Some(lit);
+            }
+        }
+        Some(kept.into_iter().flatten().map(Lit::to_dimacs).collect())
     }
 
     /// The *unverified* recorded universal candidate of the most recent

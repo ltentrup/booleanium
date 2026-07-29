@@ -23,6 +23,7 @@
 //! with the `controllable_` name prefix, accepted alongside `"2 "`).
 
 use crate::{incremental::IncrementalSolver, qcnf::QCNF, QuantTy, SolverResult};
+use std::collections::HashSet;
 use std::fmt;
 
 /// Whether an input symbol name marks a controllable (existential) input:
@@ -896,7 +897,14 @@ pub fn solve_safety_with_continuation(
         // survives, some state must still fail, so scanning the region
         // finds it. Sound either way, because only a *complete* state
         // assignment licenses a removal.
-        let cube = if let Some(witness) = solver.universal_witness() {
+        // aim the witness minimization at the state variables: the
+        // environment's move is projected away, so only state literals
+        // are worth dropping — and each one dropped doubles the
+        // excluded region
+        let state_set: HashSet<i32> = state_vars.iter().map(|&v| dimacs(v)).collect();
+        let cube = if let Some(witness) =
+            solver.universal_witness_minimized(&|l| state_set.contains(&l.abs()))
+        {
             project(&witness)
         } else {
             {

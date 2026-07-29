@@ -472,39 +472,60 @@ of which a one-shot QDIMACS call can express.
   from there rather than from the whole state space. The phase-one
   query never mentions the successor, so it is the smaller formula.
 
-  | game | verdict | rounds (safe) | in-place | rebuild |
-  |---|---|---|---|---|
-  | `arbiter-2-2` | realizable | 12 (10) | 21.8 ms | 8.0 ms |
-  | `arbiter-3-2` | unrealizable | 28 (19) | 288 ms | 55.3 ms |
-  | `ring-4` | realizable | 114 (113) | 37.4 s | 1.4 s |
-  | `corridor-4-stay` | realizable | 142 (113) | 26.6 s | 60.3 s |
+  The witness minimization is **aimed at the state variables**
+  (`IncDet::unsat_witness_minimized`). Which literals a winning move
+  keeps is not aesthetics for a caller that uses only part of the
+  assignment: the region refinement projects the move onto the states
+  and throws the environment's input away, so every state literal
+  dropped *doubles* the set of states excluded that round, while
+  dropping an input literal buys nothing — and costs, because a more
+  specific environment move defeats more states. Marking the state
+  variables removable and the inputs not aims the greedy minimization
+  at exactly the generalization the caller can use, at one SAT call
+  per candidate.
+
+  | game | verdict | rounds (safe) | cubes | in-place | rebuild |
+  |---|---|---|---|---|---|
+  | `arbiter-2-2` | realizable | 5 (3) | 3 | 4.6 ms | 1.9 ms |
+  | `arbiter-3-2` | unrealizable | 11 (4) | 9 | 36.3 ms | 12.2 ms |
+  | `ring-4` | realizable | 17 (16) | 15 | 126 ms | 38.1 ms |
+  | `corridor-4-stay` | realizable | 33 (16) | 31 | 714 ms | 243 ms |
+
+  That is the whole benchmark from **126.1 s to 1.18 s, 107x**, and it
+  is not a constant factor on the same search — the rounds collapse
+  because the cubes are genuinely more general: `ring-4`'s losing
+  region needs **15 cubes instead of 112**, and its 113 safe-state
+  rounds become 16. Where the previous section said the loop was
+  "spending nearly the entire computation rediscovering a syntactic
+  state predicate one cube at a time", it now discovers it in cubes
+  large enough that a symbolic seed would save comparatively little.
 
   Against the unrolling the positioning is stark: `arbiter-2-2` is
-  decided **unboundedly in 8 ms with a ten-cube winning region**,
+  decided **unboundedly in 1.9 ms with a three-cube winning region**,
   where the reactive unrolling spent 1.3 s to certify depth 11 alone —
   with a twelve-million-node strategy — and 101 s for depth 12.
 
-  Stratifying was worth doing but not for the reason expected. It does
-  *not* cut rounds — one per game, the phase switch — because starting
-  from `⊤` already makes the successor conjunct vacuous, so the
-  original loop was computing the safe states first anyway. Its effect
-  on time is large and two-sided: taking the better mode of each game,
-  `ring-4` improves 4.5x (6.3 s → 1.4 s) and `corridor-4-stay` 1.6x,
-  while the two millisecond games get 2x worse. What it really bought
-  was *visibility*, and the number it exposed is the important one:
-  **113 of `ring-4`'s 114 rounds are safe-state rounds**, and 113 of
-  `corridor`'s 142. Nearly the entire computation is spent discovering
-  which states are immediately unsafe — one counterexample cube per
-  QBF call — and for these games that set is a *syntactic* state
-  predicate: two tokens on one cell. Reading it off the error cone and
-  seeding the region with it symbolically would skip essentially the
-  whole run. That, not the phase order, is where the next factor is.
+  Stratifying into the two phases was worth doing but not for the
+  reason expected. It does *not* cut rounds — one per game, the phase
+  switch — because starting from `⊤` already makes the successor
+  conjunct vacuous, so the original loop was computing the safe states
+  first anyway, and its effect on time was large and two-sided. What
+  it bought was *visibility*: it showed that 113 of `ring-4`'s 114
+  rounds were safe-state rounds, which is what identified the witness
+  as the thing to fix. Aimed minimization then cut those 113 rounds to
+  16. The phase split is kept because it is the honest structure and
+  it keeps that number measurable, not because it is worth a factor.
 
-  The incrementality result is more interesting than a confirmation
-  would have been, and it is *unstable*: in-place beat rebuild 1.7x on
-  `ring-4` before stratification and loses to it 26x after, while
-  `corridor` swings the other way. Round counts are identical in every
-  pair, so this is search-trajectory variance, not work saved. That is consistent with what RQ2
+  The incrementality result is the one disappointment: rebuild beats
+  in-place on all four games, by 2–3x. Earlier readings swung the
+  other way and then back, and round counts now differ slightly
+  between the modes (a different trajectory finds a different, equally
+  valid witness), so the honest summary is that the continuation is
+  not yet earning its keep on this loop. The loop *is* the access
+  pattern the interface was designed for, which makes that a live
+  question rather than a footnote; the fallback path, which proves
+  single states losing on throwaway query solvers, is the first
+  suspect. That is consistent with what RQ2
   already measured — in-place extensions stop once the first case is
   recorded, after which both modes do the same learnt-seeded work and
   differ by trajectory variance — but here the loop is exactly the
