@@ -484,14 +484,23 @@ of which a one-shot QDIMACS call can express.
   at exactly the generalization the caller can use, at one SAT call
   per candidate.
 
+  Each round's constraint lives in a **pushed frame** and is popped
+  once answered, rather than being retired by an activation literal.
+  The difference is what happens to what was learnt under it: with a
+  guard, every clause learnt while the round's constraint was active
+  stayed in the database for the rest of the run, referring to a
+  literal that could never fire again. Popping drops exactly those and
+  keeps what was learnt about the circuit and the region.
+
   | game | verdict | rounds (safe) | cubes | in-place | rebuild |
   |---|---|---|---|---|---|
-  | `arbiter-2-2` | realizable | 5 (3) | 3 | 4.6 ms | 1.9 ms |
-  | `arbiter-3-2` | unrealizable | 11 (4) | 9 | 36.3 ms | 12.2 ms |
-  | `ring-4` | realizable | 17 (16) | 15 | 126 ms | 38.1 ms |
-  | `corridor-4-stay` | realizable | 33 (16) | 31 | 714 ms | 243 ms |
+  | `arbiter-2-2` | realizable | 5 (3) | 3 | 2.0 ms | 1.7 ms |
+  | `arbiter-3-2` | unrealizable | 10 (4) | 8 | 7.7 ms | 7.7 ms |
+  | `ring-4` | realizable | 17 (16) | 15 | 49.3 ms | 35.0 ms |
+  | `corridor-4-stay` | realizable | 35 (17) | 33 | 185 ms | 163 ms |
 
-  That is the whole benchmark from **126.1 s to 1.18 s, 107x**, and it
+  That is the whole benchmark from **126.1 s to 1.18 s, 107x** (and to
+  0.45 s with the frames below), and it
   is not a constant factor on the same search — the rounds collapse
   because the cubes are genuinely more general: `ring-4`'s losing
   region needs **15 cubes instead of 112**, and its 113 safe-state
@@ -516,16 +525,28 @@ of which a one-shot QDIMACS call can express.
   16. The phase split is kept because it is the honest structure and
   it keeps that number measurable, not because it is worth a factor.
 
-  The incrementality result is the one disappointment: rebuild beats
-  in-place on all four games, by 2–3x. Earlier readings swung the
-  other way and then back, and round counts now differ slightly
-  between the modes (a different trajectory finds a different, equally
-  valid witness), so the honest summary is that the continuation is
-  not yet earning its keep on this loop. The loop *is* the access
-  pattern the interface was designed for, which makes that a live
-  question rather than a footnote; the fallback path, which proves
-  single states losing on throwaway query solvers, is the first
-  suspect. That is consistent with what RQ2
+  **Where the in-place mode was losing.** Before the frames, rebuild
+  beat in-place by 2–3x, which is backwards for the one access pattern
+  the interface was designed for. Two guesses were wrong and the probe
+  said so: the fallback path fires almost never (0 rounds on three of
+  the four games), and witness minimization costs ~1.5 ms against
+  185 ms of solving. Timing the phases separately put essentially all
+  of the gap in `solve` itself — and the gap grew with the round
+  count, which pointed at the clause database rather than at any
+  particular check. It was the activation literals. Moving the round's
+  constraint into a pushed frame took `ring-4` in-place from 188 ms to
+  49 ms (3.8x) and the whole benchmark from 1.07 s to 0.45 s, and it
+  also *improved the search*: `arbiter-3-2` now needs 10 rounds and 8
+  cubes where it needed 12 and 10, because the solver is no longer
+  reasoning around dead clauses.
+
+  What is left is parity, not a win: rebuild is still 0–40% ahead, and
+  the in-place path performs **zero monotone extensions** in this loop,
+  because every round changes the base frame. So the continuation is
+  not yet earning its keep here — but it is no longer pathological,
+  and the remaining gap is bookkeeping rather than a leak. Making the
+  region links extendable in place, so the base can grow without
+  invalidating the frame, is the next thing to try. That is consistent with what RQ2
   already measured — in-place extensions stop once the first case is
   recorded, after which both modes do the same learnt-seeded work and
   differ by trajectory variance — but here the loop is exactly the

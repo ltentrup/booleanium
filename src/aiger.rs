@@ -681,6 +681,13 @@ pub struct SafetyOutcome {
     /// how many of those computed the *safe states* (`CPre(⊤)`) before
     /// the backward induction began
     pub safe_rounds: u32,
+    /// in-place monotone extensions the incremental core managed over
+    /// the run — how much of the refinement the continuation actually
+    /// absorbed, rather than falling back to a rebuild
+    pub extensions: u32,
+    /// rounds whose refutation carried no verifiable universal witness,
+    /// so a single state had to be proved losing by assumption queries
+    pub fallback_rounds: u32,
 }
 
 /// Solves a safety game by shrinking the winning region instead of
@@ -826,7 +833,6 @@ pub fn solve_safety_with_continuation(
     let mut outside: Option<u32> = None;
     let mut next_outside: Option<u32> = None;
     let mut losing: Vec<Vec<(usize, bool)>> = Vec::new();
-    let mut previous_guard: Option<u32> = None;
     let mut rounds = 0u32;
     // The refinement runs in two phases. The first asks only "can the
     // controller avoid the error *now*", with no reference to the
@@ -840,34 +846,38 @@ pub fn solve_safety_with_continuation(
     // latch — are almost entirely decided by this phase.
     let mut induction = false;
     let mut safe_rounds = 0;
+    let mut fallback_rounds = 0;
 
     loop {
         rounds += 1;
-        // activate this round's constraint and retire the last one
-        let guard = existential(&mut solver);
-        if let Some(previous) = previous_guard.replace(guard) {
-            solver.add_clause(&[-dimacs(previous)]);
-        }
+        // The round's constraint goes in a pushed frame and is popped
+        // again once answered. Retiring it by an activation literal
+        // instead left every clause learnt under it in the database
+        // for the rest of the run, referring to a literal that could
+        // never fire again; popping drops exactly those and keeps what
+        // was learnt about the circuit and the region.
+        solver.push();
         let relax: Vec<i32> = outside.iter().map(|&v| dimacs(v)).collect();
         for &out in &aiger.outputs {
-            let mut clause = vec![-dimacs(guard), -lit(out)];
+            let mut clause = vec![-lit(out)];
             clause.extend(&relax);
             solver.add_clause(&clause);
         }
         if induction {
             if let Some(next_out) = next_outside {
-                let mut clause = vec![-dimacs(guard), -dimacs(next_out)];
+                let mut clause = vec![-dimacs(next_out)];
                 clause.extend(&relax);
                 solver.add_clause(&clause);
             }
         }
 
-        if solver.solve_with_assumptions(&[dimacs(guard)]) != SolverResult::Unsatisfiable {
+        if solver.solve() != SolverResult::Unsatisfiable {
             if !induction {
                 // the safe states are known; now demand that the
                 // controller can also *stay* among them
                 induction = true;
                 safe_rounds = rounds;
+                solver.pop();
                 continue;
             }
             // `W = CPre(W)`: the greatest fixpoint is reached
@@ -875,7 +885,14 @@ pub fn solve_safety_with_continuation(
             let realizable = !losing
                 .iter()
                 .any(|cube| cube.iter().all(|&(idx, value)| initial[idx] == value));
-            return Ok(SafetyOutcome { realizable, losing, rounds, safe_rounds });
+            return Ok(SafetyOutcome {
+                realizable,
+                losing,
+                rounds,
+                safe_rounds,
+                extensions: solver.extension_total(),
+                fallback_rounds,
+            });
         }
         let project = |witness: &[i32]| -> Vec<(usize, bool)> {
             witness
@@ -908,6 +925,7 @@ pub fn solve_safety_with_continuation(
             project(&witness)
         } else {
             {
+                fallback_rounds += 1;
                 let mut probe: Vec<usize> = Vec::new();
                 if let Some(candidate) = solver.universal_witness_candidate() {
                     probe.push(state_index(&project(&candidate), state_vars.len()));
@@ -919,14 +937,17 @@ pub fn solve_safety_with_continuation(
                 probe
                     .into_iter()
                     .find(|&state| {
-                        let mut assumptions = vec![dimacs(guard)];
-                        assumptions.extend(state_vars.iter().enumerate().map(|(idx, &v)| {
-                            if state >> idx & 1 == 1 {
-                                dimacs(v)
-                            } else {
-                                -dimacs(v)
-                            }
-                        }));
+                        let assumptions: Vec<i32> = state_vars
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, &v)| {
+                                if state >> idx & 1 == 1 {
+                                    dimacs(v)
+                                } else {
+                                    -dimacs(v)
+                                }
+                            })
+                            .collect();
                         solver.solve_with_assumptions(&assumptions)
                             == SolverResult::Unsatisfiable
                     })
@@ -943,6 +964,8 @@ pub fn solve_safety_with_continuation(
                 losing: vec![Vec::new()],
                 rounds,
                 safe_rounds,
+                extensions: solver.extension_total(),
+                fallback_rounds,
             });
         }
 
@@ -978,9 +1001,13 @@ pub fn solve_safety_with_continuation(
             solver.add_clause(&forward);
             *chain = Some(joined);
         };
+        // the round's constraint has served its purpose; drop it and
+        // the clauses learnt under it, then extend the region in the
+        // base frame where the next round will read it
+        solver.pop();
         link(&mut solver, &state_vars, &mut outside);
         link(&mut solver, &next_vars, &mut next_outside);
-        losing.push(cube);
+        losing.push(cube.clone());
     }
 }
 

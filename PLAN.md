@@ -423,7 +423,11 @@ increasing order of ambition:
   counterexample *toward the state variables*
   (`IncDet::unsat_witness_minimized`) since the environment's move is
   projected away — worth 107x on the game benchmark, with `ring-4`'s
-  losing region dropping from 112 cubes to 15. Validated against an
+  losing region dropping from 112 cubes to 15. Each round's constraint
+  lives in a pushed frame rather than under an activation literal, so
+  the clauses learnt under it are dropped when it is retired instead
+  of outliving it (a further 2.4x, and it removed the in-place
+  regression that made rebuilding faster). Validated against an
   explicit backward fixpoint on 20k random circuits, region and all.
   See `RESEARCH.md` (RQ5).
 
