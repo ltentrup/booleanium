@@ -466,22 +466,45 @@ of which a one-shot QDIMACS call can express.
   entire run. The answer is *unbounded* realizability with a winning
   region, not a bounded approximation with a depth-limited strategy.
 
-  | game | verdict | rounds | in-place | rebuild |
+  The loop runs in two phases, the classical order: first ask only
+  "can the controller avoid the error *now*", whose fixpoint is the
+  set of **safe states** `CPre(⊤)`, then start the backward induction
+  from there rather than from the whole state space. The phase-one
+  query never mentions the successor, so it is the smaller formula.
+
+  | game | verdict | rounds (safe) | in-place | rebuild |
   |---|---|---|---|---|
-  | `arbiter-2-2` | realizable | 11 | 10.3 ms | 3.3 ms |
-  | `arbiter-3-2` | unrealizable | 27 | 142 ms | 25.5 ms |
-  | `ring-4` | realizable | 113 | 6.3 s | 10.6 s |
-  | `corridor-4-stay` | realizable | 141 | 50.4 s | 42.0 s |
+  | `arbiter-2-2` | realizable | 12 (10) | 21.8 ms | 8.0 ms |
+  | `arbiter-3-2` | unrealizable | 28 (19) | 288 ms | 55.3 ms |
+  | `ring-4` | realizable | 114 (113) | 37.4 s | 1.4 s |
+  | `corridor-4-stay` | realizable | 142 (113) | 26.6 s | 60.3 s |
 
   Against the unrolling the positioning is stark: `arbiter-2-2` is
-  decided **unboundedly in 10 ms with a ten-cube winning region**,
+  decided **unboundedly in 8 ms with a ten-cube winning region**,
   where the reactive unrolling spent 1.3 s to certify depth 11 alone —
   with a twelve-million-node strategy — and 101 s for depth 12.
 
+  Stratifying was worth doing but not for the reason expected. It does
+  *not* cut rounds — one per game, the phase switch — because starting
+  from `⊤` already makes the successor conjunct vacuous, so the
+  original loop was computing the safe states first anyway. Its effect
+  on time is large and two-sided: taking the better mode of each game,
+  `ring-4` improves 4.5x (6.3 s → 1.4 s) and `corridor-4-stay` 1.6x,
+  while the two millisecond games get 2x worse. What it really bought
+  was *visibility*, and the number it exposed is the important one:
+  **113 of `ring-4`'s 114 rounds are safe-state rounds**, and 113 of
+  `corridor`'s 142. Nearly the entire computation is spent discovering
+  which states are immediately unsafe — one counterexample cube per
+  QBF call — and for these games that set is a *syntactic* state
+  predicate: two tokens on one cell. Reading it off the error cone and
+  seeding the region with it symbolically would skip essentially the
+  whole run. That, not the phase order, is where the next factor is.
+
   The incrementality result is more interesting than a confirmation
-  would have been. In-place continuation wins where the loop is long
-  (`ring-4`, 113 rounds, 1.7x) and *loses* on the short ones, by 3–6x
-  on the millisecond-scale games. That is consistent with what RQ2
+  would have been, and it is *unstable*: in-place beat rebuild 1.7x on
+  `ring-4` before stratification and loses to it 26x after, while
+  `corridor` swings the other way. Round counts are identical in every
+  pair, so this is search-trajectory variance, not work saved. That is consistent with what RQ2
   already measured — in-place extensions stop once the first case is
   recorded, after which both modes do the same learnt-seeded work and
   differ by trajectory variance — but here the loop is exactly the

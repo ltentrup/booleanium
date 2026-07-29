@@ -444,9 +444,11 @@ fn main() {
             let elapsed = start.elapsed();
             let mode = if continuation { "in-place" } else { "rebuild" };
             println!(
-                "{name:<22} {mode:>8} {:>14} {:>3} rounds {:>4} losing cubes {elapsed:>12.3?}",
+                "{name:<22} {mode:>8} {:>14} {:>3} rounds ({:>3} safe) {:>4} losing cubes \
+                 {elapsed:>12.3?}",
                 if outcome.realizable { "realizable" } else { "unrealizable" },
                 outcome.rounds,
+                outcome.safe_rounds,
                 outcome.losing.len(),
             );
         }

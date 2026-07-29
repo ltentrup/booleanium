@@ -417,8 +417,11 @@ increasing order of ambition:
   rides the in-place continuation; the counterexample is the core's
   verified universal witness, so a whole cube leaves the region per
   round. Answers *unbounded* realizability with a winning region —
-  `arbiter-2-2` in 10.3 ms and 11 rounds, where the reactive
-  unrolling needs 1.3 s for depth 11 alone. Validated against an
+  `arbiter-2-2` in 8 ms and 12 rounds, where the reactive unrolling
+  needs 1.3 s for depth 11 alone. Runs in the classical two phases
+  (safe states, then backward induction), which exposed that nearly
+  every round of the pursuit games is spent rediscovering a syntactic
+  state predicate. Validated against an
   explicit backward fixpoint on 20k random circuits, region and all.
   See `RESEARCH.md` (RQ5).
 
