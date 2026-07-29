@@ -114,6 +114,11 @@ pub struct IncrementalSolver {
     /// ([`IncrementalSolver::solve_with_assumptions`] /
     /// [`IncrementalSolver::solve_with_clauses`]), kept for model queries
     query: Option<(SolverResult, IncDet)>,
+    /// what the most recent throwaway query added to the stack: extra
+    /// clauses and a universal-domain restriction. Kept so that a
+    /// winning move can be *re-derived* against the same instance the
+    /// query answered rather than against the bare stack.
+    query_extra: (Vec<Vec<i32>>, Vec<i32>),
     /// which solver answers model queries; `None` after a stack change
     /// that staled the models (pop, redeclaration)
     last: Option<Served>,
@@ -142,6 +147,7 @@ impl IncrementalSolver {
             carried: HashSet::new(),
             base: None,
             query: None,
+            query_extra: (Vec::new(), Vec::new()),
             last: None,
             continuation: true,
             next_var: 1,
@@ -216,6 +222,7 @@ impl IncrementalSolver {
                 // longer matches any prefix of the stack
                 self.base = None;
                 self.query = None;
+        self.query_extra = (Vec::new(), Vec::new());
                 self.last = None;
                 return;
             }
@@ -282,6 +289,7 @@ impl IncrementalSolver {
             }
         }
         self.query = None;
+        self.query_extra = (Vec::new(), Vec::new());
         self.last = None;
         true
     }
@@ -389,6 +397,7 @@ impl IncrementalSolver {
     /// from the stack plus the carried learnt clauses.
     pub fn solve(&mut self) -> SolverResult {
         self.query = None;
+        self.query_extra = (Vec::new(), Vec::new());
         if self.continuation {
             if let Some(mut base) = self.base.take() {
                 let (universals, existentials, clauses, depths) = self.delta(&base.integrated);
@@ -500,6 +509,7 @@ impl IncrementalSolver {
                 // through to the restricted throwaway solve.
                 SolverResult::Unsatisfiable if universal.is_empty() => {
                     self.query = None;
+        self.query_extra = (Vec::new(), Vec::new());
                     self.last = Some(Served::BaseQuery(SolverResult::Unsatisfiable));
                     return SolverResult::Unsatisfiable;
                 }
@@ -512,6 +522,7 @@ impl IncrementalSolver {
                         base.queried = true;
                         if let Some(result) = base.solver.resolve_with_assumptions(assumptions) {
                             self.query = None;
+        self.query_extra = (Vec::new(), Vec::new());
                             self.last = Some(Served::BaseQuery(result));
                             return result;
                         }
@@ -536,6 +547,7 @@ impl IncrementalSolver {
         let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
         let result = solver.solve();
         self.query = Some((result, solver));
+        self.query_extra = (units, universal);
         self.last = Some(Served::Query);
         result
     }
@@ -551,6 +563,7 @@ impl IncrementalSolver {
         let mut solver = IncDet::from_qcnf_with_options(&qcnf, self.options);
         let result = solver.solve();
         self.query = Some((result, solver));
+        self.query_extra = (clauses.to_vec(), Vec::new());
         self.last = Some(Served::Query);
         result
     }
@@ -615,6 +628,86 @@ impl IncrementalSolver {
     #[must_use]
     pub fn universal_witness(&self) -> Option<Vec<i32>> {
         self.universal_witness_minimized(&|_| false)
+    }
+
+    /// A winning move of the universal player that is *always*
+    /// available for an unsatisfiable stack, unlike
+    /// [`IncrementalSolver::universal_witness`].
+    ///
+    /// The core records a winning move as a by-product of the
+    /// refutation, but that move is heuristic — pure-literal
+    /// assignments are winnability-preserving *choices* rather than
+    /// pointwise-forced values — so it is verified before exposure and
+    /// discarded when it fails. Callers that need the move rather than
+    /// merely the verdict (bounded synthesis wanting its parameters,
+    /// a game refinement wanting a state to exclude) were left with
+    /// nothing.
+    ///
+    /// The fallback is self-reduction. The stack is unsatisfiable, so
+    /// *some* move wins; fix one universal variable at a time and ask
+    /// whether the restriction is still unsatisfiable. If it is, that
+    /// value stays; if not, the opposite value must win, because a
+    /// winning region cannot vanish under a two-way split. Each step
+    /// is one restricted solve on a throwaway core, so the base and
+    /// its continuation are untouched, and the result is complete by
+    /// construction. The move is then minimized over the variables the
+    /// caller marks removable — see [`IncDet::unsat_witness_minimized`]
+    /// for why that choice belongs to the caller.
+    #[must_use]
+    pub fn universal_witness_complete(&self, removable: &dyn Fn(i32) -> bool) -> Option<Vec<i32>> {
+        if let Some(witness) = self.universal_witness_minimized(removable) {
+            return Some(witness);
+        }
+        if !matches!(self.served(), Some((SolverResult::Unsatisfiable, _))) {
+            return None;
+        }
+        let restricted: HashSet<u32> =
+            self.query_extra.1.iter().map(|l| l.unsigned_abs()).collect();
+        let universals: Vec<i32> = self
+            .frames
+            .iter()
+            .flat_map(|f| f.universals.iter())
+            .filter(|v| !restricted.contains(v))
+            .map(|&v| i32::try_from(v).expect("variable fits an i32"))
+            .collect();
+        // fix the variables one at a time, keeping the restriction
+        // unsatisfiable — the invariant that makes this complete
+        let mut fixed: Vec<i32> = Vec::new();
+        for var in universals {
+            fixed.push(var);
+            if !self.restricted_is_unsatisfiable(&fixed) {
+                // every extension with `var` true is answerable, so a
+                // winning move must set it false
+                let last = fixed.last_mut().expect("just pushed");
+                *last = -var;
+                debug_assert!(self.restricted_is_unsatisfiable(&fixed));
+            }
+        }
+        // drop what the caller does not need, cheapest generalization
+        // first: a shorter move covers more of the universal space
+        let mut kept: Vec<Option<i32>> = fixed.into_iter().map(Some).collect();
+        for position in 0..kept.len() {
+            let Some(lit) = kept[position] else { continue };
+            if !removable(lit) {
+                continue;
+            }
+            kept[position] = None;
+            let reduced: Vec<i32> = kept.iter().flatten().copied().collect();
+            if !self.restricted_is_unsatisfiable(&reduced) {
+                kept[position] = Some(lit);
+            }
+        }
+        Some(kept.into_iter().flatten().collect())
+    }
+
+    /// Whether the stack stays unsatisfiable once the universal domain
+    /// is restricted to the given literals. Runs on a throwaway core.
+    fn restricted_is_unsatisfiable(&self, universal: &[i32]) -> bool {
+        let (extra, restriction) = &self.query_extra;
+        let mut qcnf = self.qcnf_with(extra);
+        restrict_universals(&mut qcnf, restriction);
+        restrict_universals(&mut qcnf, universal);
+        IncDet::from_qcnf_with_options(&qcnf, self.options).solve() == SolverResult::Unsatisfiable
     }
 
     /// [`IncrementalSolver::universal_witness`] with the move minimized
@@ -900,6 +993,8 @@ mod test {
                     if result == SolverResult::Satisfiable {
                         assert!(solver.verify(), "certificate invalid");
                         check_model(&solver, universals, &[]);
+                    } else {
+                        check_universal_move(&solver, universals);
                     }
                 }
                 _ => {
@@ -933,6 +1028,39 @@ mod test {
                 }
             }
         }
+    }
+
+    /// An unsatisfiable stack must yield a *complete* winning move for
+    /// the universal player, and the move must really win: fixing it
+    /// leaves the matrix unsatisfiable however the existentials are
+    /// chosen. Checked against a brute-force replay, independent of the
+    /// self-reduction that produced it.
+    fn check_universal_move(solver: &IncrementalSolver, universals: u32) {
+        let Some(move_) = solver.universal_witness_complete(&|_| false) else {
+            panic!("an unsatisfiable stack has a winning universal move");
+        };
+        assert!(
+            move_.iter().all(|l| l.unsigned_abs() <= universals),
+            "the move assigns a non-universal variable: {move_:?}"
+        );
+        // replay: the instance restricted to the move must stay
+        // unsatisfiable, i.e. no existential response exists
+        let mut qcnf = solver.qcnf();
+        for &raw in &move_ {
+            let lit = crate::literal::Lit::from_dimacs(raw);
+            qcnf.matrix.retain(|clause| !clause.contains(&lit));
+            for clause in &mut qcnf.matrix {
+                clause.retain(|&l| l != !lit);
+            }
+            for (_, vars) in &mut qcnf.prefix {
+                vars.retain(|&v| v != lit.var());
+            }
+        }
+        assert_eq!(
+            qcnf.brute_force(),
+            SolverResult::Unsatisfiable,
+            "the reported winning move {move_:?} is answerable"
+        );
     }
 
     fn check_model(solver: &IncrementalSolver, universals: u32, assumptions: &[i32]) {

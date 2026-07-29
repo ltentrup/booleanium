@@ -431,6 +431,16 @@ increasing order of ambition:
   explicit backward fixpoint on 20k random circuits, region and all.
   See `RESEARCH.md` (RQ5).
 
+* **Complete winning-move extraction — done**
+  (`IncrementalSolver::universal_witness_complete`): when the recorded
+  heuristic move fails verification, the move is re-derived by
+  self-reduction over the universal variables (one restricted
+  throwaway solve each), then minimized over the variables the caller
+  can use. Closes the RQ3 synthesis gap (`sat` without a model) and
+  replaces the hand-rolled backstop the game refinement needed.
+  Validated by replaying 12 575 extracted moves against brute force in
+  the incremental differential harness.
+
 ### 2. Certificates
 
 * **Skolem function verification — done**

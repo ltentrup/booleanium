@@ -354,14 +354,38 @@ notes:
   (the universal part of the final conflicting assignment, recorded at
   every unsatisfiability site in the core). Only genuine ∃∀∃ — a free,
   *underdetermined* inner block — remains out of scope and rejected.
-  Open engineering item: the recorded witness candidate is heuristic
-  (pure-literal assignments are winnability-preserving choices, not
-  pointwise-forced values), so it is verified with one SAT call before
-  exposure; if verification fails the answer is `sat` without a model.
-  A complete extraction fallback (e.g. solving the dual instance or a
-  CEGIS-style repair of the candidate) would close this; across 20k+
-  random ∃∀ instances the differential harness has not yet observed a
-  rejected candidate, so the gap is currently theoretical.
+  **The extraction gap is closed**
+  (`IncrementalSolver::universal_witness_complete`). The recorded
+  witness candidate is heuristic — pure-literal assignments are
+  winnability-preserving *choices*, not pointwise-forced values — so it
+  is verified with one SAT call before exposure, and used to be
+  discarded on failure, leaving `sat` without a model. The fallback is
+  **self-reduction**: the stack is unsatisfiable, so *some* move wins;
+  fix one universal variable at a time and ask whether the restriction
+  is still unsatisfiable. If it is, that value stays; if not, the
+  opposite value must win, because a winning region cannot vanish
+  under a two-way split. Each step is one restricted solve on a
+  throwaway core, so the continuation base is untouched, and the
+  result is complete by construction — then minimized over whichever
+  variables the caller says it can use (RQ5's region refinement wants
+  the state variables dropped and the inputs kept).
+
+  The instance being reduced is the one the *query* answered, not the
+  bare stack: the solver remembers what each throwaway query added
+  (temporary clauses, universal-domain restriction) and rebuilds
+  against that, which is what makes the method usable from the
+  synthesis path, where the assertion roots are negated into one
+  temporary clause.
+
+  Validated by extending the incremental differential harness: every
+  unsatisfiable solve now also extracts a move and *replays* it — the
+  instance restricted to the move must stay unsatisfiable under
+  brute force — which is 12 575 winning moves checked over 30 000
+  random push/pop/assert/query sessions, independent of the
+  self-reduction that produced them. The gap was theoretical for the
+  SMT-LIB frontend but not elsewhere: RQ5's game refinement hit it
+  immediately and had to carry a hand-rolled single-state backstop,
+  which this replaces.
 
 ## RQ4 — Theories: lifting ID to ∃∀-SMT
 

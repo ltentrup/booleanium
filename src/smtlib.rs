@@ -559,8 +559,14 @@ impl Frontend {
                 .map(|&l| -l)
                 .collect();
             let internal = self.solver.solve_with_clauses(&[clause]);
+            // the synthesized parameters: complete, so a satisfiable
+            // synthesis answer always carries a model (the recorded
+            // move is heuristic and can fail verification, in which
+            // case the solver re-derives one by self-reduction)
             self.witness = match internal {
-                SolverResult::Unsatisfiable => self.solver.universal_witness(),
+                SolverResult::Unsatisfiable => {
+                    self.solver.universal_witness_complete(&|_| true)
+                }
                 _ => None,
             };
             match internal {

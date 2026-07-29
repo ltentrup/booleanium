@@ -649,23 +649,7 @@ impl Unroller {
     }
 }
 
-/// Whether a state is already outside the winning region.
-fn covered(losing: &[Vec<(usize, bool)>], state: usize) -> bool {
-    losing
-        .iter()
-        .any(|cube| cube.iter().all(|&(idx, value)| (state >> idx & 1 == 1) == value))
-}
 
-/// The state a (possibly partial) cube names, unfixed latches low.
-fn state_index(cube: &[(usize, bool)], latches: usize) -> usize {
-    let mut state = 0;
-    for &(idx, value) in cube {
-        if value && idx < latches {
-            state |= 1 << idx;
-        }
-    }
-    state
-}
 
 /// The outcome of a safety-game fixpoint computation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -894,69 +878,27 @@ pub fn solve_safety_with_continuation(
                 fallback_rounds,
             });
         }
-        let project = |witness: &[i32]| -> Vec<(usize, bool)> {
-            witness
-                .iter()
-                .filter_map(|&l| {
-                    let v = u32::try_from(l.abs()).expect("fits");
-                    state_vars.iter().position(|&s| s == v).map(|idx| (idx, l > 0))
-                })
-                .collect()
-        };
-        // A *verified* witness is the strong statement — no completion
-        // of the universals admits any response — so its whole state
-        // cube leaves the region at once. That is where the loop's
-        // generalization comes from, and it is free: the core already
-        // minimizes and checks the witness.
-        // Without one, fall back to removing a single state, proved
-        // losing by re-asking the query with that state assumed. The
-        // unverified candidate names the first state to try; if it
-        // survives, some state must still fail, so scanning the region
-        // finds it. Sound either way, because only a *complete* state
-        // assignment licenses a removal.
-        // aim the witness minimization at the state variables: the
+        // Aim the witness minimization at the state variables: the
         // environment's move is projected away, so only state literals
         // are worth dropping — and each one dropped doubles the
-        // excluded region
+        // excluded region. The complete variant never comes back
+        // empty-handed on an unsatisfiable round, so the region always
+        // shrinks by a full cube.
         let state_set: HashSet<i32> = state_vars.iter().map(|&v| dimacs(v)).collect();
-        let cube = if let Some(witness) =
-            solver.universal_witness_minimized(&|l| state_set.contains(&l.abs()))
-        {
-            project(&witness)
-        } else {
-            {
-                fallback_rounds += 1;
-                let mut probe: Vec<usize> = Vec::new();
-                if let Some(candidate) = solver.universal_witness_candidate() {
-                    probe.push(state_index(&project(&candidate), state_vars.len()));
-                }
-                probe.extend(
-                    (0..1usize << state_vars.len())
-                        .filter(|&state| !covered(&losing, state)),
-                );
-                probe
-                    .into_iter()
-                    .find(|&state| {
-                        let assumptions: Vec<i32> = state_vars
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, &v)| {
-                                if state >> idx & 1 == 1 {
-                                    dimacs(v)
-                                } else {
-                                    -dimacs(v)
-                                }
-                            })
-                            .collect();
-                        solver.solve_with_assumptions(&assumptions)
-                            == SolverResult::Unsatisfiable
-                    })
-                    .map(|state| {
-                        (0..state_vars.len()).map(|idx| (idx, state >> idx & 1 == 1)).collect()
-                    })
-                    .expect("an unsatisfiable region query has a losing state in it")
-            }
-        };
+        let had_witness = solver.universal_witness().is_some();
+        let witness = solver
+            .universal_witness_complete(&|l| state_set.contains(&l.abs()))
+            .expect("an unsatisfiable round has a winning universal move");
+        if !had_witness {
+            fallback_rounds += 1;
+        }
+        let cube: Vec<(usize, bool)> = witness
+            .iter()
+            .filter_map(|&l| {
+                let v = u32::try_from(l.abs()).expect("fits");
+                state_vars.iter().position(|&s| s == v).map(|idx| (idx, l > 0))
+            })
+            .collect();
         if cube.is_empty() {
             // every state loses, so the initial one does too
             return Ok(SafetyOutcome {
