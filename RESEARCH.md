@@ -101,20 +101,31 @@ Open questions:
   determinize less and are harder — so the number argues for
   definition-level *inputs*, not for detection being the only
   bottleneck.
-* **QCIR frontend — done for the prenex 2QBF slice** (`src/qcir.rs`,
-  auto-detected by the CLI via the `#QCIR` header): `and`/`or`/`xor`/
-  `ite` gates over cleansed or named identifiers become existential
-  variables with two-sided Tseitin definitions — the same
-  definition-level path as QAIGER, with richer gates. Prefixes that
-  collapse to ∀∃ or a single block solve natively (with certification,
-  strategy circuits under the surface names, and QRAT proofs); an ∃∀
-  prefix is solved by negation with the verdict inverted (gate
-  definitions are self-dual, only the output flips), mirroring the
-  SMT-LIB frontend's synthesis mode. Non-prenex quantifier gates and
-  deeper prefixes are rejected with clear errors. Validated by a
-  differential proptest against direct circuit evaluation (game
-  semantics on the circuit itself, independent of the Tseitin
-  conversion) in both quantifier orders, 8k cases.
+* **QCIR frontend — done for prenex circuits at any depth**
+  (`src/qcir.rs`, auto-detected by the CLI via the `#QCIR` header):
+  `and`/`or`/`xor`/`ite` gates over cleansed or named identifiers
+  become existential variables with two-sided Tseitin definitions — the
+  same definition-level path as QAIGER, with richer gates. A prefix
+  ending universally is solved by its dual (gate definitions are
+  self-dual, so flipping the quantifiers and negating the output
+  suffices) at any depth, mirroring the SMT-LIB frontend's synthesis
+  mode. Only non-prenex quantifier gates are rejected.
+
+  The depth limit was lifted once RQ6 could handle depth: the frontend
+  used to reject anything beyond two blocks, which left the solver's
+  32-block capability reachable only through QDIMACS — the wrong way
+  round, since QCIR is the format deep-prefix corpora actually ship in.
+  Beyond two blocks the CLI dispatches to the alternation front-end,
+  with composed strategies emitted as AIGER **under the surface
+  names** and checked by `verify_strategy`, and `--no-expansion`
+  available as the differential cross-check.
+
+  Validated by two differential proptests against direct circuit
+  evaluation, independent of the Tseitin conversion: the original
+  two-block one in both quantifier orders, and a deep one (3–5 blocks,
+  either outermost quantifier) against a *general* game oracle —
+  alternating enumeration over the block structure, i.e. the definition
+  of QBF truth applied to the circuit — at 30k cases.
 
 ## RQ2 — The incremental interface (the QIPASIR gap)
 

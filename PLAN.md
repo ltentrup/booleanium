@@ -192,9 +192,11 @@ increasing order of ambition:
   CADET suite solve in ≤ 0.8s, certified, raising the suite to **93 of
   93 supported instances correct**. Validated additionally by a
   differential proptest over random circuits against the brute-force
-  oracle. A **QCIR frontend** (`src/qcir.rs`, prenex 2QBF slice with
-  `and`/`or`/`xor`/`ite` gates, named or cleansed identifiers, ∃∀ by
-  negation) extends the same definition-level path to the QBF
+  oracle. A **QCIR frontend** (`src/qcir.rs`, prenex circuits at *any*
+  depth with `and`/`or`/`xor`/`ite` gates, named or cleansed
+  identifiers, universally-ending prefixes by negation, deep ones
+  dispatched to the alternation front-end with strategies emitted under
+  the surface names) extends the same definition-level path to the QBF
   community's structured-instance format — see `RESEARCH.md` (RQ1)
   for design and validation. The **paired-encoding experiment**
   (`bench_encodings`: the same families as QCIR, two-sided CNF, and

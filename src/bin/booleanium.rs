@@ -112,6 +112,60 @@ fn main() -> Result<SolverResult> {
         // by negation with the verdict inverted
         let text = std::str::from_utf8(&contents).into_diagnostic()?;
         let parsed = qcir::parse_qcir(text).into_diagnostic()?;
+        let blocks = parsed.qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
+        if blocks > 2 {
+            // deep prefixes go through the alternation front-end; QCIR
+            // is the format such instances actually ship in
+            if args.proof.is_some() {
+                tracing::warn!("proofs are not available beyond 2QBF");
+            }
+            let budget =
+                if args.no_expansion { 0 } else { booleanium::alternation::EXPANSION_BUDGET };
+            let (mut result, strategy) = booleanium::alternation::solve_certified(
+                &parsed.qcnf,
+                args.options(),
+                budget,
+            );
+            if parsed.negated {
+                result = match result {
+                    SolverResult::Satisfiable => SolverResult::Unsatisfiable,
+                    SolverResult::Unsatisfiable => SolverResult::Satisfiable,
+                    SolverResult::Unknown => SolverResult::Unknown,
+                };
+            }
+            println!("result status: {result}");
+            if parsed.negated && (args.certify || args.strategy.is_some()) {
+                tracing::warn!(
+                    "certificates and strategies describe the negated instance and are not                      emitted for universally-ending QCIR prefixes"
+                );
+                return Ok(result);
+            }
+            if let Some(strategy) = &strategy {
+                if args.certify {
+                    if booleanium::alternation::verify_strategy(&parsed.qcnf, strategy) {
+                        println!("certificate: valid");
+                    } else {
+                        println!("certificate: INVALID");
+                        return Ok(SolverResult::Unknown);
+                    }
+                }
+                if let Some(path) = &args.strategy {
+                    let universals: Vec<_> = parsed
+                        .qcnf
+                        .prefix
+                        .iter()
+                        .filter(|(q, _)| *q == QuantTy::Forall)
+                        .flat_map(|(_, vars)| vars.iter().copied())
+                        .collect();
+                    let circuit = strategy.to_aiger(&universals, &|v| parsed.name_of(v));
+                    std::fs::write(path, circuit).into_diagnostic()?;
+                    println!("strategy written to {}", path.display());
+                }
+            } else if args.certify || args.strategy.is_some() {
+                println!("strategy: NOT AVAILABLE");
+            }
+            return Ok(result);
+        }
         let mut solver = IncDet::from_qcnf_with_options(&parsed.qcnf, args.options());
         let mut result = solver.solve();
         if parsed.negated {

@@ -7,8 +7,9 @@
 //! `and`, `or`, `xor`, and `ite` with arbitrary arity where applicable.
 //!
 //! Supported shape: *prenex* circuits (quantifier blocks up front, no
-//! quantifiers inside gates) whose prefix collapses to at most two
-//! blocks before the gates — ∀∃, a single block, or ∃∀. An ∃∀ prefix is
+//! quantifiers inside gates) with **any number of blocks** — the
+//! alternation front-end handles the depth, and QCIR is the format
+//! deep-prefix corpora actually ship in. A prefix ending universally is
 //! solved by *negation*: gate definitions are self-dual, so flipping the
 //! quantifiers and negating the output yields the ∀∃ dual whose verdict
 //! is inverted ([`Qcir::negated`]). Identifiers may be QCIR "cleansed"
@@ -108,8 +109,7 @@ fn arguments(text: &str) -> Vec<&str> {
 ///
 /// # Errors
 ///
-/// Returns an error for malformed input, non-prenex quantifiers, and
-/// prefixes that do not collapse to a supported 2QBF shape.
+/// Returns an error for malformed input and non-prenex quantifiers.
 #[allow(clippy::too_many_lines)]
 pub fn parse_qcir(input: &str) -> Result<Qcir, ParseError> {
     let mut interner = Interner::default();
@@ -264,10 +264,8 @@ pub fn parse_qcir(input: &str) -> Result<Qcir, ParseError> {
     // prefix must end existentially (or be flipped by negation)
     let negated = match prefix.last() {
         Some((QuantTy::Forall, _)) if prefix.len() > 1 => {
-            // ∃∀ (or deeper): negate; only ∃∀ collapses to two blocks
-            if prefix.len() > 2 {
-                return Err(err(input.lines().count(), "only 2QBF prefixes are supported"));
-            }
+            // the gates are innermost existentials, so a prefix ending
+            // universally is solved by its dual at any depth
             for (quant, _) in &mut prefix {
                 *quant = match quant {
                     QuantTy::Exists => QuantTy::Forall,
@@ -276,12 +274,7 @@ pub fn parse_qcir(input: &str) -> Result<Qcir, ParseError> {
             }
             true
         }
-        _ => {
-            if prefix.len() > 2 {
-                return Err(err(input.lines().count(), "only 2QBF prefixes are supported"));
-            }
-            false
-        }
+        _ => false,
     };
     match prefix.last_mut() {
         Some((QuantTy::Exists, block)) => block.extend(gate_vars),
@@ -306,6 +299,31 @@ mod test {
     /// native satisfiable results.
     fn solve(input: &str) -> SolverResult {
         let qcir = parse_qcir(input).expect("parses");
+        let blocks = qcir.qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
+        if blocks > 2 {
+            // deep prefixes take the alternation front-end
+            let (result, strategy) = crate::alternation::solve_certified(
+                &qcir.qcnf,
+                crate::incdet::Options::default(),
+                crate::alternation::EXPANSION_BUDGET,
+            );
+            assert_eq!(
+                result,
+                qcir.qcnf.brute_force(),
+                "solver disagrees with oracle on:\n{input}"
+            );
+            if let Some(strategy) = strategy {
+                assert!(
+                    crate::alternation::verify_strategy(&qcir.qcnf, &strategy),
+                    "strategy invalid on:\n{input}"
+                );
+            }
+            return match (result, qcir.negated) {
+                (SolverResult::Satisfiable, true) => SolverResult::Unsatisfiable,
+                (SolverResult::Unsatisfiable, true) => SolverResult::Satisfiable,
+                (verdict, _) => verdict,
+            };
+        }
         let mut solver =
             IncDet::from_qcnf_with_options(&qcir.qcnf, crate::incdet::Options::default());
         let result = solver.solve();
@@ -353,12 +371,87 @@ mod test {
 
     #[test]
     fn shape_errors() {
-        // three genuine blocks
-        let input = "#QCIR-G14\nexists(a)\nforall(x)\nexists(b)\noutput(g)\ng = and(a, b, x)\n";
-        assert!(parse_qcir(input).is_err());
         // non-prenex quantifier gate
         let input = "#QCIR-G14\nforall(x)\noutput(g)\ng = exists(y; x)\n";
         assert!(parse_qcir(input).is_err());
+    }
+
+    #[test]
+    fn deep_prefixes() {
+        // ∃a ∀x ∃b: a ∧ b ∧ x — three genuine blocks, refuted by x = 0
+        let input = "#QCIR-G14\nexists(a)\nforall(x)\nexists(b)\noutput(g)\ng = and(a, b, x)\n";
+        assert_eq!(solve(input), SolverResult::Unsatisfiable);
+        // ∃a ∀x ∃b: b xor (a xor x) — b is bound *after* x, so it can
+        // always match; the inner block's freedom is what a deep prefix
+        // is for
+        let input = concat!(
+            "#QCIR-G14\nexists(a)\nforall(x)\nexists(b)\noutput(g)\n",
+            "g = xor(b, h)\nh = xor(a, x)\n"
+        );
+        assert_eq!(solve(input), SolverResult::Satisfiable);
+        // the same circuit with the blocks swapped: b now precedes x and
+        // cannot match it
+        let input = concat!(
+            "#QCIR-G14\nexists(a)\nexists(b)\nforall(x)\noutput(g)\n",
+            "g = xor(b, h)\nh = xor(a, x)\n"
+        );
+        assert_eq!(solve(input), SolverResult::Unsatisfiable);
+        // universally-ending deep prefixes, solved by the dual
+        let input = "#QCIR-G14\nexists(a)\nforall(x)\nexists(b)\nforall(y)\noutput(g)\ng = and(a, y)\n";
+        assert_eq!(solve(input), SolverResult::Unsatisfiable);
+        let input = "#QCIR-G14\nexists(a)\nforall(x)\nexists(b)\nforall(y)\noutput(g)\ng = or(b, -b)\n";
+        assert_eq!(solve(input), SolverResult::Satisfiable);
+    }
+
+    /// The game value of a prenex circuit: enumerate each block's
+    /// assignments in prefix order, conjoining over universal blocks and
+    /// disjoining over existential ones, and evaluate the circuit at the
+    /// leaves. The definition of QBF truth, on the circuit itself.
+    fn game(
+        blocks: &[(bool, Vec<usize>)],
+        index: usize,
+        values: &mut [bool],
+        inputs: usize,
+        gates: &[Gate],
+        output: i32,
+    ) -> bool {
+        let Some((forall, vars)) = blocks.get(index) else {
+            for (idx, gate) in gates.iter().enumerate() {
+                let var = inputs + idx + 1;
+                values[var] = match gate.op {
+                    Op::And => gate.args.iter().all(|&a| eval(values, a)),
+                    Op::Or => gate.args.iter().any(|&a| eval(values, a)),
+                    Op::Xor => eval(values, gate.args[0]) != eval(values, gate.args[1]),
+                    Op::Ite => {
+                        if eval(values, gate.args[0]) {
+                            eval(values, gate.args[1])
+                        } else {
+                            eval(values, gate.args[2])
+                        }
+                    }
+                };
+            }
+            return eval(values, output);
+        };
+        let mut all = true;
+        let mut any = false;
+        for point in 0..1u32 << vars.len() {
+            for (bit, &var) in vars.iter().enumerate() {
+                values[var + 1] = point >> bit & 1 == 1;
+            }
+            let sub = game(blocks, index + 1, values, inputs, gates, output);
+            all &= sub;
+            any |= sub;
+            // the block's quantifier decides which shortcut applies
+            if (*forall && !all) || (!*forall && any) {
+                break;
+            }
+        }
+        if *forall {
+            all
+        } else {
+            any
+        }
     }
 
     /// Direct circuit evaluation, independent of the Tseitin conversion:
@@ -428,6 +521,67 @@ mod test {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         /// Random prenex circuits in both quantifier orders, checked
         /// against direct circuit evaluation.
+        #[test]
+        /// Deep prefixes against a *general* game oracle: alternating
+        /// evaluation over the block structure, on the circuit itself,
+        /// independent of the Tseitin conversion and of the solver's
+        /// dispatch.
+        #[test]
+        fn differential_qcir_deep(
+            sizes in proptest::collection::vec(1usize..=2, 3..=5),
+            specs in proptest::collection::vec((0u8..4, 0u64..10000, 0u64..10000, 0u64..10000), 0..=8),
+            output in 0u64..10000,
+            outermost_forall: bool,
+        ) {
+            let inputs: usize = sizes.iter().sum();
+            let pick = |seed: u64, defined: usize| {
+                let raw = i32::try_from(seed % (2 * defined as u64)).unwrap();
+                let var = raw / 2 + 1;
+                if raw % 2 == 0 { var } else { -var }
+            };
+            let mut gates = Vec::new();
+            for (idx, &(op, a, b, c)) in specs.iter().enumerate() {
+                let defined = inputs + idx;
+                let (op, args) = match op {
+                    0 => (Op::And, vec![pick(a, defined), pick(b, defined)]),
+                    1 => (Op::Or, vec![pick(a, defined), pick(b, defined)]),
+                    2 => (Op::Xor, vec![pick(a, defined), pick(b, defined)]),
+                    _ => (Op::Ite, vec![pick(a, defined), pick(b, defined), pick(c, defined)]),
+                };
+                gates.push(Gate { op, args });
+            }
+            let output = pick(output, inputs + gates.len());
+
+            let mut text = String::from("#QCIR-G14\n");
+            let mut blocks: Vec<(bool, Vec<usize>)> = Vec::new();
+            let mut next = 0usize;
+            for (index, &size) in sizes.iter().enumerate() {
+                let forall = (index % 2 == 0) == outermost_forall;
+                let vars: Vec<usize> = (next..next + size).collect();
+                next += size;
+                let names: Vec<String> = vars.iter().map(|v| format!("{}", v + 1)).collect();
+                text.push_str(&format!(
+                    "{}({})\n",
+                    if forall { "forall" } else { "exists" },
+                    names.join(", ")
+                ));
+                blocks.push((forall, vars));
+            }
+            text.push_str(&format!("output({output})\n"));
+            for (idx, gate) in gates.iter().enumerate() {
+                let name = inputs + idx + 1;
+                let op = match gate.op { Op::And => "and", Op::Or => "or", Op::Xor => "xor", Op::Ite => "ite" };
+                let args: Vec<String> = gate.args.iter().map(ToString::to_string).collect();
+                text.push_str(&format!("{name} = {op}({})\n", args.join(", ")));
+            }
+
+            let mut values = vec![false; inputs + gates.len() + 1];
+            let wins = game(&blocks, 0, &mut values, inputs, &gates, output);
+            let expected =
+                if wins { SolverResult::Satisfiable } else { SolverResult::Unsatisfiable };
+            proptest::prop_assert_eq!(solve(&text), expected, "instance:\n{}", &text);
+        }
+
         #[test]
         fn differential_qcir(
             universals in 1usize..=4,
