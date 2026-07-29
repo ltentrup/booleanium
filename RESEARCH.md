@@ -439,9 +439,64 @@ of which a one-shot QDIMACS call can express.
   found strategy is causal (mirroring — realizability certified up to
   the bound), the corridor's is not (swap-timing needs the future);
   a synthetic "predict the next input" spec is clairvoyantly
-  satisfiable and correctly rejected. Remaining gap to full
-  realizability: a causal bounded strategy certifies the bound only —
-  unbounded synthesis still needs an inductive argument on top.
+  satisfiable and correctly rejected. A causal bounded strategy
+  certifies the bound only; the unbounded question is answered by the
+  winning-region refinement below, which needs no inductive argument
+  on top because the fixpoint *is* the argument.
+* **The winning-region refinement — the shape the incremental
+  interface was actually built for** (`aiger::solve_safety`). Both
+  encodings above unroll the game to a *depth*, so they answer a
+  bounded question and pay for it in prefix length or strategy size.
+  The classical alternative does not unroll at all: start with the
+  winning region `W` as every state, ask "from every state of `W`,
+  whatever the environment plays, can the controller avoid the error
+  and stay in `W`?", and on failure take the counterexample state out
+  of `W` and ask again, until `W = CPre(W)`. The controller wins iff
+  the initial state survived.
+
+  Everything about that loop suits this solver. The query is
+  `∀ state, uncontrollable. ∃ controllable` — **2QBF whatever the
+  game's depth**, so the whole RQ6 machinery is not even needed. The
+  counterexample is the core's own *verified universal witness*, which
+  arrives already minimized, so a whole cube of states leaves `W` per
+  round for free. And every refinement is an *addition* — fresh
+  membership variables, fresh clauses, the previous round's constraint
+  retired by a unit on its activation literal — so nothing is ever
+  rewritten and the in-place monotone continuation applies to the
+  entire run. The answer is *unbounded* realizability with a winning
+  region, not a bounded approximation with a depth-limited strategy.
+
+  | game | verdict | rounds | in-place | rebuild |
+  |---|---|---|---|---|
+  | `arbiter-2-2` | realizable | 11 | 10.3 ms | 3.3 ms |
+  | `arbiter-3-2` | unrealizable | 27 | 142 ms | 25.5 ms |
+  | `ring-4` | realizable | 113 | 6.3 s | 10.6 s |
+  | `corridor-4-stay` | realizable | 141 | 50.4 s | 42.0 s |
+
+  Against the unrolling the positioning is stark: `arbiter-2-2` is
+  decided **unboundedly in 10 ms with a ten-cube winning region**,
+  where the reactive unrolling spent 1.3 s to certify depth 11 alone —
+  with a twelve-million-node strategy — and 101 s for depth 12.
+
+  The incrementality result is more interesting than a confirmation
+  would have been. In-place continuation wins where the loop is long
+  (`ring-4`, 113 rounds, 1.7x) and *loses* on the short ones, by 3–6x
+  on the millisecond-scale games. That is consistent with what RQ2
+  already measured — in-place extensions stop once the first case is
+  recorded, after which both modes do the same learnt-seeded work and
+  differ by trajectory variance — but here the loop is exactly the
+  access pattern the interface was designed for, so "the right shape
+  does not yet pay" is a live finding rather than a footnote. The
+  first thing to look at is the fallback path: when a refutation
+  arrives without a verifiable witness, the loop proves a single state
+  losing with universal-assumption queries, and those run on throwaway
+  solvers.
+
+  Validated by a differential proptest over 20 000 random sequential
+  circuits: not just the verdict but the *whole winning region* is
+  compared against an explicit backward fixpoint over the state space,
+  which shares no code with the solver.
+
 * **The alternating encoding closes the same gap at the source**
   (`Unroller::alternating`, now that the solver handles deep
   prefixes): unroll with *one quantifier alternation per step*,

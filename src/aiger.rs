@@ -22,7 +22,7 @@
 //! safety queries of a synthesis loop (SYNTCOMP marks controllable inputs
 //! with the `controllable_` name prefix, accepted alongside `"2 "`).
 
-use crate::{incremental::IncrementalSolver, qcnf::QCNF, QuantTy};
+use crate::{incremental::IncrementalSolver, qcnf::QCNF, QuantTy, SolverResult};
 use std::fmt;
 
 /// Whether an input symbol name marks a controllable (existential) input:
@@ -648,6 +648,305 @@ impl Unroller {
     }
 }
 
+/// Whether a state is already outside the winning region.
+fn covered(losing: &[Vec<(usize, bool)>], state: usize) -> bool {
+    losing
+        .iter()
+        .any(|cube| cube.iter().all(|&(idx, value)| (state >> idx & 1 == 1) == value))
+}
+
+/// The state a (possibly partial) cube names, unfixed latches low.
+fn state_index(cube: &[(usize, bool)], latches: usize) -> usize {
+    let mut state = 0;
+    for &(idx, value) in cube {
+        if value && idx < latches {
+            state |= 1 << idx;
+        }
+    }
+    state
+}
+
+/// The outcome of a safety-game fixpoint computation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SafetyOutcome {
+    /// whether the controller wins from the initial state — an
+    /// *unbounded* answer, not a bounded approximation
+    pub realizable: bool,
+    /// the losing region, as cubes over the latches (index, value);
+    /// its complement is the greatest fixpoint `νW. CPre(W)`
+    pub losing: Vec<Vec<(usize, bool)>>,
+    /// refinement rounds taken, i.e. incremental solves
+    pub rounds: u32,
+}
+
+/// Solves a safety game by shrinking the winning region instead of
+/// unrolling the game.
+///
+/// The winning region starts as *all* states and is refined by the
+/// query "from every state of `W`, whatever the environment plays, can
+/// the controller avoid the error and stay in `W`?" — the one-step
+/// controllable predecessor, `∀ state, uncontrollable. ∃ controllable`,
+/// which is **2QBF whatever the game's depth**. Unsatisfiable yields a
+/// universal witness: a state (and the environment move refuting it)
+/// that is not in `CPre(W)`, so its whole cube leaves `W` and the query
+/// is re-asked. Satisfiable means `W = CPre(W)`, the greatest fixpoint,
+/// and the controller wins iff the initial state survived.
+///
+/// Every refinement is an *addition* — fresh membership variables and
+/// clauses, with the previous round's constraint retired by a unit on
+/// its activation literal — so the whole loop rides the in-place
+/// monotone continuation of [`IncrementalSolver`] and every learnt
+/// clause carries across rounds. This is the access pattern the
+/// incremental interface was designed for, and unlike the unrolling
+/// ([`Unroller`]) it answers realizability outright rather than for a
+/// bound, with a winning region instead of a depth-limited strategy.
+///
+/// # Errors
+///
+/// Returns an error if the input is not a well-formed ASCII AIGER
+/// safety specification.
+///
+/// # Panics
+///
+/// Panics if a refutation arrives without a verifiable universal
+/// witness, which would leave the refinement with nothing to remove.
+pub fn solve_safety(
+    input: &str,
+    options: crate::incdet::Options,
+) -> Result<SafetyOutcome, ParseError> {
+    solve_safety_with_continuation(input, options, true)
+}
+
+/// [`solve_safety`] with the in-place continuation switchable, so a
+/// benchmark can price what the incremental stack is worth on this
+/// loop against rebuilding the core per refinement.
+///
+/// # Errors
+///
+/// Returns an error if the input is not a well-formed ASCII AIGER
+/// safety specification.
+///
+/// # Panics
+///
+/// Panics if an unsatisfiable region query yields no losing state,
+/// which cannot happen.
+#[allow(clippy::too_many_lines)]
+pub fn solve_safety_with_continuation(
+    input: &str,
+    options: crate::incdet::Options,
+    continuation: bool,
+) -> Result<SafetyOutcome, ParseError> {
+    let aiger = parse_aag(input)?;
+    let controllable: Vec<bool> =
+        aiger.input_names.iter().map(|n| n.as_deref().is_some_and(is_controllable)).collect();
+    let var = |lit: u64| usize::try_from(lit / 2).expect("variable fits a usize");
+    let mut classes = vec![None; usize::try_from(aiger.max_var).expect("fits") + 1];
+    for (pos, &input) in aiger.inputs.iter().enumerate() {
+        classes[var(input)] = Some(Class::Input(pos));
+    }
+    for (idx, latch) in aiger.latches.iter().enumerate() {
+        classes[var(latch.lit)] = Some(Class::Latch(idx));
+    }
+    for (idx, and) in aiger.ands.iter().enumerate() {
+        classes[var(and.lhs)] = Some(Class::Gate(idx));
+    }
+
+    let mut solver = IncrementalSolver::new(options);
+    solver.set_continuation(continuation);
+    let dimacs = |v: u32| i32::try_from(v).expect("variable fits an i32");
+    let universal = |solver: &mut IncrementalSolver| {
+        let v = solver.fresh_var();
+        solver.declare_universal(v);
+        v
+    };
+    // the current state and the environment move are the universals;
+    // everything the controller computes from them is existential
+    let state_vars: Vec<u32> = aiger.latches.iter().map(|_| universal(&mut solver)).collect();
+    let input_vars: Vec<u32> = controllable
+        .iter()
+        .map(|&c| {
+            if c {
+                let v = solver.fresh_var();
+                solver.declare_existential(v);
+                v
+            } else {
+                universal(&mut solver)
+            }
+        })
+        .collect();
+    let existential = |solver: &mut IncrementalSolver| {
+        let v = solver.fresh_var();
+        solver.declare_existential(v);
+        v
+    };
+    let true_var = existential(&mut solver);
+    solver.add_clause(&[dimacs(true_var)]);
+    let gate_vars: Vec<u32> = aiger.ands.iter().map(|_| existential(&mut solver)).collect();
+    let lit = |aiger_lit: u64| -> i32 {
+        let v = match aiger_lit {
+            0 => return -dimacs(true_var),
+            1 => return dimacs(true_var),
+            _ => match classes[var(aiger_lit)].expect("defined variable") {
+                Class::Input(pos) => input_vars[pos],
+                Class::Latch(idx) => state_vars[idx],
+                Class::Gate(idx) => gate_vars[idx],
+            },
+        };
+        if aiger_lit % 2 == 0 {
+            dimacs(v)
+        } else {
+            -dimacs(v)
+        }
+    };
+    for (idx, and) in aiger.ands.iter().enumerate() {
+        let lhs = dimacs(gate_vars[idx]);
+        solver.add_clause(&[-lhs, lit(and.rhs0)]);
+        solver.add_clause(&[-lhs, lit(and.rhs1)]);
+        solver.add_clause(&[lhs, -lit(and.rhs0), -lit(and.rhs1)]);
+    }
+    // the successor state, named so the winning region can speak about it
+    let next_vars: Vec<u32> = aiger
+        .latches
+        .iter()
+        .map(|latch| {
+            let v = existential(&mut solver);
+            solver.add_clause(&[-dimacs(v), lit(latch.next)]);
+            solver.add_clause(&[dimacs(v), -lit(latch.next)]);
+            v
+        })
+        .collect();
+
+    // `outside[k]` holds iff the state is in one of the first k losing
+    // cubes; the same chain over the successor is `next_outside`. Both
+    // grow by one link per round, so nothing is ever rewritten.
+    let mut outside: Option<u32> = None;
+    let mut next_outside: Option<u32> = None;
+    let mut losing: Vec<Vec<(usize, bool)>> = Vec::new();
+    let mut previous_guard: Option<u32> = None;
+    let mut rounds = 0u32;
+
+    loop {
+        rounds += 1;
+        // activate this round's constraint and retire the last one
+        let guard = existential(&mut solver);
+        if let Some(previous) = previous_guard.replace(guard) {
+            solver.add_clause(&[-dimacs(previous)]);
+        }
+        let relax: Vec<i32> = outside.iter().map(|&v| dimacs(v)).collect();
+        for &out in &aiger.outputs {
+            let mut clause = vec![-dimacs(guard), -lit(out)];
+            clause.extend(&relax);
+            solver.add_clause(&clause);
+        }
+        if let Some(next_out) = next_outside {
+            let mut clause = vec![-dimacs(guard), -dimacs(next_out)];
+            clause.extend(&relax);
+            solver.add_clause(&clause);
+        }
+
+        if solver.solve_with_assumptions(&[dimacs(guard)]) != SolverResult::Unsatisfiable {
+            // `W = CPre(W)`: the greatest fixpoint is reached
+            let initial: Vec<bool> = aiger.latches.iter().map(|l| l.reset == 1).collect();
+            let realizable = !losing
+                .iter()
+                .any(|cube| cube.iter().all(|&(idx, value)| initial[idx] == value));
+            return Ok(SafetyOutcome { realizable, losing, rounds });
+        }
+        let project = |witness: &[i32]| -> Vec<(usize, bool)> {
+            witness
+                .iter()
+                .filter_map(|&l| {
+                    let v = u32::try_from(l.abs()).expect("fits");
+                    state_vars.iter().position(|&s| s == v).map(|idx| (idx, l > 0))
+                })
+                .collect()
+        };
+        // A *verified* witness is the strong statement — no completion
+        // of the universals admits any response — so its whole state
+        // cube leaves the region at once. That is where the loop's
+        // generalization comes from, and it is free: the core already
+        // minimizes and checks the witness.
+        // Without one, fall back to removing a single state, proved
+        // losing by re-asking the query with that state assumed. The
+        // unverified candidate names the first state to try; if it
+        // survives, some state must still fail, so scanning the region
+        // finds it. Sound either way, because only a *complete* state
+        // assignment licenses a removal.
+        let cube = if let Some(witness) = solver.universal_witness() {
+            project(&witness)
+        } else {
+            {
+                let mut probe: Vec<usize> = Vec::new();
+                if let Some(candidate) = solver.universal_witness_candidate() {
+                    probe.push(state_index(&project(&candidate), state_vars.len()));
+                }
+                probe.extend(
+                    (0..1usize << state_vars.len())
+                        .filter(|&state| !covered(&losing, state)),
+                );
+                probe
+                    .into_iter()
+                    .find(|&state| {
+                        let mut assumptions = vec![dimacs(guard)];
+                        assumptions.extend(state_vars.iter().enumerate().map(|(idx, &v)| {
+                            if state >> idx & 1 == 1 {
+                                dimacs(v)
+                            } else {
+                                -dimacs(v)
+                            }
+                        }));
+                        solver.solve_with_assumptions(&assumptions)
+                            == SolverResult::Unsatisfiable
+                    })
+                    .map(|state| {
+                        (0..state_vars.len()).map(|idx| (idx, state >> idx & 1 == 1)).collect()
+                    })
+                    .expect("an unsatisfiable region query has a losing state in it")
+            }
+        };
+        if cube.is_empty() {
+            // every state loses, so the initial one does too
+            return Ok(SafetyOutcome { realizable: false, losing: vec![Vec::new()], rounds });
+        }
+
+        // extend both membership chains by the new cube
+        let link = |solver: &mut IncrementalSolver, vars: &[u32], chain: &mut Option<u32>| {
+            let inside = solver.fresh_var();
+            solver.declare_existential(inside);
+            let cube_lits: Vec<i32> = cube
+                .iter()
+                .map(|&(idx, value)| {
+                    if value {
+                        dimacs(vars[idx])
+                    } else {
+                        -dimacs(vars[idx])
+                    }
+                })
+                .collect();
+            for &l in &cube_lits {
+                solver.add_clause(&[-dimacs(inside), l]);
+            }
+            let mut reverse = vec![dimacs(inside)];
+            reverse.extend(cube_lits.iter().map(|l| -l));
+            solver.add_clause(&reverse);
+
+            let joined = solver.fresh_var();
+            solver.declare_existential(joined);
+            solver.add_clause(&[-dimacs(inside), dimacs(joined)]);
+            let mut forward = vec![-dimacs(joined), dimacs(inside)];
+            if let Some(previous) = *chain {
+                solver.add_clause(&[-dimacs(previous), dimacs(joined)]);
+                forward.push(dimacs(previous));
+            }
+            solver.add_clause(&forward);
+            *chain = Some(joined);
+        };
+        link(&mut solver, &state_vars, &mut outside);
+        link(&mut solver, &next_vars, &mut next_outside);
+        losing.push(cube);
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -760,6 +1059,136 @@ mod test {
             state = aiger.latches.iter().map(|l| litval(&values, l.next)).collect();
         }
         true
+    }
+
+    /// The exact winning region of a safety game, by explicit backward
+    /// iteration over the state space: start with every state and drop
+    /// those from which some environment move defeats every controller
+    /// move, until nothing changes. Independent of everything
+    /// [`solve_safety`] does — no solver, no encoding, no cubes.
+    fn winning_region(aiger: &Aiger, is_controllable: &[bool]) -> Vec<bool> {
+        let positions = |want: bool| -> Vec<usize> {
+            is_controllable
+                .iter()
+                .enumerate()
+                .filter(|&(_, &c)| c == want)
+                .map(|(p, _)| p)
+                .collect()
+        };
+        let (uncontrollable, controllable) = (positions(false), positions(true));
+        let latches = aiger.latches.len();
+        let var = |l: u64| usize::try_from(l / 2).unwrap();
+        let mut winning = vec![true; 1 << latches];
+        loop {
+            let mut next_winning = winning.clone();
+            for state in 0..1usize << latches {
+                if !winning[state] {
+                    continue;
+                }
+                let survives = (0..1u64 << uncontrollable.len()).all(|env| {
+                    (0..1u64 << controllable.len()).any(|ctl| {
+                        let mut values =
+                            vec![false; usize::try_from(aiger.max_var).unwrap() + 1];
+                        for (bit, &pos) in uncontrollable.iter().enumerate() {
+                            values[var(aiger.inputs[pos])] = env >> bit & 1 == 1;
+                        }
+                        for (bit, &pos) in controllable.iter().enumerate() {
+                            values[var(aiger.inputs[pos])] = ctl >> bit & 1 == 1;
+                        }
+                        for (idx, latch) in aiger.latches.iter().enumerate() {
+                            values[var(latch.lit)] = state >> idx & 1 == 1;
+                        }
+                        for and in &aiger.ands {
+                            values[var(and.lhs)] =
+                                litval(&values, and.rhs0) && litval(&values, and.rhs1);
+                        }
+                        if aiger.outputs.iter().any(|&out| litval(&values, out)) {
+                            return false;
+                        }
+                        let successor = aiger
+                            .latches
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, l)| litval(&values, l.next))
+                            .fold(0usize, |acc, (idx, _)| acc | 1 << idx);
+                        winning[successor]
+                    })
+                });
+                next_winning[state] = survives;
+            }
+            if next_winning == winning {
+                return winning;
+            }
+            winning = next_winning;
+        }
+    }
+
+    /// Runs the refinement loop and checks its answer, and its whole
+    /// winning region, against the explicit fixpoint.
+    fn check_safety(text: &str) -> SafetyOutcome {
+        let aiger = parse_aag(text).expect("parses");
+        let is_controllable: Vec<bool> =
+            aiger.input_names.iter().map(|n| n.as_deref().is_some_and(is_controllable)).collect();
+        let expected = winning_region(&aiger, &is_controllable);
+        let outcome =
+            solve_safety(text, crate::incdet::Options::default()).expect("spec parses");
+
+        // every state the loop removed must really be losing, and every
+        // state it kept must really be winning
+        for (state, &winning) in expected.iter().enumerate() {
+            let removed = outcome.losing.iter().any(|cube| {
+                cube.iter().all(|&(idx, value)| (state >> idx & 1 == 1) == value)
+            });
+            assert_eq!(!removed, winning, "state {state} of:\n{text}");
+        }
+        let initial = aiger
+            .latches
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.reset == 1)
+            .fold(0usize, |acc, (idx, _)| acc | 1 << idx);
+        assert_eq!(outcome.realizable, expected[initial], "verdict of:\n{text}");
+        outcome
+    }
+
+    #[test]
+    fn safety_copycat_is_realizable() {
+        // error = u xor c: the controller copies and wins forever, so
+        // no state is ever removed and the fixpoint is immediate
+        let text = "aag 5 2 0 1 3\n2\n4\n10\n6 2 5\n8 3 4\n10 7 9\ni0 u\ni1 controllable_c\n";
+        let outcome = check_safety(text);
+        assert!(outcome.realizable);
+        assert!(outcome.losing.is_empty());
+        assert_eq!(outcome.rounds, 1);
+    }
+
+    #[test]
+    fn safety_latch_delay_is_unrealizable() {
+        // error = latch, latch next = uncontrollable input: the
+        // environment raises the input and the controller cannot stop
+        // it, so every state is lost and the initial one with it
+        let text = "aag 2 1 1 1 0\n2\n4 2\n4\ni0 u\n";
+        let outcome = check_safety(text);
+        assert!(!outcome.realizable);
+    }
+
+    #[test]
+    fn safety_refines_to_a_nontrivial_region() {
+        // error = latch AND u; latch next = c. The controller must keep
+        // the latch low forever: the state with the latch set is
+        // losing, the state with it clear is winning, and the initial
+        // state is the clear one.
+        let text = concat!(
+            "aag 4 2 1 1 1\n",
+            "2\n4\n",       // u, controllable_c
+            "6 4 0\n",      // latch := c
+            "8\n",          // error
+            "8 6 2\n",      // latch AND u
+            "i0 u\ni1 controllable_c\n"
+        );
+        let outcome = check_safety(text);
+        assert!(outcome.realizable);
+        assert_eq!(outcome.losing.len(), 1);
     }
 
     /// The *reactive* bounded-safety oracle matching the alternating
@@ -1040,7 +1469,7 @@ mod test {
     }
 
     proptest::proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(20000))]
         #[test]
         fn differential_unrolling(
             universals in 0usize..=2,
@@ -1077,6 +1506,11 @@ mod test {
                 text.push_str(&format!("i{i} {name}{i}\n"));
             }
             check_unrolling(&text, k, continuation);
+            // and the same spec as a *game* rather than an unrolling:
+            // the refinement loop's whole winning region against the
+            // explicit backward fixpoint, which answers realizability
+            // outright instead of for a bound
+            check_safety(&text);
             // the same spec through the reactive prefix, against the
             // reactive oracle: one alternation per step exercises the
             // alternation front-end on structured deep prefixes, which

@@ -6,7 +6,8 @@
 //! `cargo run --release --bin bench_games`.
 
 use booleanium::{
-    aiger::Unroller, alternation, incdet::Options, incremental::IncrementalSolver, SolverResult,
+    aiger, aiger::Unroller, alternation, incdet::Options, incremental::IncrementalSolver,
+    SolverResult,
 };
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -411,6 +412,43 @@ fn main() {
             if elapsed.as_secs_f64() > 20.0 || result == SolverResult::Unknown {
                 break;
             }
+        }
+    }
+
+    // The winning-region refinement: instead of unrolling the game to a
+    // depth, shrink `W` by counterexample until `W = CPre(W)`. The query
+    // stays ∀∃ whatever the game's depth, every refinement is an
+    // addition, and the answer is *unbounded* realizability rather than
+    // a bounded approximation — the access pattern the incremental
+    // interface was built for.
+    println!();
+    for (name, text) in [
+        ("game-arbiter-2-2", arbiter(2, 2)),
+        ("game-arbiter-3-2", arbiter(3, 2)),
+        ("game-ring-4", pursuit(4, true, false)),
+        ("game-corridor-4-stay", pursuit(4, false, true)),
+    ] {
+        if let Some(filter) = std::env::args().nth(1) {
+            if !name.contains(&filter) {
+                continue;
+            }
+        }
+        for continuation in [true, false] {
+            let start = Instant::now();
+            let outcome = aiger::solve_safety_with_continuation(
+                &text,
+                Options::default(),
+                continuation,
+            )
+            .expect("generated spec parses");
+            let elapsed = start.elapsed();
+            let mode = if continuation { "in-place" } else { "rebuild" };
+            println!(
+                "{name:<22} {mode:>8} {:>14} {:>3} rounds {:>4} losing cubes {elapsed:>12.3?}",
+                if outcome.realizable { "realizable" } else { "unrealizable" },
+                outcome.rounds,
+                outcome.losing.len(),
+            );
         }
     }
     println!("total: {:.3?}", total.elapsed());

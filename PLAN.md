@@ -410,6 +410,18 @@ increasing order of ambition:
   selects). Design rationale and the algorithm survey
   (dependency-aware ID, expansion, hybrids) in `RESEARCH.md` (RQ6).
 
+* **Safety games without unrolling — done** (`aiger::solve_safety`):
+  the winning region starts as every state and is shrunk by
+  counterexample until `W = CPre(W)`, over a query that stays ∀∃ at
+  any game depth. Every refinement is a pure addition, so the loop
+  rides the in-place continuation; the counterexample is the core's
+  verified universal witness, so a whole cube leaves the region per
+  round. Answers *unbounded* realizability with a winning region —
+  `arbiter-2-2` in 10.3 ms and 11 rounds, where the reactive
+  unrolling needs 1.3 s for depth 11 alone. Validated against an
+  explicit backward fixpoint on 20k random circuits, region and all.
+  See `RESEARCH.md` (RQ5).
+
 ### 2. Certificates
 
 * **Skolem function verification — done**
