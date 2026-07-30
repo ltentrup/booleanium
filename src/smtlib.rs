@@ -31,9 +31,9 @@
 //!   built positionally — block `i` of any assertion joins block `i` of
 //!   the session, generalizing the two-block rule — with free constants
 //!   outermost and the gates innermost, and each check goes to
-//!   [`crate::alternation`]. Verdicts only for now: the composed
-//!   strategy exists but is not yet rendered as `define-fun`s, so
-//!   `get-model` reports that rather than guessing.
+//!   [`crate::alternation`]. `get-model` prints the composed strategy
+//!   through [`crate::alternation::Strategy::to_smtlib`], which renders
+//!   the same AIG the strategy circuits use.
 //!
 //! The structure is fixed by the first quantified assertion (or the
 //! first check, defaulting to ∀∃); mixing both shapes in one session
@@ -203,6 +203,9 @@ pub struct Frontend {
     /// rule that all `forall` binders are universal and all `exists`
     /// binders inner.
     blocks: Vec<(bool, Vec<u32>)>,
+    /// in `Deep` mode: the composed strategy of the last sat check, and
+    /// the universal variables it is a function of
+    deep_model: Option<(crate::alternation::Strategy, Vec<crate::literal::Var>)>,
     last: Option<SolverResult>,
 }
 
@@ -219,6 +222,7 @@ impl Frontend {
             used_constant: false,
             witness: None,
             blocks: Vec::new(),
+            deep_model: None,
             last: None,
         }
     }
@@ -570,10 +574,16 @@ impl Frontend {
 
     fn get_model(&self) -> Result<String, String> {
         if self.mode == Mode::Deep {
-            return Err("no model available; models beyond two quantifier blocks are not \
-                        emitted yet (the verdict is decided, the composed strategy is not \
-                        yet rendered as define-funs)"
-                .to_string());
+            if self.last != Some(SolverResult::Satisfiable) {
+                return Err("no model available; the last check-sat was not sat".to_string());
+            }
+            let (strategy, universals) = self
+                .deep_model
+                .as_ref()
+                .ok_or("no model available; the solve took a route it cannot invert")?;
+            let names = self.names.clone();
+            return Ok(strategy
+                .to_smtlib(universals, &move |var: i32| names.get(&var).cloned()));
         }
         if self.mode == Mode::ExistsForall {
             if self.last != Some(SolverResult::Satisfiable) {
@@ -659,12 +669,19 @@ impl Frontend {
             for &lit in extra {
                 qcnf.matrix.push(vec![crate::literal::Lit::from_dimacs(lit)]);
             }
-            let (result, _strategy) = crate::alternation::solve_certified(
+            let universals: Vec<crate::literal::Var> = qcnf
+                .prefix
+                .iter()
+                .filter(|(q, _)| *q == crate::QuantTy::Forall)
+                .flat_map(|(_, vars)| vars.iter().copied())
+                .collect();
+            let (result, strategy) = crate::alternation::solve_certified(
                 &qcnf,
                 self.options,
                 crate::alternation::EXPANSION_BUDGET,
             );
             self.witness = None;
+            self.deep_model = strategy.map(|strategy| (strategy, universals));
             self.last = Some(result);
             return result;
         }

@@ -219,6 +219,82 @@ impl Strategy {
         crate::incdet::model::render(&aig, &outputs, universals, name)
     }
 
+    /// Renders the strategy as SMT-LIB `define-fun`s over the universal
+    /// variables — the same artifact
+    /// [`SkolemModel::to_smtlib`](crate::incdet::model::SkolemModel::to_smtlib)
+    /// produces for a 2QBF result, for a prefix of any depth.
+    ///
+    /// Goes through the same AIG as
+    /// [`Strategy::to_aiger`](Strategy::to_aiger): each gate becomes an
+    /// internal `define-fun`, each determined variable a public one, so
+    /// the two formats cannot disagree about what the strategy is.
+    /// `name` maps DIMACS variables to their surface names; variables
+    /// without one are omitted from the public definitions, as in the
+    /// 2QBF emitter.
+    #[must_use]
+    pub fn to_smtlib(&self, universals: &[Var], name: &dyn Fn(i32) -> Option<String>) -> String {
+        use std::fmt::Write as _;
+        let (aig, values) = self.build(universals);
+        let params: Vec<String> = universals
+            .iter()
+            .map(|&v| name(v.to_dimacs()).unwrap_or_else(|| format!("_u{}", v.to_dimacs())))
+            .collect();
+        let decl: String =
+            params.iter().map(|p| format!("({p} Bool)")).collect::<Vec<_>>().join(" ");
+        let args = params.join(" ");
+        let call = |f: &str| {
+            if params.is_empty() {
+                f.to_string()
+            } else {
+                format!("({f} {args})")
+            }
+        };
+        // an AIG literal as an SMT-LIB term: constants, inputs by their
+        // parameter name, gates by a call to their helper
+        let term = |lit: u64| -> String {
+            if lit == 0 {
+                return "false".to_string();
+            }
+            if lit == 1 {
+                return "true".to_string();
+            }
+            let var = lit / 2;
+            let position = usize::try_from(var - 1).expect("fits");
+            let base = if position < params.len() {
+                params[position].clone()
+            } else {
+                call(&format!("_g{var}"))
+            };
+            if lit & 1 == 1 {
+                format!("(not {base})")
+            } else {
+                base
+            }
+        };
+
+        let mut out = String::from("(
+");
+        for &(lhs, rhs0, rhs1) in aig.gates() {
+            let _ = writeln!(
+                out,
+                "  (define-fun _g{} ({decl}) Bool (and {} {}))",
+                lhs / 2,
+                term(rhs0),
+                term(rhs1)
+            );
+        }
+        let mut defined: Vec<(Var, u64)> = values.into_iter().collect();
+        defined.sort_unstable();
+        for (var, wire) in defined {
+            let Some(public) = name(var.to_dimacs()) else {
+                continue;
+            };
+            let _ = writeln!(out, "  (define-fun {public} ({decl}) Bool {})", term(wire));
+        }
+        out.push_str(")\n");
+        out
+    }
+
     /// Builds the strategy into a fresh AIG whose inputs are the given
     /// universal variables, and returns it together with the output wire
     /// of every variable the strategy determines.
@@ -1439,6 +1515,26 @@ mod test {
                 .collect();
             let mut expected: HashMap<i32, bool> = HashMap::new();
             strategy.evaluate(&assignment, &mut expected);
+            // the SMT-LIB rendering of the same AIG must agree too
+            let names = |v: i32| Some(format!("v{v}"));
+            let smt = strategy.to_smtlib(&universals, &names);
+            let bound: Vec<(String, bool)> = universals
+                .iter()
+                .zip(&bits)
+                .map(|(v, &b)| (format!("v{}", v.to_dimacs()), b))
+                .collect();
+            let interpreted = interpret(&smt, &bound);
+            for (var, value) in &expected {
+                prop_assert_eq!(
+                    interpreted.get(&format!("v{var}")),
+                    Some(value),
+                    "the SMT-LIB model disagrees on variable {} at {:?} on:\n{}\n{}",
+                    var,
+                    &assignment,
+                    qcnf,
+                    smt
+                );
+            }
             for (var, value) in &expected {
                 prop_assert_eq!(
                     outputs.get(var),
@@ -1452,6 +1548,84 @@ mod test {
             }
         }
         Ok(())
+    }
+
+    /// Evaluates the SMT-LIB rendering of a strategy under one
+    /// assignment of the universals, returning the value of every
+    /// publicly defined variable. A tiny reader for the shape the
+    /// emitter produces — `and`, `not`, constants, parameters, and
+    /// calls to earlier definitions — so the check is independent of the
+    /// emitter's own bookkeeping.
+    fn interpret(text: &str, params: &[(String, bool)]) -> HashMap<String, bool> {
+        let mut defs: HashMap<String, bool> = params.iter().cloned().collect();
+        for line in text.lines() {
+            let line = line.trim();
+            let Some(rest) = line.strip_prefix("(define-fun ") else {
+                continue;
+            };
+            let (name, rest) = rest.split_once(' ').expect("a name");
+            // the parameter list is fixed and already bound; the body is
+            // whatever follows it, minus the trailing paren of the form
+            let body = rest
+                .split_once(") Bool ")
+                .expect("a parameter list and a body")
+                .1
+                .strip_suffix(')')
+                .expect("a closing paren")
+                .trim();
+            let mut tokens = body
+                .replace('(', " ( ")
+                .replace(')', " ) ")
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .peekable();
+            let value = eval_term(&mut tokens, &defs);
+            defs.insert(name.to_string(), value);
+        }
+        defs
+    }
+
+    /// One term of the emitter's grammar.
+    fn eval_term(
+        tokens: &mut std::iter::Peekable<std::vec::IntoIter<String>>,
+        defs: &HashMap<String, bool>,
+    ) -> bool {
+        let token = tokens.next().expect("a term");
+        if token != "(" {
+            return match token.as_str() {
+                "false" => false,
+                "true" => true,
+                name => *defs.get(name).expect("a bound name"),
+            };
+        }
+        let head = tokens.next().expect("an application head");
+        let mut value = match head.as_str() {
+            "not" => !eval_term(tokens, defs),
+            "and" => {
+                let mut all = true;
+                while tokens.peek().is_some_and(|t| t != ")") {
+                    all &= eval_term(tokens, defs);
+                }
+                all
+            }
+            // a call to an earlier definition: its arguments are always
+            // the full parameter list, so the stored value applies
+            name => {
+                let stored = *defs.get(name).expect("a defined function");
+                while tokens.peek().is_some_and(|t| t != ")") {
+                    let _ = tokens.next();
+                }
+                stored
+            }
+        };
+        // `and` may have stopped early on a false conjunct
+        while tokens.peek().is_some_and(|t| t != ")") {
+            value &= eval_term(tokens, defs);
+        }
+        assert_eq!(tokens.next().as_deref(), Some(")"), "unbalanced term");
+        value
     }
 
     /// Simulates an ASCII AIGER combinational circuit, returning the

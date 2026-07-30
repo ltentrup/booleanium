@@ -366,12 +366,22 @@ notes:
   either side of the boundary (an inner existential that can track the
   last universal, and the same body with it bound too early).
 
-  Remaining gap, and the next step: `get-model` for deep sessions. The
-  composed strategy is available and SAT-verified; what is missing is
-  rendering it as `define-fun`s. The cheap route is the shared AIG —
-  `Strategy::build` already produces one, and an AIG prints as
-  `define-fun`s almost directly — which would also give the QCIR and
-  QDIMACS paths an SMT-LIB model format instead of only AIGER.
+  **`get-model` for deep sessions — done** (`Strategy::to_smtlib`), by
+  the route the previous note predicted: the composed strategy already
+  builds an AIG for `to_aiger`, and an AIG prints as `define-fun`s
+  almost directly — one internal definition per gate, one public
+  definition per determined variable. Both formats therefore come out of
+  the *same* structure and cannot disagree about what the strategy is.
+
+  This also removes the caveat recorded further down about SMT-LIB
+  models being validated only indirectly, at least for this emitter: the
+  alternation fuzz now renders every composed strategy as SMT-LIB,
+  *reads it back* with a small interpreter for the grammar the emitter
+  uses (`and`, `not`, constants, parameters, calls to earlier
+  definitions), and compares against `Strategy::evaluate` at every
+  universal assignment — 200k cases, alongside the existing AIGER
+  parse-and-simulate check and the SAT check. Three independent readings
+  of the same strategy now have to agree.
 * Open question: how much of full Bool/BV ∀∃-SMT is reachable before
   theories (bit-blasting BV eagerly keeps everything Boolean but risks
   re-losing word-level structure — the same story one level up).
