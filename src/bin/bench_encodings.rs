@@ -241,6 +241,70 @@ impl Builder {
     }
 }
 
+/// ∀ a, b (two `n`-bit words) ∃ y: `a + y = b` modulo `2^n` — a
+/// *word-level* operation as an eager bit-blaster leaves it, a
+/// ripple-carry chain of gate definitions. Satisfiable (`y = b - a`),
+/// and `y` is determined by `a` and `b`, but only *implicitly*: the
+/// gates define the sum bits from `a` and `y`, so determinizing `y`
+/// means inverting the adder through its definitions rather than
+/// reading them forwards. This is RQ3's question — whether bit-blasting
+/// into definitions keeps enough structure — posed one level above RQ1.
+fn adder_inverse(n: usize) -> Circuit {
+    let mut bld = Builder::new(2 * n, n);
+    let a = |i: usize| i;
+    let b = |i: usize| n + i;
+    let mut carry: Option<i32> = None;
+    let mut equal = Vec::new();
+    for i in 0..n {
+        let (ai, yi) = (bld.universal(a(i)), bld.existential(i));
+        let half = bld.xor(ai, yi);
+        let sum = match carry {
+            Some(c) => bld.xor(half, c),
+            None => half,
+        };
+        // the carry out: two of the three inputs high
+        carry = Some(match carry {
+            Some(c) => {
+                let ay = bld.and(vec![ai, yi]);
+                let ac = bld.and(vec![ai, c]);
+                let yc = bld.and(vec![yi, c]);
+                bld.or(vec![ay, ac, yc])
+            }
+            None => bld.and(vec![ai, yi]),
+        });
+        let bi = bld.universal(b(i));
+        equal.push(-bld.xor(sum, bi));
+    }
+    let ok = bld.and(equal);
+    bld.finish(ok)
+}
+
+/// ∀ x (an `n`-bit word) ∃ y: `y <u x` or `x = 0` — an unsigned
+/// comparison, the other shape a bit-blaster produces, under a
+/// *disjunctive* top so nothing is forced from the output. Satisfiable,
+/// but `y` is a genuine choice rather than a function of `x`, which is
+/// where RQ1 found the encodings separating.
+fn comparator_choice(n: usize) -> Circuit {
+    let mut bld = Builder::new(n, n);
+    // less-than by a borrow chain from the least significant bit
+    let mut less: Option<i32> = None;
+    for i in 0..n {
+        let (xi, yi) = (bld.universal(i), bld.existential(i));
+        let below = bld.and(vec![-yi, xi]);
+        let equal_bit = -bld.xor(yi, xi);
+        less = Some(match less {
+            Some(previous) => {
+                let carried = bld.and(vec![equal_bit, previous]);
+                bld.or(vec![below, carried])
+            }
+            None => below,
+        });
+    }
+    let zero = bld.and((0..n).map(|i| -bld.universal(i)).collect::<Vec<_>>());
+    let ok = bld.or(vec![less.expect("n > 0"), zero]);
+    bld.finish(ok)
+}
+
 /// ∀ x_1..x_n ∃ y_1..y_n: every y_i must equal the prefix parity
 /// x_1 ⊕ … ⊕ x_i (satisfiable; the ↔ per output is exactly what a
 /// one-sided encoding weakens).
@@ -413,6 +477,12 @@ fn main() {
     }
     for seed in 1..=6 {
         run(&format!("random-6-10-40-{seed}"), &random_circuit(6, 10, 40, seed));
+    }
+    for n in [4, 6, 8] {
+        run(&format!("bv-add-inverse-{n}"), &adder_inverse(n));
+    }
+    for n in [4, 6, 8] {
+        run(&format!("bv-ult-choice-{n}"), &comparator_choice(n));
     }
     println!("total: {:.3?}", total.elapsed());
 }

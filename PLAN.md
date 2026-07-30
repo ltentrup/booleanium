@@ -202,7 +202,13 @@ increasing order of ambition:
   (`bench_encodings`: the same families as QCIR, two-sided CNF, and
   Plaisted–Greenbaum CNF) measured what the format is worth — the
   answer is conditional, not the predicted uniform win; results and
-  analysis in `RESEARCH.md` (RQ1). The larger questions this opens — an
+  analysis in `RESEARCH.md` (RQ1). Two bit-vector families
+  (`bv-add-inverse`, `bv-ult-choice`) extend it to the bit-blasting
+  question: an 8-bit addition determinizes 61/61 with zero decisions
+  even though `y` must be recovered by *inverting* the adder, while an
+  8-bit comparison under a disjunctive top determinizes 2/40 and PG
+  beats the definition-level encoding 2.4x — so what predicts the
+  outcome is output-forcing, not word-level-ness (`RESEARCH.md`, RQ3). The larger questions this opens — an
   incremental (QIPASIR-style or SMT-LIB) interface, theories, and
   positioning as a building block for two-player games — are collected
   in **`RESEARCH.md`**.

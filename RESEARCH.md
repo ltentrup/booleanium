@@ -382,9 +382,41 @@ notes:
   universal assignment — 200k cases, alongside the existing AIGER
   parse-and-simulate check and the SAT check. Three independent readings
   of the same strategy now have to agree.
-* Open question: how much of full Bool/BV ∀∃-SMT is reachable before
-  theories (bit-blasting BV eagerly keeps everything Boolean but risks
-  re-losing word-level structure — the same story one level up).
+* **Does eager bit-blasting re-lose word-level structure? — measured,
+  and the framing was wrong** (`bench_encodings`, families
+  `bv-add-inverse-n` and `bv-ult-choice-n`: an `n`-bit addition and an
+  `n`-bit unsigned comparison, bit-blasted into gate definitions the way
+  a BV frontend would, then rendered through the same three encodings as
+  RQ1).
+
+  | family | encoding | initially determinized | decisions | time |
+  |---|---|---|---|---|
+  | `bv-add-inverse-8` | qcir | **61/61** | 0 | 0.19 ms |
+  | `bv-add-inverse-8` | two-sided | **61/61** | 0 | 0.23 ms |
+  | `bv-add-inverse-8` | PG | 57/61 | 0 | 0.16 ms |
+  | `bv-ult-choice-8` | qcir | 2/40 | 243 | 5.5 ms |
+  | `bv-ult-choice-8` | two-sided | 2/40 | 286 | 8.1 ms |
+  | `bv-ult-choice-8` | PG | 1/40 | **81** | **2.3 ms** |
+
+  `∀a,b ∃y. a + y = b` bit-blasts to a ripple-carry chain and
+  determinizes **completely, with zero decisions and zero conflicts** —
+  and note that this requires *inverting* the adder, since the gates
+  define the sum bits from `a` and `y`, not `y` from `a` and `b`.
+  Nothing word-level is lost. The comparison under a disjunctive top
+  determinizes 2 of 40 and degenerates into search, and PG is
+  **2.4x faster** there with a third of the decisions.
+
+  So the worry as posed — that BV structure survives at the word level
+  but not after bit-blasting — is not what the numbers show. The
+  predictor is the axis RQ1 already isolated: whether the top *forces*
+  the output. An output-forced word operation bit-blasts into something
+  ID reads straight through; a comparison under a choice-blocking top is
+  the `choice-of-relation` family again, wearing bit-vector clothes.
+  That is a useful negative for a BV frontend: it says the value of
+  word-level input would not come from preserving arithmetic structure,
+  which bit-blasting preserves fine, but from whatever else word-level
+  reasoning buys (e.g. not enumerating a 2^n comparison), which is a
+  theory-solver question and belongs to RQ4.
 * The emitted models are validated indirectly (the pointwise evaluator
   they mirror is checked against the matrix exhaustively in the fuzz
   harness); running an external SMT solver over `get-model` output as a
