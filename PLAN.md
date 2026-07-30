@@ -324,8 +324,10 @@ increasing order of ambition:
 * **SMT-LIB frontend — done, Boolean fragment** (`src/smtlib.rs`,
   auto-detected by the CLI): declarations, `define-fun` definitions
   (the definition-level input path), assertions over the usual Boolean
-  operators with hash-consed Tseitin gates, `(forall (…) (exists (…)))`
-  assertions, `push`/`pop`/`check-sat`/`check-sat-assuming`, and
+  operators with hash-consed Tseitin gates, alternating
+  `forall`/`exists` chains of *any* depth (past two blocks the session
+  keeps its own prefix and the checks go to the alternation front-end;
+  verdicts only, models not yet rendered), `push`/`pop`/`check-sat`/`check-sat-assuming`, and
   `get-model` printing the Skolem functions as `define-fun`s
   parameterized by the universal variables. See `RESEARCH.md` for the
   in-place incrementality upgrade path.

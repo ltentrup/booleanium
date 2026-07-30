@@ -324,8 +324,7 @@ impl IncrementalSolver {
 
     /// Builds the 2QBF instance for the current stack, including the
     /// carried learnt clauses.
-    #[cfg(test)]
-    fn qcnf(&self) -> QCNF {
+    pub(crate) fn qcnf(&self) -> QCNF {
         self.qcnf_with(&[])
     }
 

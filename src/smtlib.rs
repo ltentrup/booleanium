@@ -4,14 +4,15 @@
 //! definition-level input path — bodies become two-sided gate encodings,
 //! so no structure is lost to one-sided clausal encodings), assertions
 //! over `and`/`or`/`not`/`=>`/`=`/`xor`/`ite`/`distinct`, quantified
-//! assertions of the shape `(forall (...) body)` with optional nested
-//! `exists`, the incremental commands `push`/`pop`/`check-sat`/
+//! assertions with an alternating `forall`/`exists` chain of **any
+//! depth**, the incremental commands `push`/`pop`/`check-sat`/
 //! `check-sat-assuming`, and `get-model`, which prints the piecewise
 //! Skolem functions of the existentials as `define-fun`s parameterized by
 //! the universal variables.
 //!
-//! Since the solver core is 2QBF, the frontend supports two quantifier
-//! structures and infers which one a session uses from its assertions:
+//! The frontend infers a session's quantifier structure from its
+//! assertions. Two-block sessions run on the 2QBF core, in one of two
+//! shapes; anything deeper goes to the alternation front-end:
 //!
 //! - **∀∃** (Skolem function synthesis): no free constant occurs under a
 //!   `forall`. Free constants are solved in the innermost existential
@@ -25,6 +26,14 @@
 //!   `sat`, `get-model` prints the constant values recovered from the
 //!   verified winning universal move of the negation. This is the shape
 //!   a synthesis tool needs (∃ strategy bits ∀ inputs: specification).
+//!
+//! - **Deep** (more than two blocks): the session keeps its own prefix,
+//!   built positionally — block `i` of any assertion joins block `i` of
+//!   the session, generalizing the two-block rule — with free constants
+//!   outermost and the gates innermost, and each check goes to
+//!   [`crate::alternation`]. Verdicts only for now: the composed
+//!   strategy exists but is not yet rendered as `define-fun`s, so
+//!   `get-model` reports that rather than guessing.
 //!
 //! The structure is fixed by the first quantified assertion (or the
 //! first check, defaulting to ∀∃); mixing both shapes in one session
@@ -155,6 +164,9 @@ enum Mode {
     /// ∃∀: free constants universal, forall binders existential; solved
     /// as the negation with the verdict inverted
     ExistsForall,
+    /// more than two blocks: the session keeps its own prefix and the
+    /// checks go to the alternation front-end rather than the 2QBF core
+    Deep,
 }
 
 /// One frame of surface-level state, kept in sync with the solver's
@@ -184,6 +196,13 @@ pub struct Frontend {
     /// in ∃∀ mode: the constant values of the last sat check, from the
     /// verified winning universal move of the internal negation
     witness: Option<Vec<i32>>,
+    options: Options,
+    /// in `Deep` mode: the session's quantifier blocks, outermost first.
+    /// Assertions contribute positionally — block `i` of any assertion
+    /// joins block `i` of the session — which generalizes the two-block
+    /// rule that all `forall` binders are universal and all `exists`
+    /// binders inner.
+    blocks: Vec<(bool, Vec<u32>)>,
     last: Option<SolverResult>,
 }
 
@@ -192,12 +211,14 @@ impl Frontend {
     pub fn new(options: Options) -> Self {
         Self {
             solver: IncrementalSolver::new(options),
+            options,
             frames: vec![SurfaceFrame::default()],
             names: HashMap::new(),
             true_lit: None,
             mode: Mode::Undecided,
             used_constant: false,
             witness: None,
+            blocks: Vec::new(),
             last: None,
         }
     }
@@ -440,30 +461,75 @@ impl Frontend {
         let mut locals = Vec::new();
         // (forall (...) body) and (forall (...) (exists (...) body))
         let mut body = expr;
+        // the whole alternating quantifier chain, however deep: a
+        // two-block prefix keeps the 2QBF path, anything deeper switches
+        // the session to the alternation front-end
+        let mut chain: Vec<(bool, Vec<u32>)> = Vec::new();
+        loop {
+            let SExpr::List(items) = body else { break };
+            let head = items.first().and_then(SExpr::atom);
+            let universal = match head {
+                Some("forall") => true,
+                Some("exists") if !chain.is_empty() => false,
+                _ => break,
+            };
+            if items.len() != 3 {
+                return Err(format!(
+                    "{} takes a binding list and a body",
+                    head.unwrap_or("quantifier")
+                ));
+            }
+            if chain.last().is_some_and(|&(previous, _)| previous == universal) {
+                return Err("adjacent quantifier blocks must alternate".to_string());
+            }
+            let mut vars = Vec::new();
+            self.bind_quantifier(&items[1], universal, &mut locals, &mut vars)?;
+            chain.push((universal, vars));
+            body = &items[2];
+        }
+        let quantified = !chain.is_empty();
+        let deep = chain.len() > 2 || self.mode == Mode::Deep;
         let mut forall_vars = Vec::new();
         let mut exists_vars = Vec::new();
-        let mut quantified = false;
-        if let SExpr::List(items) = body {
-            if items.first().and_then(SExpr::atom) == Some("forall") {
-                if items.len() != 3 {
-                    return Err("forall takes a binding list and a body".to_string());
-                }
-                self.bind_quantifier(&items[1], true, &mut locals, &mut forall_vars)?;
-                body = &items[2];
-                quantified = true;
-                if let SExpr::List(items) = body {
-                    if items.first().and_then(SExpr::atom) == Some("exists") {
-                        if items.len() != 3 {
-                            return Err("exists takes a binding list and a body".to_string());
-                        }
-                        self.bind_quantifier(&items[1], false, &mut locals, &mut exists_vars)?;
-                        body = &items[2];
-                    }
+        if !deep {
+            for (universal, vars) in &chain {
+                if *universal {
+                    forall_vars.extend(vars.iter().copied());
+                } else {
+                    exists_vars.extend(vars.iter().copied());
                 }
             }
         }
         self.used_constant = false;
         let lit = self.expr(body, &mut locals, quantified)?;
+        if deep {
+            if self.mode == Mode::ForallExists || self.mode == Mode::ExistsForall {
+                return Err("a deep prefix cannot follow a two-block assertion".to_string());
+            }
+            self.mode = Mode::Deep;
+            // assertions contribute positionally to the session prefix
+            for (index, (universal, vars)) in chain.into_iter().enumerate() {
+                match self.blocks.get_mut(index) {
+                    Some((existing, block)) if *existing == universal => block.extend(vars),
+                    Some(_) => {
+                        return Err(
+                            "assertions disagree on the quantifier of a prefix block".to_string()
+                        )
+                    }
+                    None => self.blocks.push((universal, vars)),
+                }
+            }
+            // the solver's own prefix is unused in this mode: every
+            // variable is declared existential so the clause machinery
+            // works, and the block structure is imposed at check time
+            for (_, block) in &self.blocks {
+                for &var in block {
+                    self.solver.declare_existential(var);
+                }
+            }
+            self.solver.add_clause(&[lit]);
+            return Ok(());
+        }
         if quantified {
             if self.used_constant || self.mode == Mode::ExistsForall {
                 // ∃∀ shape: in the internal negation the forall binders
@@ -503,6 +569,12 @@ impl Frontend {
     }
 
     fn get_model(&self) -> Result<String, String> {
+        if self.mode == Mode::Deep {
+            return Err("no model available; models beyond two quantifier blocks are not \
+                        emitted yet (the verdict is decided, the composed strategy is not \
+                        yet rendered as define-funs)"
+                .to_string());
+        }
         if self.mode == Mode::ExistsForall {
             if self.last != Some(SolverResult::Satisfiable) {
                 return Err("no model available; the last check-sat was not sat".to_string());
@@ -541,6 +613,60 @@ impl Frontend {
             // no quantified assertion so far: a propositional (∃-only)
             // session, solved as ∀∃ with an empty universal block
             self.fix_forall_exists();
+        }
+        if self.mode == Mode::Deep {
+            let mut qcnf = self.solver.qcnf();
+            // impose the session's prefix: free constants outermost,
+            // then the declared blocks, with the gates innermost (they
+            // are defined by the matrix, so they must follow everything
+            // they read)
+            let constants: Vec<crate::literal::Var> = self
+                .frames
+                .iter()
+                .flat_map(|f| f.constants.iter())
+                .map(|&v| crate::literal::Var::from_index(v - 1))
+                .collect();
+            let mut placed: std::collections::HashSet<crate::literal::Var> =
+                constants.iter().copied().collect();
+            let mut prefix: Vec<(crate::QuantTy, Vec<crate::literal::Var>)> =
+                vec![(crate::QuantTy::Exists, constants)];
+            for (universal, block) in &self.blocks {
+                let vars: Vec<crate::literal::Var> = block
+                    .iter()
+                    .map(|&v| crate::literal::Var::from_index(v - 1))
+                    .collect();
+                placed.extend(vars.iter().copied());
+                prefix.push((
+                    if *universal { crate::QuantTy::Forall } else { crate::QuantTy::Exists },
+                    vars,
+                ));
+            }
+            // everything else is a gate or a temporary: innermost
+            let gates: Vec<crate::literal::Var> = qcnf
+                .prefix
+                .iter()
+                .flat_map(|(_, vars)| vars.iter().copied())
+                .chain(qcnf.matrix.iter().flatten().map(|l| l.var()))
+                .filter(|v| !placed.contains(v))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            match prefix.last_mut() {
+                Some((crate::QuantTy::Exists, block)) => block.extend(gates),
+                _ => prefix.push((crate::QuantTy::Exists, gates)),
+            }
+            qcnf.prefix = prefix;
+            for &lit in extra {
+                qcnf.matrix.push(vec![crate::literal::Lit::from_dimacs(lit)]);
+            }
+            let (result, _strategy) = crate::alternation::solve_certified(
+                &qcnf,
+                self.options,
+                crate::alternation::EXPANSION_BUDGET,
+            );
+            self.witness = None;
+            self.last = Some(result);
+            return result;
         }
         let result = if self.mode == Mode::ExistsForall {
             // Solve the negation ∀ constants ∃ binders, gates: ¬(∧ roots)
@@ -726,6 +852,39 @@ fn verdict(result: SolverResult) -> &'static str {
 mod test {
     use super::*;
     use proptest::prelude::*;
+
+    /// Alternating evaluation of a CNF over a block structure: conjoin
+    /// over universal blocks, disjoin over existential ones.
+    fn game(
+        blocks: &[(bool, Vec<usize>)],
+        index: usize,
+        values: &mut Vec<bool>,
+        clauses: &[Vec<i32>],
+    ) -> bool {
+        let Some((forall, vars)) = blocks.get(index) else {
+            return clauses.iter().all(|clause| {
+                clause.iter().any(|&l| values[l.unsigned_abs() as usize - 1] == (l > 0))
+            });
+        };
+        let mut all = true;
+        let mut any = false;
+        for point in 0..1u32 << vars.len() {
+            for (bit, &var) in vars.iter().enumerate() {
+                values[var] = point >> bit & 1 == 1;
+            }
+            let sub = game(blocks, index + 1, values, clauses);
+            all &= sub;
+            any |= sub;
+            if (*forall && !all) || (!*forall && any) {
+                break;
+            }
+        }
+        if *forall {
+            all
+        } else {
+            any
+        }
+    }
 
     fn run(source: &str) -> String {
         Frontend::new(Options::default()).run(source)
@@ -953,6 +1112,80 @@ mod test {
         /// Random ∃∀ instances against the enumeration oracle; on sat,
         /// the synthesized constants must satisfy the matrix for every
         /// universal assignment.
+        #[test]
+        /// Deep prefixes against a recursive game oracle over the same
+        /// CNF body: the definition of QBF truth, evaluated directly on
+        /// the surface formula rather than through the frontend.
+        #[test]
+        fn differential_deep_prefix(
+            sizes in proptest::collection::vec(1usize..=2, 3..=4),
+            clauses in proptest::collection::vec(
+                proptest::collection::vec(
+                    (-8i32..=8).prop_filter("nonzero", |l| *l != 0),
+                    1..=3,
+                ),
+                1..=6,
+            ),
+        ) {
+            let total: usize = sizes.iter().sum();
+            let bound = i32::try_from(total).unwrap();
+            let clauses: Vec<Vec<i32>> = clauses
+                .into_iter()
+                .map(|clause| {
+                    clause
+                        .into_iter()
+                        .map(|l| {
+                            let m = (l.abs() - 1) % bound + 1;
+                            if l < 0 { -m } else { m }
+                        })
+                        .collect()
+                })
+                .collect();
+
+            // render the nested quantifier chain, outermost forall
+            let mut blocks: Vec<(bool, Vec<usize>)> = Vec::new();
+            let mut next = 0usize;
+            let mut opens = String::new();
+            for (index, &size) in sizes.iter().enumerate() {
+                let forall = index % 2 == 0;
+                let vars: Vec<usize> = (next..next + size).collect();
+                next += size;
+                let bindings: Vec<String> =
+                    vars.iter().map(|v| format!("(v{v} Bool)")).collect();
+                opens.push_str(&format!(
+                    "({} ({}) ",
+                    if forall { "forall" } else { "exists" },
+                    bindings.join(" ")
+                ));
+                blocks.push((forall, vars));
+            }
+            let body: Vec<String> = clauses
+                .iter()
+                .map(|clause| {
+                    let lits: Vec<String> = clause
+                        .iter()
+                        .map(|&l| {
+                            let v = l.unsigned_abs() - 1;
+                            if l < 0 { format!("(not v{v})") } else { format!("v{v}") }
+                        })
+                        .collect();
+                    format!("(or {})", lits.join(" "))
+                })
+                .collect();
+            let source = format!(
+                "(assert {}(and {}){})\n(check-sat)\n",
+                opens,
+                body.join(" "),
+                ")".repeat(sizes.len())
+            );
+
+            let mut values = vec![false; total];
+            let wins = game(&blocks, 0, &mut values, &clauses);
+            let expected = if wins { "sat" } else { "unsat" };
+            let actual = run(&source);
+            proptest::prop_assert_eq!(actual.trim(), expected, "instance:\n{}", &source);
+        }
+
         #[test]
         fn differential_exists_forall(
             constants in 1u32..=3,

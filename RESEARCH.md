@@ -347,6 +347,31 @@ notes:
   the solver picks its own clausal form and keeps the definitions —
   the PG problem becomes structurally impossible rather than
   heuristically mitigated.
+* **Arbitrary alternation depth — done for verdicts.** The frontend
+  used to parse at most `(forall (...) (exists (...) body))`; it now
+  takes an alternating chain of any depth. Two-block sessions keep the
+  2QBF core untouched (so the ∀∃ and ∃∀ shapes above are unchanged);
+  deeper ones switch to `Mode::Deep`, where the session keeps its own
+  prefix — built *positionally*, block `i` of any assertion joining
+  block `i` of the session, which generalizes the two-block rule that
+  all `forall` binders are universal and all `exists` binders inner —
+  with free constants outermost and the gates innermost, and each check
+  goes to the alternation front-end. That makes all three frontends
+  consistent: QDIMACS, QCIR, and SMT-LIB now accept the depth the
+  solver can handle.
+
+  Validated by a differential proptest over 3–4 block prefixes against
+  a recursive game oracle evaluating the same CNF body directly on the
+  surface formula, 30k cases, plus hand-written four-block sessions
+  either side of the boundary (an inner existential that can track the
+  last universal, and the same body with it bound too early).
+
+  Remaining gap, and the next step: `get-model` for deep sessions. The
+  composed strategy is available and SAT-verified; what is missing is
+  rendering it as `define-fun`s. The cheap route is the shared AIG —
+  `Strategy::build` already produces one, and an AIG prints as
+  `define-fun`s almost directly — which would also give the QCIR and
+  QDIMACS paths an SMT-LIB model format instead of only AIGER.
 * Open question: how much of full Bool/BV ∀∃-SMT is reachable before
   theories (bit-blasting BV eagerly keeps everything Boolean but risks
   re-losing word-level structure — the same story one level up).
