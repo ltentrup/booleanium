@@ -1,8 +1,9 @@
-//! Checks a QRAT refutation proof against a QDIMACS (or QAIGER)
-//! instance with the in-tree checker: `qrat_check <instance> <proof>`.
-//! Exits 0 on a valid proof, 1 otherwise.
+//! Checks a QRAT refutation proof against the instance it refutes,
+//! in whichever input format the solver read it from:
+//! `qrat_check <instance> <proof>`. Exits 0 on a valid proof, 1
+//! otherwise.
 
-use booleanium::{aiger, qcnf::QCNF, qdimacs::QdimacsParser, qrat};
+use booleanium::{aiger, qcir, qcnf::QCNF, qdimacs::QdimacsParser, qrat};
 use std::io::Cursor;
 
 fn main() {
@@ -16,6 +17,12 @@ fn main() {
     let qcnf: QCNF = if contents.starts_with(b"aag ") {
         let text = std::str::from_utf8(&contents).expect("aag files are text");
         aiger::parse_qaiger(text).expect("instance parses")
+    } else if contents.starts_with(b"#QCIR") {
+        // the proof refutes the clauses the frontend produced; a
+        // universally-ending prefix is solved by its dual and emits no
+        // proof, so what is on disk always matches this conversion
+        let text = std::str::from_utf8(&contents).expect("qcir files are text");
+        qcir::parse_qcir(text).expect("instance parses").qcnf
     } else {
         let mut qcnf = QCNF::default();
         QdimacsParser::new(Cursor::new(&contents)).parse_into(&mut qcnf).expect("instance parses");
