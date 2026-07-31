@@ -51,7 +51,10 @@ use crate::{
     qcnf::QCNF,
     QuantTy, SolverResult,
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    rc::Rc,
+};
 
 #[cfg(feature = "probe")]
 pub static LEAF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -94,6 +97,52 @@ const MAX_EXPANDED_BLOCK: usize = 8;
 /// original.
 type Copies = Vec<(Vec<Lit>, HashMap<Var, Var>)>;
 
+/// Wires already built for a strategy node, keyed by node identity and
+/// by the values of the variables that node's subtree mentions. Alive
+/// only for one [`Strategy::build`], so the pointers cannot dangle.
+/// What one node did to the values it was handed: a wire per variable
+/// it defined, and `None` for one it removed.
+type Delta = Vec<(Var, Option<u64>)>;
+
+#[derive(Default)]
+struct BuildMemo {
+    entries: HashMap<(*const Strategy, u128), Delta>,
+    relevant: HashMap<*const Strategy, Rc<Vec<Var>>>,
+}
+
+impl BuildMemo {
+    fn touched(&mut self, node: &Strategy) -> Rc<Vec<Var>> {
+        let key = std::ptr::addr_of!(*node);
+        if let Some(vars) = self.relevant.get(&key) {
+            return Rc::clone(vars);
+        }
+        let mut vars = Vec::new();
+        node.mentions(&mut vars);
+        vars.sort_unstable();
+        vars.dedup();
+        let vars = Rc::new(vars);
+        self.relevant.insert(key, Rc::clone(&vars));
+        vars
+    }
+}
+
+/// A 128-bit fingerprint of the values a node can actually read. The
+/// variables arrive sorted, so the sequence is canonical.
+fn values_key(relevant: &[Var], values: &HashMap<Var, u64>) -> u128 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let digest = |salt: u8| {
+        let mut hasher = DefaultHasher::new();
+        salt.hash(&mut hasher);
+        for var in relevant {
+            values.get(var).hash(&mut hasher);
+        }
+        hasher.finish()
+    };
+    u128::from(digest(0)) << 64 | u128::from(digest(1))
+}
+
 /// A winning strategy for the existential player, composed through the
 /// recursion. Evaluated against a full assignment of the *original*
 /// universal variables, it yields a value for every existential the
@@ -109,18 +158,18 @@ type Copies = Vec<(Vec<Lit>, HashMap<Var, Var>)>;
 #[derive(Debug, Clone)]
 pub enum Strategy {
     /// values a simplification pass forced (units, pure literals)
-    Fixed { assignments: Vec<Lit>, rest: Box<Strategy> },
+    Fixed { assignments: Vec<Lit>, rest: Rc<Strategy> },
     /// the constants an outermost existential block committed to
-    Choose { constants: Vec<Lit>, rest: Box<Strategy> },
+    Choose { constants: Vec<Lit>, rest: Rc<Strategy> },
     /// one sub-strategy per enumerated cube of a universal block
-    Split { cases: Vec<(Vec<Lit>, Strategy)> },
+    Split { cases: Vec<(Vec<Lit>, Rc<Strategy>)> },
     /// the inverse of a ∀-expansion: the sub-strategy plays all copies
     /// of the variables bound after the enumerated block at once, and
     /// the copy the actual assignment of the block selects supplies
     /// the value
-    Expanded { copies: Copies, rest: Box<Strategy> },
+    Expanded { copies: Copies, rest: Rc<Strategy> },
     /// the certified Skolem functions of a 2QBF leaf
-    Leaf(Box<crate::incdet::model::SkolemModel>),
+    Leaf(Rc<crate::incdet::model::SkolemModel>),
     /// nothing left to decide
     Done,
 }
@@ -187,19 +236,36 @@ impl Strategy {
     /// A rough node count. Used to keep the sub-solve memo within its
     /// size budget, and worth reporting: on deep prefixes the composed
     /// strategy, not the solve, is what grows out of hand.
+    ///
+    /// Counts *distinct* nodes: sub-strategies are shared, so a node
+    /// reached along several paths is one node, not many. What the
+    /// memo has to bound is memory, and memory is the DAG.
     #[must_use]
     pub fn size(&self) -> usize {
+        let mut seen = HashSet::new();
+        self.size_into(&mut seen)
+    }
+
+    fn size_into(&self, seen: &mut HashSet<*const Strategy>) -> usize {
+        fn sub(child: &Rc<Strategy>, seen: &mut HashSet<*const Strategy>) -> usize {
+            if seen.insert(Rc::as_ptr(child)) {
+                child.size_into(seen)
+            } else {
+                0
+            }
+        }
         match self {
             Strategy::Done => 1,
             Strategy::Fixed { assignments, rest }
             | Strategy::Choose { constants: assignments, rest } => {
-                assignments.len() + rest.size()
+                assignments.len() + sub(rest, seen)
             }
             Strategy::Split { cases } => {
-                cases.iter().map(|(cube, sub)| cube.len() + sub.size()).sum::<usize>() + 1
+                cases.iter().map(|(cube, s)| cube.len() + sub(s, seen)).sum::<usize>() + 1
             }
             Strategy::Expanded { copies, rest } => {
-                copies.iter().map(|(cube, r)| cube.len() + r.len()).sum::<usize>() + rest.size()
+                copies.iter().map(|(cube, r)| cube.len() + r.len()).sum::<usize>()
+                    + sub(rest, seen)
             }
             Strategy::Leaf(model) => model.size(),
         }
@@ -295,6 +361,21 @@ impl Strategy {
         out
     }
 
+    /// The size of the circuit this strategy compiles to, in AND
+    /// gates.
+    ///
+    /// Not [`Strategy::size`]: the strategy is a DAG and the circuit is
+    /// what a monolithic build makes of it, and the two grow very
+    /// differently with prefix depth — the strategy linearly, the
+    /// circuit exponentially, because a shared node is rebuilt under
+    /// every set of values decided above it. The circuit is what a
+    /// certificate check and an AIGER file cost, so it is the number to
+    /// budget against.
+    #[must_use]
+    pub fn gates(&self, universals: &[Var]) -> usize {
+        self.build(universals).0.gates().len()
+    }
+
     /// Builds the strategy into a fresh AIG whose inputs are the given
     /// universal variables, and returns it together with the output wire
     /// of every variable the strategy determines.
@@ -303,7 +384,8 @@ impl Strategy {
         let inputs: HashMap<Var, u64> =
             universals.iter().enumerate().map(|(i, &v)| (v, AigBuilder::input(i))).collect();
         let mut values = HashMap::new();
-        self.build_into(&mut aig, &inputs, &mut values);
+        let mut memo = BuildMemo::default();
+        self.build_into(&mut aig, &inputs, &mut values, &mut memo);
         (aig, values)
     }
 
@@ -316,6 +398,70 @@ impl Strategy {
         aig: &mut AigBuilder,
         inputs: &HashMap<Var, u64>,
         values: &mut HashMap<Var, u64>,
+        memo: &mut BuildMemo,
+    ) {
+        // Sub-strategies are shared, and a shared node reached again
+        // under the same *relevant* values computes the same wires —
+        // which are already in the AIG. Relevant means the variables
+        // the subtree mentions: nothing else can reach its cubes, its
+        // merge bases, or its leaves, so the constants an outer
+        // `Choose` committed to on the way down do not count, and it is
+        // exactly those that differ between the paths into a shared
+        // node. Keying on the whole value map instead finds no sharing
+        // at all (measured: 0 hits in 6 690 calls) and the circuit
+        // grows exponentially with depth while the strategy grows
+        // linearly.
+        let relevant = memo.touched(self);
+        let key = (std::ptr::addr_of!(*self), values_key(&relevant, values));
+        if let Some(delta) = memo.entries.get(&key) {
+            for (var, wire) in delta.clone() {
+                match wire {
+                    Some(wire) => values.insert(var, wire),
+                    None => values.remove(&var),
+                };
+            }
+            return;
+        }
+        self.build_uncached(aig, inputs, values, memo);
+        let delta: Delta = relevant.iter().map(|&v| (v, values.get(&v).copied())).collect();
+        memo.entries.insert(key, delta);
+    }
+
+    /// Every variable the subtree mentions: what it may write, and what
+    /// it may read out of the values it is handed.
+    fn mentions(&self, into: &mut Vec<Var>) {
+        match self {
+            Strategy::Done => {}
+            Strategy::Fixed { assignments, rest }
+            | Strategy::Choose { constants: assignments, rest } => {
+                into.extend(assignments.iter().map(|l| l.var()));
+                rest.mentions(into);
+            }
+            Strategy::Split { cases } => {
+                for (cube, sub) in cases {
+                    into.extend(cube.iter().map(|l| l.var()));
+                    sub.mentions(into);
+                }
+            }
+            Strategy::Expanded { copies, rest } => {
+                for (cube, rename) in copies {
+                    into.extend(cube.iter().map(|l| l.var()));
+                    into.extend(rename.iter().flat_map(|(&o, &c)| [o, c]));
+                }
+                rest.mentions(into);
+            }
+            Strategy::Leaf(model) => {
+                into.extend(model.defined_vars());
+            }
+        }
+    }
+
+    fn build_uncached(
+        &self,
+        aig: &mut AigBuilder,
+        inputs: &HashMap<Var, u64>,
+        values: &mut HashMap<Var, u64>,
+        memo: &mut BuildMemo,
     ) {
         match self {
             Strategy::Done => {}
@@ -324,7 +470,7 @@ impl Strategy {
                 for l in assignments {
                     values.insert(l.var(), u64::from(l.is_positive()));
                 }
-                rest.build_into(aig, inputs, values);
+                rest.build_into(aig, inputs, values, memo);
             }
             Strategy::Split { cases } => {
                 // the first case whose cube holds wins, as in `evaluate`;
@@ -349,7 +495,7 @@ impl Strategy {
                     let select = aig.and(no_earlier, holds);
                     no_earlier = aig.and(no_earlier, holds ^ 1);
                     let mut branch = values.clone();
-                    sub.build_into(aig, inputs, &mut branch);
+                    sub.build_into(aig, inputs, &mut branch, memo);
                     branches.push((select, branch));
                 }
                 let mut defined: Vec<Var> =
@@ -375,7 +521,7 @@ impl Strategy {
                 }
             }
             Strategy::Expanded { copies, rest } => {
-                rest.build_into(aig, inputs, values);
+                rest.build_into(aig, inputs, values, memo);
                 let mut no_earlier = 1u64;
                 let mut selected: Vec<u64> = Vec::new();
                 for (cube, _) in copies {
@@ -556,7 +702,7 @@ pub fn verify_strategy(qcnf: &QCNF, strategy: &Strategy) -> bool {
 struct Outcome {
     verdict: SolverResult,
     witness: Option<Vec<Lit>>,
-    strategy: Option<Strategy>,
+    strategy: Option<Rc<Strategy>>,
 }
 
 impl Outcome {
@@ -564,7 +710,7 @@ impl Outcome {
         Self { verdict, witness: None, strategy: None }
     }
 
-    fn sat(strategy: Option<Strategy>) -> Self {
+    fn sat(strategy: Option<Rc<Strategy>>) -> Self {
         Self { verdict: SolverResult::Satisfiable, witness: None, strategy }
     }
 }
@@ -677,7 +823,7 @@ impl Cache {
     }
 
     fn insert(&mut self, key: CacheKey, outcome: &Outcome) {
-        self.stored += outcome.strategy.as_ref().map_or(0, Strategy::size);
+        self.stored += outcome.strategy.as_ref().map_or(0, |s| s.size());
         self.entries.insert(key, outcome.clone());
     }
 }
@@ -705,7 +851,7 @@ pub fn solve_certified(
     qcnf: &QCNF,
     options: Options,
     budget: usize,
-) -> (SolverResult, Option<Strategy>) {
+) -> (SolverResult, Option<Rc<Strategy>>) {
     // ∀-expansion is a *global* transformation: it depends on the
     // instance, not on any candidate. Running it once here, to a
     // fixpoint interleaved with simplification, is the difference
@@ -729,7 +875,7 @@ pub fn solve_certified(
         };
         forced.extend(assigned);
         if reduced.matrix.is_empty() {
-            let strategy = invert(&inversions, Strategy::Done);
+            let strategy = invert(&inversions, Rc::new(Strategy::Done));
             return (SolverResult::Satisfiable, Some(wrap(forced, Some(strategy)).unwrap()));
         }
         current = normalized(&reduced);
@@ -748,9 +894,9 @@ pub fn solve_certified(
 
 /// Undoes the expansions, innermost first, around a strategy for the
 /// fully expanded instance.
-fn invert(inversions: &[Copies], mut strategy: Strategy) -> Strategy {
+fn invert(inversions: &[Copies], mut strategy: Rc<Strategy>) -> Rc<Strategy> {
     for copies in inversions.iter().rev() {
-        strategy = Strategy::Expanded { copies: copies.clone(), rest: Box::new(strategy) };
+        strategy = Rc::new(Strategy::Expanded { copies: copies.clone(), rest: strategy });
     }
     strategy
 }
@@ -786,10 +932,10 @@ fn solve_normalized(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome
         };
         forced.extend(assigned);
         if reduced.matrix.is_empty() {
-            return Outcome::sat(Some(Strategy::Fixed {
+            return Outcome::sat(Some(Rc::new(Strategy::Fixed {
                 assignments: forced,
-                rest: Box::new(Strategy::Done),
-            }));
+                rest: Rc::new(Strategy::Done),
+            })));
         }
         simplified = normalized(&reduced);
         &simplified
@@ -822,7 +968,7 @@ fn solve_normalized(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome
             None
         };
         let strategy = (verdict == SolverResult::Satisfiable)
-            .then(|| Strategy::Leaf(Box::new(solver.skolem_model())));
+            .then(|| Rc::new(Strategy::Leaf(Rc::new(solver.skolem_model()))));
         return Outcome { verdict, witness, strategy: wrap(forced, strategy) };
     }
     let (hit, key) = cache.probe(qcnf);
@@ -842,12 +988,12 @@ fn solve_normalized(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome
 }
 
 /// Prefixes a strategy with the literals a simplification pass forced.
-fn wrap(forced: Vec<Lit>, strategy: Option<Strategy>) -> Option<Strategy> {
+fn wrap(forced: Vec<Lit>, strategy: Option<Rc<Strategy>>) -> Option<Rc<Strategy>> {
     let strategy = strategy?;
     if forced.is_empty() {
         return Some(strategy);
     }
-    Some(Strategy::Fixed { assignments: forced, rest: Box::new(strategy) })
+    Some(Rc::new(Strategy::Fixed { assignments: forced, rest: strategy }))
 }
 
 /// The dual candidate loop at a ∀-outermost block: search for a
@@ -873,7 +1019,7 @@ fn forall_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
     // one sub-strategy per answered candidate; the loop only succeeds
     // once every assignment of the block has been enumerated, so the
     // cases partition it
-    let mut cases: Vec<(Vec<Lit>, Strategy)> = Vec::new();
+    let mut cases: Vec<(Vec<Lit>, Rc<Strategy>)> = Vec::new();
     let mut composable = true;
     let mut rounds = 0u32;
     loop {
@@ -886,7 +1032,7 @@ fn forall_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
         }
         if !alpha.solve().unwrap() {
             // every universal choice is answered
-            return Outcome::sat(composable.then_some(Strategy::Split { cases }));
+            return Outcome::sat(composable.then(|| Rc::new(Strategy::Split { cases })));
         }
         let model: HashMap<Var, bool> = alpha
             .orig_model()
@@ -1336,7 +1482,7 @@ fn expansion_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
                     .universal_witness_candidate()
                     .map(|w| w.into_iter().map(Lit::from_dimacs).collect::<Vec<_>>());
                 let strategy = (verdict == SolverResult::Satisfiable)
-                    .then(|| solver.skolem_model().map(|m| Strategy::Leaf(Box::new(m))))
+                    .then(|| solver.skolem_model().map(|m| Rc::new(Strategy::Leaf(Rc::new(m)))))
                     .flatten();
                 (verdict, witness, strategy)
             }
@@ -1354,9 +1500,8 @@ fn expansion_loop(qcnf: &QCNF, options: Options, cache: &mut Cache) -> Outcome {
                 // this candidate wins: it commits the outer block to
                 // constants, the sub-strategy handles the rest
                 return Outcome::sat(
-                    sub_strategy.map(|rest| Strategy::Choose {
-                        constants: candidate,
-                        rest: Box::new(rest),
+                    sub_strategy.map(|rest| {
+                        Rc::new(Strategy::Choose { constants: candidate, rest })
                     }),
                 );
             }

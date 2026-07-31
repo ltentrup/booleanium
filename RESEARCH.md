@@ -694,6 +694,31 @@ of which a one-shot QDIMACS call can express.
   compared against an explicit backward fixpoint over the state space,
   which shares no code with the solver.
 
+  **What the generalization bug cost, on a real game.** The proptest
+  found the soundness bug in cube generalization (a minimized move was
+  accepted on the strength of "the QBF restriction is still
+  unsatisfiable", which says *some* point of the cube wins, not every
+  point — the fix is a plain SAT query over the matrix). The benchmark
+  shows what it was worth. `arbiter-4-4` — four requesters, each lost
+  after four consecutive steps of asking without a grant, grants that
+  may not overlap — used to come back **unrealizable in 21 ms with a
+  single cube**. It is realizable: round-robin answers every requester
+  every fourth step, so the wait is exactly three, and the game sits
+  precisely on the boundary `n = b`. The over-general cube swallowed
+  the states that make the schedule work. It now returns realizable
+  after 57 rounds and 55 cubes, confirmed against the explicit
+  fixpoint over all 2^16 states
+  (`aiger::test::safety_arbiter_4_4_is_realizable`, ignored by default
+  — the fixpoint sweep and the solve both run for minutes).
+
+  The instructive part is the cost profile: **21 ms wrong, 753 s
+  right.** The bug was not making the solver look good on easy games,
+  it was making it skip the game. Every other family kept its verdict
+  and its round count, so nothing else in the benchmark was resting on
+  it — but nothing in the benchmark would have caught it either, which
+  is why the random-circuit proptest is where soundness is actually
+  decided.
+
 * **The alternating encoding closes the same gap at the source**
   (`Unroller::alternating`, now that the solver handles deep
   prefixes): unroll with *one quantifier alternation per step*,
@@ -1177,7 +1202,8 @@ decided apart from `biu`, and every corpus in reach is 2QBF or 3QBF,
 so the remaining alternation work had nothing to be judged on. The
 reactive unrolling supplies it: a family generator with depth as a
 dial and verdicts known independently from the game oracle. Solving
-each depth and verifying each strategy:
+each depth and verifying each strategy — as it stood when the
+instrument was built, before the sharing work below:
 
 | family | verdict | blocks | solve | strategy | verify |
 |---|---|---|---|---|---|
@@ -1194,39 +1220,99 @@ refutation is found near the front of the prefix and never has to
 enumerate what is behind it. The satisfiable families reach 32 blocks
 too, in a fifth of a second.
 
-**What grows is the composed strategy, not the search.** Its size
-roughly *triples per alternation* — `arbiter-2-2` goes 31, 187, 666,
+**What grew was the composed strategy, not the search.** Its size
+roughly *tripled per alternation* — `arbiter-2-2` went 31, 187, 666,
 2249, 7662, 26 095, 89 040, … , 41 289 049 nodes across depths 1–12,
-while the solve stays in milliseconds until the sheer size of the
-object being built takes over. The reason is structural: composition
-deep-clones the sub-strategy into every case of every `Split` and
-every copy of every `Expanded`, so a strategy that a DAG would
-represent in linear space is materialized as a tree. The unsatisfiable
-family, which builds no strategy at all, stays flat — which is exactly
-the control this diagnosis needs.
+while the solve stayed in milliseconds until the sheer size of the
+object being built took over. The reason was structural: composition
+deep-cloned the sub-strategy into every case of every `Split` and
+every copy of every `Expanded`, so a strategy a DAG would represent in
+linear space was materialized as a tree. The unsatisfiable family,
+which builds no strategy at all, stayed flat — which is exactly the
+control that diagnosis needed.
 
-That also relocates the certification wall. Verification is a SAT
-check, but it encodes the strategy, so it inherits the blowup:
-`ring-4` certifies at 22 blocks in 4.8 s and `arbiter-2-2` at 14
-blocks in 10.2 s, and past ~100k nodes the benchmark reports the size
-instead of running the check. Earlier drafts of this section reported
-those points as *solver* cliffs; they are not — solving those same
-instances takes 31 ms and 12 ms. The measurement that separated them
-was simply running the CLI with and without `--certify`.
+### Sharing, in two places, and only one of them obvious
 
-So the next piece of work is sharing: `Rc` in `Strategy` so composition
-stops copying, and a memo in `build_into` so the AIG sees the sharing
-too. Everything the strategy machinery does — verification, AIGER
-emission, the rejected region learning, which died of exactly this
-blowup — is linear in a size that is currently exponential in depth
-for no semantic reason.
+**The strategy itself.** Making the recursive fields `Rc` and letting
+the sub-solve memo hand back a shared pointer instead of a deep copy
+turns the tree back into the DAG it always was. It is a one-line
+change per constructor, and the numbers move by orders of magnitude:
 
-Next steps in order of leverage, now with a place to measure them:
-structure sharing in `Strategy` (above), which is the bottleneck for
-everything certificate-shaped on deep prefixes; ∀-side persistent
-oracles (needs ∃∀ assumption support in the core), which is also the
-prerequisite for doing dual refinement properly; and the
-determinize-then-dispatch hybrid.
+| depth | tree nodes | DAG nodes |
+|---|---|---|
+| 3 | 666 | 322 |
+| 5 | 7 662 | 513 |
+| 7 | 89 040 | 645 |
+| 12 | 41 289 049 | **975** |
+
+Growth goes from geometric to *linear* — 66 nodes per alternation,
+which is one `Split` over the block plus the leaf it wraps. `size()`
+counts distinct nodes now (identity-memoized), because what the memo
+budget has to bound is memory, and memory is the DAG.
+
+**The circuit — where the blowup actually went.** That should have
+made certification cheap and did not: at depth 7 the strategy is 645
+nodes and its circuit is **42 950 gates**, and at depth 12, from 975
+nodes, **19 984 296**. Compiling a DAG node by node flattens it right
+back into the tree, because `build_into` threads an accumulator of
+values through the walk and a node reached along two paths is asked
+for its circuit twice, under different accumulators.
+
+The first attempt keyed a memo on `(node, the whole value map)` and
+got **0 hits in 6 690 calls** over 645 nodes — every node revisited
+about ten times, never with the same map. The map is the wrong key:
+what differs between the paths into a shared node is the constants an
+outer `Choose` committed to, and those are variables the node's
+subtree never mentions. Keying on the values of the variables the
+subtree *does* mention — its cubes, its assignments, its expansion
+copies, its leaves' outputs, everything it could read or write —
+collapses it:
+
+| depth | gates before | gates after | certificate check |
+|---|---|---|---|
+| 5 | 3 604 | 588 | 46 ms → 7.5 ms |
+| 7 | 42 950 | 1 318 | 12.8 s → 41 ms |
+| 8 | 146 928 | 1 800 | (skipped) → 93 ms |
+| 12 | 19 984 296 | **4 508** | (skipped) → 3.95 s |
+
+On a real instance, `lights3_021_0_009` (43 blocks): 313 239 strategy
+nodes and 98 256 gates become 742 nodes and **315 gates**, and its
+certificate check goes from 33 s to **0.98 ms**. The instance that was
+failing the strategy suite's 60 s budget now certifies in under a
+second end to end.
+
+The lesson is the one the failed first attempt taught: sharing in the
+data structure buys nothing on its own if every consumer walks it as a
+tree. The consumers have to be told what a node actually depends on.
+
+What remains is genuinely the SAT check. Gates now grow quadratically
+with depth while verification time still grows ~2x per alternation on
+`arbiter-2-2` — that is query hardness, not encoding size, and it is
+the honest wall. But it moves the reachable depth a long way:
+`ring-4` used to be reported unverified past 22 blocks and now
+**certifies at 32 blocks**, the full depth the family is generated to,
+in 153 s — the same 153 s it used to spend on 22. `corridor-4-stay`,
+the widest family, certifies at 16 blocks in 120 s.
+
+The depth-scaling table this section opened with can therefore be
+restated without the "(skipped)" rows:
+
+| family | verdict | blocks | solve | strategy | circuit | verify |
+|---|---|---|---|---|---|---|
+| `arbiter-3-2` | unsat | **32** | 13 ms | — | — | — |
+| `arbiter-2-2` | sat | 24 | 22 ms | 975 | 4 508 | 4.0 s |
+| `ring-4` | sat | **32** | 88 ms | 1 602 | 10 730 | 153 s |
+| `corridor-4-stay` | sat | 16 | 348 ms | 10 308 | 36 388 | 120 s |
+
+Earlier drafts of this section reported the certification points as
+*solver* cliffs; they are not — solving those same instances takes
+tens of milliseconds. The measurement that separated them was simply
+running the CLI with and without `--certify`.
+
+Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
+assumption support in the core), which is also the prerequisite for
+doing dual refinement properly; and the determinize-then-dispatch
+hybrid.
 
 ## Suggested experiment order
 

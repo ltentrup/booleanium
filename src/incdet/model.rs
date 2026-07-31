@@ -134,7 +134,7 @@ impl SkolemModel {
     /// variables only some region defines (a CEGAR response can cover a
     /// variable the final solver state leaves unassigned). Final-chain
     /// variables first, in chain order.
-    fn defined_vars(&self) -> Vec<Var> {
+    pub(crate) fn defined_vars(&self) -> Vec<Var> {
         let mut vars: Vec<Var> = self.final_chain.iter().map(|(l, _)| l.var()).collect();
         let mut seen: std::collections::HashSet<Var> = vars.iter().copied().collect();
         for region in &self.regions {

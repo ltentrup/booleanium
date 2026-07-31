@@ -1177,6 +1177,40 @@ mod test {
         assert_eq!(outcome.losing.len(), 2);
     }
 
+    /// The `arbiter-4-4` benchmark family, verified against the
+    /// explicit fixpoint rather than against another run of the solver.
+    ///
+    /// It is the one benchmark whose *verdict* the soundness fix above
+    /// changed: four requesters, each losing after four consecutive
+    /// steps of asking without a grant, and grants that may not
+    /// overlap. Round-robin answers every requester every fourth step,
+    /// so the gap is exactly three and the game is realizable — but
+    /// only just, and the over-general cubes the old extraction
+    /// produced removed the states that make it work, which reported
+    /// it unrealizable in 21 ms. It is now realizable, in 57 rounds.
+    ///
+    /// Ignored by default: the explicit fixpoint sweeps 2^16 states
+    /// and the solve takes minutes. Run with `--ignored`.
+    #[test]
+    #[ignore = "explicit backward fixpoint over 2^16 states, and a solve of minutes"]
+    fn safety_arbiter_4_4_is_realizable() {
+        let text = concat!(
+            "aag 55 8 16 1 31\n2\n4\n6\n8\n10\n12\n14\n16\n",
+            "18 50 0\n20 52 0\n22 54 0\n24 56 0\n26 58 0\n28 60 0\n30 62 0\n32 64 0\n",
+            "34 66 0\n36 68 0\n38 70 0\n40 72 0\n42 74 0\n44 76 0\n46 78 0\n48 80 0\n",
+            "111\n",
+            "50 2 11\n52 18 11\n54 20 11\n56 22 11\n58 4 13\n60 26 13\n62 28 13\n64 30 13\n",
+            "66 6 15\n68 34 15\n70 36 15\n72 38 15\n74 8 17\n76 42 17\n78 44 17\n80 46 17\n",
+            "82 10 12\n84 10 14\n86 10 16\n88 12 14\n90 12 16\n92 14 16\n",
+            "94 25 33\n96 94 41\n98 96 49\n100 98 83\n102 100 85\n104 102 87\n",
+            "106 104 89\n108 106 91\n110 108 93\n",
+            "i0 r0\ni1 r1\ni2 r2\ni3 r3\n",
+            "i4 controllable_g0\ni5 controllable_g1\ni6 controllable_g2\ni7 controllable_g3\n"
+        );
+        let outcome = check_safety(text);
+        assert!(outcome.realizable);
+    }
+
     #[test]
     fn safety_copycat_is_realizable() {
         // error = u xor c: the controller copies and wins forever, so

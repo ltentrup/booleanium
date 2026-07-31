@@ -520,6 +520,16 @@ increasing order of ambition:
   instances of the CADET suite certify, by the internal check and
   independently by the external AIGER simulator. See `RESEARCH.md`
   (RQ6).
+* **Structure sharing in composed strategies — done**
+  (`alternation::Strategy` over `Rc`, `Strategy::gates`): the
+  recursion's memo hands back a shared node instead of a deep copy, so
+  the strategy is the DAG it always was — `arbiter-2-2` at 24 blocks
+  goes from 41 289 049 nodes to 975, geometric growth to linear. The
+  circuit compiled from it is shared too, keyed on the variables a
+  node's subtree actually mentions rather than on the whole value
+  accumulator (which finds no sharing at all): 19 984 296 gates to
+  4 508 at the same depth, and `lights3_021_0_009` certifies in 0.98 ms
+  where it took 33 s. See `RESEARCH.md` (RQ6).
 
 ### 3. Performance
 

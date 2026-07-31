@@ -350,7 +350,7 @@ fn main() {
     println!();
     // per-family depth caps; the solve stays cheap well past these,
     // what stops the run first is the size of the composed strategy
-    /// Strategy nodes above which the benchmark reports the size and
+    /// Circuit gates above which the benchmark reports the size and
     /// skips the SAT check.
     const VERIFY_LIMIT: usize = 100_000;
     for (name, text, max_depth) in [
@@ -383,19 +383,30 @@ fn main() {
             );
             let elapsed = start.elapsed();
             // Verification is reported separately because on deep
-            // prefixes it, not the solve, is the bottleneck: the
-            // composed strategy is deep-cloned into every case of
-            // every split, so its size explodes with depth while the
-            // solve stays in milliseconds. Above the threshold the
-            // check is skipped rather than allowed to run for minutes.
-            let size = strategy.as_ref().map_or(0, alternation::Strategy::size);
+            // prefixes it, not the solve, is the bottleneck. Both sizes
+            // are reported because they diverge: the strategy is a
+            // shared DAG and grows slowly, while the circuit a
+            // monolithic build makes of it grows exponentially, and it
+            // is the circuit the check has to pay for. The budget is
+            // therefore on gates, and the build that measures them is
+            // cheap next to the check itself.
+            let size = strategy.as_ref().map_or(0, |s| s.size());
+            let universals: Vec<_> = qcnf
+                .prefix
+                .iter()
+                .filter(|(q, _)| *q == booleanium::QuantTy::Forall)
+                .flat_map(|(_, vars)| vars.iter().copied())
+                .collect();
+            let gates = strategy.as_ref().map_or(0, |s| s.gates(&universals));
             let certified = match &strategy {
-                Some(_) if size > VERIFY_LIMIT => format!("{size} nodes, unverified"),
+                Some(_) if gates > VERIFY_LIMIT => {
+                    format!("{size} nodes, {gates} gates, unverified")
+                }
                 Some(strategy) => {
                     let start = Instant::now();
                     let ok = alternation::verify_strategy(&qcnf, strategy);
                     let verdict = if ok { "certified" } else { "INVALID" };
-                    format!("{size} nodes, {verdict} in {:.3?}", start.elapsed())
+                    format!("{size} nodes, {gates} gates, {verdict} in {:.3?}", start.elapsed())
                 }
                 None => String::new(),
             };
@@ -438,6 +449,13 @@ fn main() {
             if !name.contains(&filter) {
                 continue;
             }
+        }
+        // `BENCH_DUMP=<dir>` writes the game spec out as ASCII AIGER,
+        // so a family can be reproduced, profiled, or checked against
+        // another tool
+        if let Ok(dir) = std::env::var("BENCH_DUMP") {
+            let path = std::path::Path::new(&dir).join(format!("{name}.aag"));
+            std::fs::write(path, &text).expect("dump directory is writable");
         }
         for continuation in [true, false] {
             let start = Instant::now();

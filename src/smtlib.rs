@@ -205,7 +205,7 @@ pub struct Frontend {
     blocks: Vec<(bool, Vec<u32>)>,
     /// in `Deep` mode: the composed strategy of the last sat check, and
     /// the universal variables it is a function of
-    deep_model: Option<(crate::alternation::Strategy, Vec<crate::literal::Var>)>,
+    deep_model: Option<(std::rc::Rc<crate::alternation::Strategy>, Vec<crate::literal::Var>)>,
     last: Option<SolverResult>,
 }
 
