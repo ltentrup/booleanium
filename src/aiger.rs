@@ -1158,6 +1158,26 @@ mod test {
     }
 
     #[test]
+    fn safety_generalizes_only_what_it_may() {
+        // The fuzz's minimal case for a soundness bug in the fallback
+        // extraction: the error is a latch, so `latch0` is losing
+        // outright, and from `¬latch0 ∧ latch1` the controller cannot
+        // stop `latch0` rising. Only the all-clear state survives.
+        // Generalizing a self-reduced move by "the restriction is still
+        // unsatisfiable" would drop `latch0` from the cube and take the
+        // winning state with it — that test says *some* point of the
+        // cube wins, not every point.
+        let text = concat!(
+            "aag 11 3 2 1 6\n2\n4\n6\n8 15 1\n10 8 0\n8\n",
+            "12 6 4\n14 6 11\n16 14 14\n18 13 9\n20 4 2\n22 17 15\n",
+            "i0 u0\ni1 controllable_c1\ni2 controllable_c2\n"
+        );
+        let outcome = check_safety(text);
+        assert!(!outcome.realizable, "the initial state has the error latch set");
+        assert_eq!(outcome.losing.len(), 2);
+    }
+
+    #[test]
     fn safety_copycat_is_realizable() {
         // error = u xor c: the controller copies and wins forever, so
         // no state is ever removed and the fixpoint is immediate

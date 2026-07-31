@@ -136,6 +136,20 @@ adopted equivalent. For booleanium the natural contract is:
     push / pop / add-clause / add-definition / solve(assumptions)
       -> verdict + Skolem functions valid for the current stack
 
+**Reproducibility.** The solver is deterministic run to run, which it
+was not: a recorded winning move was collected out of a hash set, and
+Rust seeds its hasher per process, so the *order* of the move's literals
+differed between runs of the same binary on the same instance. Callers
+that minimize the move greedily then dropped different literals and
+returned different (equally valid) moves, and anything built on top —
+a game's winning region above all — became irreproducible. Measured on
+one pursuit game before the fix: 71, 78, and 101 refinement rounds
+across three runs, with wall times from 0.49 s to 7.67 s, which is
+enough variance to invent or hide any effect a benchmark might be
+looking for. Sorting the move fixed it, and incidentally found a better
+refinement path than the average unsorted one: the same game settled at
+66 rounds and 0.34 s.
+
 **Status: the baseline exists** (`src/incremental.rs`): an assertion
 stack of frames with `push`/`pop`/`add_clause`/`define_and`/`solve`/
 `solve_with_assumptions`, piecewise Skolem model extraction
@@ -460,7 +474,23 @@ notes:
   instance restricted to the move must stay unsatisfiable under
   brute force — which is 12 575 winning moves checked over 30 000
   random push/pop/assert/query sessions, independent of the
-  self-reduction that produced them. The gap was theoretical for the
+  self-reduction that produced them.
+
+  **A soundness bug the harness caught later, worth recording**, because
+  it is a distinction that is easy to lose: the self-reduction narrows
+  towards a winning move by asking "is the stack, restricted to this
+  cube, still unsatisfiable?", and that question says only that *some*
+  point of the cube wins. It is the right question for narrowing and the
+  wrong one for *generalizing*: a caller that acts on the whole cube — a
+  game excluding a region — needs *every* point of it to win. The
+  minimization used the narrowing test and so could hand back a cube
+  containing winning states. It now uses the strong one, the same plain
+  SAT check `unsat_witness_minimized` applies: no completion of the
+  universals admits any response.
+
+  It stayed hidden until the determinism fix below changed which
+  literals the greedy step dropped, which is the honest reason it was
+  found — the harness had been running over it for two commits. The gap was theoretical for the
   SMT-LIB frontend but not elsewhere: RQ5's game refinement hit it
   immediately and had to carry a hand-rolled single-state backstop,
   which this replaces.

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f0e42a707a8769bf4cdc3ab9f800b5588e851d9035205f344ef2bbd6bdfecf11 # shrinks to universals = 0, controllables = 2, latches = [(29, false), (0, false)], gates = [(0, 0)], output = 913, k = 1, continuation = false
+cc 2cbfde5510cefaadcc31782b4658679b2fe86cf898288041b8db3a2e0114abe9 # shrinks to universals = 1, controllables = 2, latches = [(807, false), (221, false)], gates = [(1, 580), (300, 263), (1, 18), (130, 1), (384, 92), (2, 56)], output = 320, k = 1, continuation = false

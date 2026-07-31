@@ -547,8 +547,17 @@ impl IncDet {
 
     /// Records the universal part of a conflicting assignment as the
     /// winning move of the universal player.
+    ///
+    /// Sorted, because the conflicting assignment arrives as a hash set
+    /// and Rust seeds its hasher per process: an unsorted move made the
+    /// *order* of its literals differ between runs of the same binary on
+    /// the same instance, and callers that minimize it greedily —
+    /// [`IncDet::unsat_witness_minimized`] — then dropped different
+    /// literals and returned a different (equally valid) move. Anything
+    /// built on top of that, a game's winning region above all, became
+    /// irreproducible run to run.
     pub(crate) fn record_unsat_witness(&mut self, conflicting: &HashSet<Lit>) {
-        let witness = conflicting
+        let mut witness: Vec<Lit> = conflicting
             .iter()
             .filter(|l| {
                 let data = &self.vars[l.var()];
@@ -556,6 +565,7 @@ impl IncDet {
             })
             .copied()
             .collect();
+        witness.sort_unstable();
         self.unsat_witness = Some(witness);
     }
 

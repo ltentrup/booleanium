@@ -427,6 +427,12 @@ fn main() {
         ("game-arbiter-3-2", arbiter(3, 2)),
         ("game-ring-4", pursuit(4, true, false)),
         ("game-corridor-4-stay", pursuit(4, false, true)),
+        // larger circuits at similar round counts: what a rebuild costs
+        // grows with the circuit, what the search costs grows with the
+        // region, so these separate the two
+        ("game-arbiter-3-3", arbiter(3, 3)),
+        ("game-arbiter-4-4", arbiter(4, 4)),
+        ("game-ring-6", pursuit(6, true, false)),
     ] {
         if let Some(filter) = std::env::args().nth(1) {
             if !name.contains(&filter) {

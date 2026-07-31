@@ -682,8 +682,15 @@ impl IncrementalSolver {
                 debug_assert!(self.restricted_is_unsatisfiable(&fixed));
             }
         }
-        // drop what the caller does not need, cheapest generalization
-        // first: a shorter move covers more of the universal space
+        // Generalize the complete move, and note that this must use the
+        // *strong* test, not the one that drove the self-reduction.
+        // "The stack restricted to this cube is unsatisfiable" says only
+        // that *some* point of the cube wins — enough to keep narrowing
+        // towards one, useless as a claim about the cube — whereas a
+        // caller that acts on the whole cube (a game excluding a region)
+        // needs every point of it to win. That is exactly the plain-SAT
+        // check [`IncDet::unsat_witness_minimized`] applies: no
+        // completion of the universals admits any response.
         let mut kept: Vec<Option<i32>> = fixed.into_iter().map(Some).collect();
         for position in 0..kept.len() {
             let Some(lit) = kept[position] else { continue };
@@ -692,11 +699,40 @@ impl IncrementalSolver {
             }
             kept[position] = None;
             let reduced: Vec<i32> = kept.iter().flatten().copied().collect();
-            if !self.restricted_is_unsatisfiable(&reduced) {
+            if !self.move_is_unanswerable(&reduced) {
                 kept[position] = Some(lit);
             }
         }
         Some(kept.into_iter().flatten().collect())
+    }
+
+    /// Whether *no* completion of the given universal literals admits an
+    /// existential response — the strong reading of a winning move, and
+    /// the one a caller may act on for the whole cube. A plain SAT
+    /// question over the matrix, mirroring
+    /// [`IncDet::unsat_witness_minimized`].
+    fn move_is_unanswerable(&self, universal: &[i32]) -> bool {
+        use crate::sat::{varisat::Varisat, LookupSolver, SatSolver};
+        let (extra, restriction) = &self.query_extra;
+        let mut qcnf = self.qcnf_with(extra);
+        restrict_universals(&mut qcnf, restriction);
+        let mut solver = LookupSolver::<Varisat>::default();
+        let count = qcnf
+            .prefix
+            .iter()
+            .flat_map(|(_, vars)| vars.iter().copied())
+            .chain(qcnf.matrix.iter().flatten().map(|l| l.var()))
+            .map(|v| usize::try_from(v.to_dimacs()).expect("fits") + 1)
+            .max()
+            .unwrap_or(0);
+        solver.set_var_count(count);
+        for clause in &qcnf.matrix {
+            let lits: Vec<_> = clause.iter().map(|&l| solver.lookup(l)).collect();
+            solver.add_clause(&lits);
+        }
+        let assumptions: Vec<_> =
+            universal.iter().map(|&l| solver.lookup(crate::literal::Lit::from_dimacs(l))).collect();
+        !solver.solve_with_assumptions(&assumptions).expect("a plain SAT query")
     }
 
     /// Whether the stack stays unsatisfiable once the universal domain
