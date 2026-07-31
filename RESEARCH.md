@@ -1288,21 +1288,22 @@ tree. The consumers have to be told what a node actually depends on.
 What remains is genuinely the SAT check. Gates now grow quadratically
 with depth while verification time still grows ~2x per alternation on
 `arbiter-2-2` — that is query hardness, not encoding size, and it is
-the honest wall. But it moves the reachable depth a long way:
-`ring-4` used to be reported unverified past 22 blocks and now
-**certifies at 32 blocks**, the full depth the family is generated to,
-in 153 s — the same 153 s it used to spend on 22. `corridor-4-stay`,
-the widest family, certifies at 16 blocks in 120 s.
-
-The depth-scaling table this section opened with can therefore be
-restated without the "(skipped)" rows:
+the honest wall. But it moves the reachable depth a long way. The
+instrument now certifies **every satisfiable depth it generates** —
+40 of 40, none skipped, none invalid — where the size guard used to
+fire from depth 8 on `arbiter-2-2` and depth 12 on `ring-4`:
 
 | family | verdict | blocks | solve | strategy | circuit | verify |
 |---|---|---|---|---|---|---|
 | `arbiter-3-2` | unsat | **32** | 13 ms | — | — | — |
 | `arbiter-2-2` | sat | 24 | 22 ms | 975 | 4 508 | 4.0 s |
 | `ring-4` | sat | **32** | 88 ms | 1 602 | 10 730 | 153 s |
-| `corridor-4-stay` | sat | 16 | 348 ms | 10 308 | 36 388 | 120 s |
+| `corridor-4-stay` | sat | 20 | 684 ms | 13 960 | 73 015 | 1 900 s |
+
+`ring-4` at its full 32 blocks costs the 153 s it used to spend on 22.
+`corridor-4-stay` — the widest family, and the one that used to build
+a 7.4-million-node strategy at depth 18 — certifies its last generated
+depth, where before the guard fired at depth 12.
 
 Earlier drafts of this section reported the certification points as
 *solver* cliffs; they are not — solving those same instances takes

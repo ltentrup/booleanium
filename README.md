@@ -96,7 +96,9 @@ both the unrollings and the region refinement).
 
 Decides all but one instance of the CADET integration suite, which the
 reference solver does not decide either. Deep prefixes have been solved
-and certified to 32 quantifier blocks on generated safety games.
+and certified to 32 quantifier blocks on generated safety games — every
+satisfiable depth the `bench_games scale` families generate certifies,
+none skipped.
 
 Known limits: QRAT proofs are emitted only for 2QBF, and only in a mode
 that disables CEGAR and case splits, whose derivations the clausal rules
