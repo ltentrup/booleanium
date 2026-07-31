@@ -948,7 +948,7 @@ cannot drift).
 That circuit is what makes the certificate checkable at real scale.
 `verify_strategy` encodes it into CNF alongside the matrix and asks
 for a universal assignment falsifying some clause: unsatisfiable means
-the strategy wins everywhere. One SAT call replaces `2^|Y|`
+the strategy wins everywhere. A SAT call replaces `2^|Y|`
 evaluations, which is the difference between checking the fuzz range
 and checking an instance with a 47-variable universal block. Both the
 universals and the existentials the strategy leaves undetermined stay
@@ -957,6 +957,36 @@ values of the undetermined variables" — the strong form, which is
 sound because a variable is only left out when the solve found it
 irrelevant. It is wired to `--certify` and `--strategy` for any prefix
 depth.
+
+**One query per clause, not one query for all of them.** The natural
+encoding of "some clause is falsified" is a selector per clause and a
+disjunction over the selectors. It is also the worst one: the solver
+gets a single enormous query with 2 023 ways to succeed and no handle
+on any of them. Asking one clause at a time instead — the same solver,
+the same circuit, the falsifying literals passed as *assumptions* —
+keeps everything expensive shared and everything learnt, and each
+query is small and focused. On `lights3_021_0_009` (43 blocks, a
+98 256-gate strategy, 2 023 clauses) verification went from 123 s to
+33 s; the instance had been failing the strategy suite's 60 s budget
+and now passes it. The solve itself takes 0.26 s, which is the real
+statement here: on deep prefixes it is *checking* the answer, not
+finding it, that costs.
+
+Substituting the circuit wires directly into the matrix instead of
+tying them to matrix variables by equivalences — two fewer clauses per
+determined variable, one less propagation step — was tried on top and
+was **worse**: 44 s against 33 s. The equivalences are not overhead;
+they give the solver a decision variable per determined existential
+and keep the matrix clauses short, and it uses both.
+
+The next step, if verification needs to get faster still, is to
+decompose along the strategy's own structure rather than along the
+matrix: check each `Split` case against its cube separately, so each
+query sees one branch's circuit instead of all of them. That needs the
+earlier cubes' negations to be part of each case's query — case `k`
+only applies where no earlier cube holds — which assumptions cannot
+express, so it wants a solver per case and is a larger change than the
+one measured here.
 
 The two checks now run side by side in the fuzz: the exhaustive
 pointwise one, the SAT one, and — because the SAT check works on the
@@ -1175,8 +1205,8 @@ represent in linear space is materialized as a tree. The unsatisfiable
 family, which builds no strategy at all, stays flat — which is exactly
 the control this diagnosis needs.
 
-That also relocates the certification wall. Verification is a single
-SAT call, but it encodes the strategy, so it inherits the blowup:
+That also relocates the certification wall. Verification is a SAT
+check, but it encodes the strategy, so it inherits the blowup:
 `ring-4` certifies at 22 blocks in 4.8 s and `arbiter-2-2` at 14
 blocks in 10.2 s, and past ~100k nodes the benchmark reports the size
 instead of running the check. Earlier drafts of this section reported

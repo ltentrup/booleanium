@@ -412,8 +412,11 @@ increasing order of ambition:
   constants, a ∀-loop's per-cube sub-strategies, and the core's
   certified Skolem models at the leaves — rendered as an AIGER
   strategy circuit (`Strategy::to_aiger`) through the same builder the
-  2QBF emitter uses, verified by one SAT call
-  (`alternation::verify_strategy`) as well as exhaustively in the
+  2QBF emitter uses, verified by a SAT check
+  (`alternation::verify_strategy`, one query per matrix clause against
+  one solver that keeps the circuit and everything it learns — 3.7x
+  faster than the single query over all of them) as well as
+  exhaustively in the
   fuzz, and available for *every* satisfiable result now that
   ∀-expansion is inverted too (`Strategy::Expanded` replays the
   renaming of the copy the actual assignment of the enumerated block
@@ -511,7 +514,7 @@ increasing order of ambition:
   `--certify` / `--strategy` on any prefix depth): a satisfiable
   answer to a prefix with more than two blocks carries a winning
   strategy composed out of the pipeline, rendered in the same AIGER
-  format as a 2QBF result and checked by a single SAT call — the
+  format as a 2QBF result and checked by SAT — the
   exhaustive pointwise check the fuzz uses cannot survive a
   47-variable universal block. All 19 solved satisfiable multi-block
   instances of the CADET suite certify, by the internal check and

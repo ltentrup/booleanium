@@ -431,12 +431,19 @@ impl Strategy {
     }
 }
 
-/// Verifies a composed [`Strategy`] against the original instance with a
-/// single SAT call: the strategy circuit is encoded into CNF alongside
-/// the matrix, and the query asks for an assignment of the universal
-/// variables that falsifies some clause. Unsatisfiable means the
-/// strategy wins everywhere, which is exactly the claim a satisfiable
-/// verdict makes.
+/// Verifies a composed [`Strategy`] against the original instance: the
+/// strategy circuit is encoded into CNF alongside the matrix, and the
+/// query asks for an assignment of the universal variables that
+/// falsifies some clause. Unsatisfiable means the strategy wins
+/// everywhere, which is exactly the claim a satisfiable verdict makes.
+///
+/// The query is issued *one clause at a time*, under assumptions that
+/// falsify it, against a single solver that keeps everything it learns.
+/// The disjunction over all clauses is one enormous query the solver
+/// has no handle on; the individual clauses are small queries sharing
+/// the expensive part — the circuit — and the learnt clauses from each
+/// carry to the next. Measured on `lights3_021_0_009` (43 blocks, a
+/// 98k-gate strategy): 123 s as one query, 33 s as 2023 of them.
 ///
 /// The universal variables and the existentials the strategy leaves
 /// undetermined are left free, so the check reads "for *all* universal
@@ -459,7 +466,14 @@ pub fn verify_strategy(qcnf: &QCNF, strategy: &Strategy) -> bool {
         .filter(|(q, _)| *q == QuantTy::Forall)
         .flat_map(|(_, vars)| vars.iter().copied())
         .collect();
+    let built = std::time::Instant::now();
     let (aig, values) = strategy.build(&universals);
+    tracing::debug!(
+        nodes = strategy.size(),
+        gates = aig.gates().len(),
+        seconds = built.elapsed().as_secs_f64(),
+        "built the strategy circuit"
+    );
 
     let mut solver = LookupSolver::<Varisat>::default();
     let var_count = qcnf
@@ -511,19 +525,28 @@ pub fn verify_strategy(qcnf: &QCNF, strategy: &Strategy) -> bool {
         solver.add_clause(&[var, !value]);
     }
 
-    // "some clause of the matrix is falsified"
-    let mut falsified = Vec::with_capacity(qcnf.matrix.len());
+    // one query per clause: "this clause is falsified"
+    let checked = std::time::Instant::now();
+    let mut wins = true;
+    let mut assumptions: Vec<SatLit> = Vec::new();
     for clause in &qcnf.matrix {
-        let selector = solver.add_variable();
-        for &l in clause {
-            let l = solver.lookup(l);
-            solver.add_clause(&[!selector, !l]);
+        assumptions.clear();
+        assumptions.extend(clause.iter().map(|&l| !solver.lookup(l)));
+        if solver
+            .solve_with_assumptions(&assumptions)
+            .expect("the strategy check is a plain SAT query")
+        {
+            wins = false;
+            break;
         }
-        falsified.push(selector);
     }
-    solver.add_clause(&falsified);
-
-    !solver.solve().expect("the strategy check is a plain SAT query")
+    tracing::debug!(
+        clauses = qcnf.matrix.len(),
+        seconds = checked.elapsed().as_secs_f64(),
+        wins,
+        "checked the strategy"
+    );
+    wins
 }
 
 /// The result of an internal solve: the verdict, the refuting
