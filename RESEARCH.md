@@ -551,6 +551,76 @@ What generalizes cleanly, judged against the current architecture:
   `SatSolver` trait makes the naive swap a one-day experiment — worth
   running once, expecting it to lose, to get the number).
 
+### Where the two tracks meet
+
+The goal is games over *theories*; the entry ticket is being fast on
+QDIMACS. Those look like competing demands and mostly are, but they
+share exactly one investment, and it is worth being explicit about
+which.
+
+**Clausal abstraction is the shared piece.** It is the QDIMACS answer
+(CAQE decided instances neither DepQBF nor RAReQS could, by containing
+both search and expansion in one calculus) and it is the
+theory-liftable architecture, because its refinement loop is
+model-based over *atoms* — which is how quantified SMT already works.
+The list at the top of this section says the same thing from the other
+side: CEGAR lifts, case splits lift, the frontier lifts, the clausal
+core does not. Abstraction is assembled from the parts that lift.
+
+**The uncomfortable corollary is that ID is the part that does not.**
+Determinacy is a Boolean notion and becomes per-theory. That does not
+make it worthless — it is what produces certified Skolem functions
+cheaply and what reads circuit structure straight through — but it
+argues for ID as a *component*, an accelerator wherever the structure
+is definitional, rather than as the trunk everything else hangs from.
+
+**Which theory: bit-vectors, revising an earlier answer.** EUF is the
+right answer to "what is determinacy modulo a theory" — `x = t` is
+literally a definition and congruence closure is the analogue of
+unique consequence. It is the wrong answer to "which theory makes
+*games* pay". The bit-blasting measurement above already narrowed
+that: arithmetic structure survives bit-blasting fine (the inverted
+adder determinizes 61/61 with zero decisions), and what word-level
+reasoning buys is *not enumerating* — the comparison family
+degenerates into search at 2/40 determinized.
+
+In a fixpoint, the place you enumerate is **the region**. A Boolean
+safety game's winning region is a set of cubes that grows one cube per
+round; `arbiter-4-4` needs 55. A bit-vector game's region is naturally
+an interval or a word-level constraint, and the bit-blasted form of it
+can be exponentially larger. That is the same "specialised algorithm
+beats the generic solver" failure mode as everywhere else, located
+precisely: not in the search, in the representation of the region.
+
+Bit-vectors also keep the method intact, which EUF and LIA do not:
+
+* games over BV are **decidable** (finite domain), so this is an
+  algorithm rather than a semi-algorithm with an abstraction on top;
+* the differential oracle is **free and exact** — bit-blast the game
+  and run the existing Boolean path. Every result in this project
+  rests on an oracle sharing no code with the thing under test, and
+  here the project already contains one;
+* the industrial case (word-level controller synthesis) is the one
+  people actually have.
+
+**The experiment that prices the prize, runnable today with no new
+solver.** Build a safety game with word-level structure — a counter
+against a threshold is enough — bit-blast it, and run the existing
+`solve_safety` as `n` grows, counting rounds and cubes. If the region
+needs O(2^n) cubes where a word-level region is one interval, that
+number *is* the argument for the theory track, measured rather than
+asserted. If the cubes generalize better than expected, the prize is
+smaller than it looks and that is worth knowing for the cost of a
+generator.
+
+**Scheduling.** Preprocessing is the highest QDIMACS-per-hour item and
+is largely independent of the architecture, so it can run in parallel
+without prejudicing the theory design. The two-solver control below
+and the region experiment above are both cheap and both feed the
+architecture decision — the control says whether determinization earns
+its keep on the game workload at all, which is exactly the input the
+"ID as component, not trunk" question needs.
+
 ## RQ5 — Positioning: a building block for two-player games
 
 An incremental ∀∃ solver that returns functions is the inner loop of
