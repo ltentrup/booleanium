@@ -40,6 +40,13 @@ impl IncDet {
     /// Checks whether the implication clauses of `var` force a unique value
     /// under every assignment of the remaining variables.
     pub(crate) fn has_unique_consequence(&mut self, var: Var) -> Determinacy {
+        let started = std::time::Instant::now();
+        let determinacy = self.unique_consequence(var);
+        self.stats.skolem.det_check_time += started.elapsed();
+        determinacy
+    }
+
+    fn unique_consequence(&mut self, var: Var) -> Determinacy {
         self.stats.skolem.local_det_checks += 1;
         // collect the implication clauses without `var`, simplified by the
         // constant assignments

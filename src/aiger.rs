@@ -855,7 +855,10 @@ pub fn solve_safety_with_continuation(
             }
         }
 
-        if solver.solve() != SolverResult::Unsatisfiable {
+        let began = std::time::Instant::now();
+        let verdict = solver.solve();
+        let refuted = began.elapsed();
+        if verdict != SolverResult::Unsatisfiable {
             if !induction {
                 // the safe states are known; now demand that the
                 // controller can also *stay* among them
@@ -892,6 +895,15 @@ pub fn solve_safety_with_continuation(
         if !had_witness {
             fallback_rounds += 1;
         }
+        tracing::debug!(
+            round = rounds,
+            induction,
+            solve = refuted.as_secs_f64(),
+            extract = began.elapsed().as_secs_f64() - refuted.as_secs_f64(),
+            literals = witness.len(),
+            fallback = !had_witness,
+            "refinement round"
+        );
         let cube: Vec<(usize, bool)> = witness
             .iter()
             .filter_map(|&l| {

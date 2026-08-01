@@ -459,9 +459,24 @@ fn main() {
         }
         for continuation in [true, false] {
             let start = Instant::now();
+            // core options are A/B-able from the environment: the
+            // refinement loop drives the core very differently from the
+            // 2QBF corpora the defaults were fitted on, so which
+            // extensions pay here is a question the benchmark should be
+            // able to answer without a rebuild
+            let mut options = Options::default();
+            if std::env::var("BENCH_RESTARTS").is_ok() {
+                options.restarts = true;
+            }
+            if std::env::var("BENCH_NO_CASE_SPLITS").is_ok() {
+                options.case_splits = false;
+            }
+            if std::env::var("BENCH_NO_CEGAR").is_ok() {
+                options.cegar = false;
+            }
             let outcome = aiger::solve_safety_with_continuation(
                 &text,
-                Options::default(),
+                options,
                 continuation,
             )
             .expect("generated spec parses");

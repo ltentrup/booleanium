@@ -186,11 +186,14 @@ impl IncDet {
         // slower, complete check
         trace!("global conflict check");
         self.stats.skolem.global_conflict_checks += 1;
-        let mut assignment = if self.options.incremental_conflict_check {
-            self.is_conflicted_incremental(var)?
+        let started = std::time::Instant::now();
+        let checked = if self.options.incremental_conflict_check {
+            self.is_conflicted_incremental(var)
         } else {
-            self._is_conflicted::<ConflictSolver>(var, true)?
+            self._is_conflicted::<ConflictSolver>(var, true)
         };
+        self.stats.skolem.global_check_time += started.elapsed();
+        let mut assignment = checked?;
         // the model contains no meaningful value for the checked variable
         assignment.remove(&Lit::positive(var));
         assignment.remove(&Lit::negative(var));

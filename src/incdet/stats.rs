@@ -42,6 +42,11 @@ pub(crate) struct SkolemStats {
     pub(crate) local_det_checks: u32,
     pub(crate) local_conflict_checks: u32,
     pub(crate) global_conflict_checks: u32,
+    /// wall time inside the determinacy check and inside the complete
+    /// (SAT-backed) conflict check — the two candidates for where a
+    /// long search actually spends itself
+    pub(crate) det_check_time: Duration,
+    pub(crate) global_check_time: Duration,
     pub(crate) conflict_check_reboots: u32,
     pub(crate) function_propagations: u32,
     pub(crate) constant_propagations: u32,
