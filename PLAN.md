@@ -520,6 +520,18 @@ increasing order of ambition:
   instances of the CADET suite certify, by the internal check and
   independently by the external AIGER simulator. See `RESEARCH.md`
   (RQ6).
+* **Where the safety refinement's time goes — measured**
+  (per-round tracing in `aiger::solve_safety`, `det_check_time` and
+  `global_check_time` in the core statistics, core options A/B-able
+  from the environment in `bench_games`): on `game-arbiter-4-4`, the
+  benchmark's one expensive game, witness extraction is 0.1% of the
+  run and one round of 57 spends 52 s inside the core, 72% of it in
+  the complete conflict check — 42 472 calls at ~890 µs, of which 81%
+  prove there is *no* conflict. The defaults beat every alternative
+  tried (case splits are worth 7x despite closing no cases; CEGAR
+  halves the fallback rounds; restarts change nothing at all). See
+  `RESEARCH.md` (RQ5).
+
 * **Structure sharing in composed strategies — done**
   (`alternation::Strategy` over `Rc`, `Strategy::gates`): the
   recursion's memo hands back a shared node instead of a deep copy, so

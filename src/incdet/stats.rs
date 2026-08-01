@@ -47,6 +47,10 @@ pub(crate) struct SkolemStats {
     /// long search actually spends itself
     pub(crate) det_check_time: Duration,
     pub(crate) global_check_time: Duration,
+    /// level guards passed as assumptions, summed over the complete
+    /// checks: one per live decision level, so it grows with search
+    /// depth and is paid on every call
+    pub(crate) check_assumptions: u64,
     pub(crate) conflict_check_reboots: u32,
     pub(crate) function_propagations: u32,
     pub(crate) constant_propagations: u32,

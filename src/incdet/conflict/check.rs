@@ -186,6 +186,7 @@ impl IncDet {
         // slower, complete check
         trace!("global conflict check");
         self.stats.skolem.global_conflict_checks += 1;
+        self.stats.skolem.check_assumptions += self.conflict_check.assumptions.len() as u64;
         let started = std::time::Instant::now();
         let checked = if self.options.incremental_conflict_check {
             self.is_conflicted_incremental(var)

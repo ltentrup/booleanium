@@ -719,6 +719,100 @@ of which a one-shot QDIMACS call can express.
   is why the random-circuit proptest is where soundness is actually
   decided.
 
+  **Where those 753 seconds go, and where they do not.** The instance
+  is now the benchmark's one genuinely expensive game, so it is worth
+  taking apart. Per-round tracing
+  (`RUST_LOG=booleanium=debug`) says the refinement loop is not the
+  cost: witness extraction is ~0.8 ms a round, **0.1% of the run**, and
+  a typical round's solve is 10–130 ms. The run is dominated by a
+  handful of rounds that hand the 2QBF core a hard query — one round of
+  57 spends **59.9 s** inside `solve`, with 26 499 decisions, 8 023
+  conflicts and 42 472 global conflict checks. Those are exactly the
+  rounds that fall back to self-reduction: the refutation arrives
+  without a recorded universal move, because it came from deep clause
+  learning rather than from a conflict check.
+
+  The cubes are not the problem either, and this one is provable rather
+  than measured: the greedy minimization is already at a local minimum
+  after one pass, because `move_is_unanswerable` is antitone in cube
+  size — a literal that could not be dropped from a larger cube can
+  never be dropped from a smaller one, so a second pass cannot find
+  anything. The growth from 1–6 literals in the safe phase to 15–18
+  under induction is a property of the region, not of the minimizer.
+
+  **The core's own extensions were then A/B-ed on it**
+  (`BENCH_RESTARTS`, `BENCH_NO_CASE_SPLITS`, `BENCH_NO_CEGAR` on
+  `bench_games`), which is worth doing because the refinement loop
+  drives the core very differently from the 2QBF corpora the defaults
+  were fitted on, and because that hard round reports 0 restarts and 54
+  case-split assumptions of which **0 were ever closed**:
+
+  | configuration | in-place | rebuild | rounds | cubes | fallback |
+  |---|---|---|---|---|---|
+  | default | 753 s | 761 s | 57 | 55 | 8 |
+  | `restarts` | 685 s | 609 s | 57 | 55 | 8 |
+  | `no case splits` | **5 550 s** | — | 56 | 54 | 3 |
+  | `no cegar` | 914 s | 829 s | 58 | 56 | 17 |
+
+  (All five runs shared four cores, so the absolute numbers are
+  uniformly inflated; the ratios are the content.)
+
+  **The defaults win, and two of the three answers are informative.**
+  Case splits are worth **7x** here despite closing none of their
+  cases — the "0 closed" statistic measures completed cases, not
+  useful ones, and reading it as churn would have been exactly wrong.
+  CEGAR is worth ~20% and, more tellingly, halves the fallback rounds
+  from 17 to 8: it is CEGAR that produces the conflicting assignments
+  the loop reads as winning moves, so without it the loop has to
+  reconstruct them by self-reduction. Restarts change nothing at all —
+  not just the wall time but the *trajectory*: identical rounds,
+  cubes, and fallbacks, which says the schedule never alters what the
+  search finds on these queries.
+
+  So the 753 s is not a tuning failure and not a loop-shape failure.
+  It is the core's search on the induction queries, and improving it
+  is a 2QBF problem, not a game problem.
+
+  **Which part of the core.** Timing the two check paths separately
+  (`SkolemStats::det_check_time`, `global_check_time`) answers that
+  directly. The hard round, twice, on an otherwise idle machine:
+
+  | phase | time | share | calls | per call |
+  |---|---|---|---|---|
+  | complete conflict check | **37.8 s** | **72%** | 42 472 | 890 µs |
+  | determinacy check | 9.9 s | 19% | 660 196 | 15 µs |
+  | propagation, analysis, CEGAR | 4.8 s | 9% | | |
+
+  (The other run: 50.8 s total, 36.1 s and 10.0 s — the split is
+  stable.)
+
+  The budgeted micro-DPLL that replaced a SAT solver in the determinacy
+  check is doing its job: 660 196 calls for 10 s, 15 µs each. The
+  complete conflict check is where the round lives, and the shape of
+  its cost is the interesting part — 42 472 calls yield only 8 023
+  conflicts, so **81% of the expensive calls prove that there is no
+  conflict**. The cheap syntactic filter in front of it
+  (`may_be_conflicted`) admits 42 472 of 52 788 candidates: it rejects
+  only 20%.
+
+  That makes the target concrete for the first time. Not "the core is
+  slow on this game" but *the negative complete checks*, and there are
+  two ways at them — a stronger filter in front of the solver, or a
+  cheaper call behind it. One candidate for the second is already
+  ruled out: the level guards passed as assumptions average **10.3 per
+  call** (437 988 over 42 472), so assumption handling is not where
+  the 890 µs goes.
+
+  The appealing symmetry — do to the conflict check what the budgeted
+  micro-DPLL did to the determinacy check — does not transfer as
+  cleanly as it looks. A determinacy check is *local*, over the
+  implication clauses of one variable, which is why a budget decides
+  almost all of them; a conflict check is *global*, over the matrix,
+  the determined Skolem functions and every handled case, so a
+  budgeted searcher for it is a SAT solver again. The filter side is
+  the one with room: it currently reasons only about clashing literals
+  within pairs of implication clauses, and never propagates.
+
 * **The alternating encoding closes the same gap at the source**
   (`Unroller::alternating`, now that the solver handles deep
   prefixes): unroll with *one quantifier alternation per step*,
