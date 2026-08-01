@@ -965,6 +965,94 @@ pub fn solve_safety_with_continuation(
     }
 }
 
+/// The value of an AIGER literal under a variable valuation.
+fn litval(val: &[bool], l: u64) -> bool {
+    match l {
+        0 => false,
+        1 => true,
+        _ => val[usize::try_from(l / 2).unwrap()] ^ (l % 2 == 1),
+    }
+}
+
+/// The exact winning region of a safety game, by explicit backward
+/// iteration over the state space: start with every state and drop
+/// those from which some environment move defeats every controller
+/// move, until nothing changes. Independent of everything
+/// [`solve_safety`] does — no solver, no encoding, no cubes.
+fn winning_region(aiger: &Aiger, is_controllable: &[bool]) -> Vec<bool> {
+    let positions = |want: bool| -> Vec<usize> {
+        is_controllable
+            .iter()
+            .enumerate()
+            .filter(|&(_, &c)| c == want)
+            .map(|(p, _)| p)
+            .collect()
+    };
+    let (uncontrollable, controllable) = (positions(false), positions(true));
+    let latches = aiger.latches.len();
+    let var = |l: u64| usize::try_from(l / 2).unwrap();
+    let mut winning = vec![true; 1 << latches];
+    loop {
+        let mut next_winning = winning.clone();
+        for state in 0..1usize << latches {
+            if !winning[state] {
+                continue;
+            }
+            let survives = (0..1u64 << uncontrollable.len()).all(|env| {
+                (0..1u64 << controllable.len()).any(|ctl| {
+                    let mut values =
+                        vec![false; usize::try_from(aiger.max_var).unwrap() + 1];
+                    for (bit, &pos) in uncontrollable.iter().enumerate() {
+                        values[var(aiger.inputs[pos])] = env >> bit & 1 == 1;
+                    }
+                    for (bit, &pos) in controllable.iter().enumerate() {
+                        values[var(aiger.inputs[pos])] = ctl >> bit & 1 == 1;
+                    }
+                    for (idx, latch) in aiger.latches.iter().enumerate() {
+                        values[var(latch.lit)] = state >> idx & 1 == 1;
+                    }
+                    for and in &aiger.ands {
+                        values[var(and.lhs)] =
+                            litval(&values, and.rhs0) && litval(&values, and.rhs1);
+                    }
+                    if aiger.outputs.iter().any(|&out| litval(&values, out)) {
+                        return false;
+                    }
+                    let successor = aiger
+                        .latches
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, l)| litval(&values, l.next))
+                        .fold(0usize, |acc, (idx, _)| acc | 1 << idx);
+                    winning[successor]
+                })
+            });
+            next_winning[state] = survives;
+        }
+        if next_winning == winning {
+            return winning;
+        }
+        winning = next_winning;
+    }
+}
+
+
+/// The states from which the controller loses, by explicit backward
+/// iteration over the whole state space — no solver, no encoding, no
+/// cubes. Exposed for the benchmarks, which price the refinement
+/// loop's region against the region the game actually has.
+///
+/// # Errors
+///
+/// Returns an error if the input is not a well-formed ASCII AIGER file.
+pub fn losing_states(input: &str, latches: usize) -> Result<Vec<bool>, ParseError> {
+    let aiger = parse_aag(input)?;
+    debug_assert_eq!(aiger.latches.len(), latches);
+    let is_controllable: Vec<bool> =
+        aiger.input_names.iter().map(|n| n.as_deref().is_some_and(is_controllable)).collect();
+    Ok(winning_region(&aiger, &is_controllable).into_iter().map(|w| !w).collect())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1033,14 +1121,6 @@ mod test {
     }
 
     /// Evaluates an AIGER literal under a variable valuation.
-    fn litval(val: &[bool], l: u64) -> bool {
-        match l {
-            0 => false,
-            1 => true,
-            _ => val[usize::try_from(l / 2).unwrap()] ^ (l % 2 == 1),
-        }
-    }
-
     /// Simulates the circuit for `k` steps under the given input bit
     /// streams (`stream[t]` holds the step-`t` value of the input at the
     /// given positions) and reports whether every error output stays
@@ -1079,66 +1159,11 @@ mod test {
         true
     }
 
-    /// The exact winning region of a safety game, by explicit backward
-    /// iteration over the state space: start with every state and drop
-    /// those from which some environment move defeats every controller
-    /// move, until nothing changes. Independent of everything
-    /// [`solve_safety`] does — no solver, no encoding, no cubes.
+    /// The exact winning region, by explicit backward iteration; see
+    /// [`super::winning_region`]. Kept as a thin alias so the tests
+    /// read as before.
     fn winning_region(aiger: &Aiger, is_controllable: &[bool]) -> Vec<bool> {
-        let positions = |want: bool| -> Vec<usize> {
-            is_controllable
-                .iter()
-                .enumerate()
-                .filter(|&(_, &c)| c == want)
-                .map(|(p, _)| p)
-                .collect()
-        };
-        let (uncontrollable, controllable) = (positions(false), positions(true));
-        let latches = aiger.latches.len();
-        let var = |l: u64| usize::try_from(l / 2).unwrap();
-        let mut winning = vec![true; 1 << latches];
-        loop {
-            let mut next_winning = winning.clone();
-            for state in 0..1usize << latches {
-                if !winning[state] {
-                    continue;
-                }
-                let survives = (0..1u64 << uncontrollable.len()).all(|env| {
-                    (0..1u64 << controllable.len()).any(|ctl| {
-                        let mut values =
-                            vec![false; usize::try_from(aiger.max_var).unwrap() + 1];
-                        for (bit, &pos) in uncontrollable.iter().enumerate() {
-                            values[var(aiger.inputs[pos])] = env >> bit & 1 == 1;
-                        }
-                        for (bit, &pos) in controllable.iter().enumerate() {
-                            values[var(aiger.inputs[pos])] = ctl >> bit & 1 == 1;
-                        }
-                        for (idx, latch) in aiger.latches.iter().enumerate() {
-                            values[var(latch.lit)] = state >> idx & 1 == 1;
-                        }
-                        for and in &aiger.ands {
-                            values[var(and.lhs)] =
-                                litval(&values, and.rhs0) && litval(&values, and.rhs1);
-                        }
-                        if aiger.outputs.iter().any(|&out| litval(&values, out)) {
-                            return false;
-                        }
-                        let successor = aiger
-                            .latches
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, l)| litval(&values, l.next))
-                            .fold(0usize, |acc, (idx, _)| acc | 1 << idx);
-                        winning[successor]
-                    })
-                });
-                next_winning[state] = survives;
-            }
-            if next_winning == winning {
-                return winning;
-            }
-            winning = next_winning;
-        }
+        super::winning_region(aiger, is_controllable)
     }
 
     /// Runs the refinement loop and checks its answer, and its whole

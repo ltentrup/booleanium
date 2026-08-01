@@ -72,6 +72,22 @@ impl Aig {
         lits.iter().fold(0, |acc, &l| self.or(acc, l))
     }
 
+    fn and_all(&mut self, lits: &[u64]) -> u64 {
+        lits.iter().fold(1, |acc, &l| self.and(acc, l))
+    }
+
+    fn xor(&mut self, a: u64, b: u64) -> u64 {
+        let left = self.and(a, b ^ 1);
+        let right = self.and(a ^ 1, b);
+        self.or(left, right)
+    }
+
+    fn ite(&mut self, cond: u64, then: u64, otherwise: u64) -> u64 {
+        let taken = self.and(cond, then);
+        let skipped = self.and(cond ^ 1, otherwise);
+        self.or(taken, skipped)
+    }
+
     fn connect(&mut self, latch: usize, next: u64, reset: u64) {
         assert!(self.nexts[latch].is_none());
         self.nexts[latch] = Some((next, reset));
@@ -133,6 +149,76 @@ fn arbiter(n: usize, b: usize) -> String {
             aig.connect(age(i, j), next, 0);
         }
         errors.push(aig.latch(age(i, b - 1)));
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (gi, gj) = (aig.input(n + i), aig.input(n + j));
+            let double = aig.and(gi, gj);
+            errors.push(double);
+        }
+    }
+    let error = aig.or_all(&errors);
+    aig.output(error);
+    aig.text()
+}
+
+/// The same arbiter, with each client's age held as a **binary
+/// counter** instead of a unary shift register: the state encoding a
+/// bit-vector frontend would produce, at `ceil(log2(b+1))` latches per
+/// client instead of `b`.
+///
+/// It is the same game. The unary chain
+/// (`a[0]' = r & !g`, `a[j]' = a[j-1] & !g`, error on `a[b-1]`) is a
+/// saturating counter that starts on a request, advances while no grant
+/// arrives, and clears on one — so the binary form is
+/// `c' = g ? 0 : (c > 0 | r) ? min(c+1, b) : 0`, with the error on
+/// `c == b`. Realizable iff `n <= b`, exactly as before.
+///
+/// The pair is the measurement RQ4 wants: one problem, two state
+/// encodings, and the question of whether the refinement loop's cost
+/// follows the *problem* or the *representation*.
+fn binary_arbiter(n: usize, b: usize) -> String {
+    let width = (usize::BITS - b.leading_zeros()) as usize;
+    let mut names: Vec<String> = (0..n).map(|i| format!("r{i}")).collect();
+    names.extend((0..n).map(|i| format!("controllable_g{i}")));
+    let mut aig = Aig::new(names, n * width);
+    let bit = |i: usize, j: usize| i * width + j;
+    let mut errors = Vec::new();
+    for i in 0..n {
+        let (r, g) = (aig.input(i), aig.input(n + i));
+        let counter: Vec<u64> = (0..width).map(|j| aig.latch(bit(i, j))).collect();
+
+        // the counter runs when a grant is withheld and something is
+        // pending: either a fresh request or a count already started
+        let started = aig.or_all(&counter);
+        let pending = aig.or(started, r);
+        let running = aig.and(pending, g ^ 1);
+
+        // c == b, which is the error and also the value the counter
+        // freezes at (the error output is already latched high, so what
+        // happens afterwards cannot matter — freezing just keeps the
+        // state space honest)
+        let at_max: Vec<u64> = counter
+            .iter()
+            .enumerate()
+            .map(|(j, &c)| if b >> j & 1 == 1 { c } else { c ^ 1 })
+            .collect();
+        let at_max = aig.and_all(&at_max);
+        errors.push(at_max);
+
+        // ripple-carry increment
+        let mut carry = 1u64;
+        let mut incremented = Vec::with_capacity(width);
+        for &c in &counter {
+            incremented.push(aig.xor(c, carry));
+            carry = aig.and(c, carry);
+        }
+
+        for (j, (&c, &sum)) in counter.iter().zip(&incremented).enumerate() {
+            let advanced = aig.ite(at_max, c, sum);
+            let next = aig.and(running, advanced);
+            aig.connect(bit(i, j), next, 0);
+        }
     }
     for i in 0..n {
         for j in (i + 1)..n {
@@ -494,5 +580,133 @@ fn main() {
             );
         }
     }
+
+    // The state-encoding comparison (RQ4/RQ5): the same arbiter game
+    // with each client's age as a unary shift register and as a binary
+    // counter — the encoding a bit-vector frontend would produce. The
+    // question is whether the refinement loop's cost follows the
+    // *problem* or the *representation*, and the honest way to ask it
+    // is to price the region three ways: the cubes the loop actually
+    // discovered, a near-minimal cube cover of the true losing region
+    // (how many cubes the region *needs*), and what a word-level
+    // description would be.
+    println!();
+    println!(
+        "{:<24} {:>7} {:>13} {:>7} {:>7} {:>7} {:>7} {:>12}",
+        "family", "latches", "verdict", "rounds", "cubes", "ideal", "width", "time"
+    );
+    // (k, b) pairs: k = b sits on the realizability boundary, and
+    // holding k at 2 while b grows is the axis a word-level region
+    // should win on — the unary state space grows with the deadline,
+    // the binary one with its logarithm
+    for (name, text) in [
+        ("region-arbiter-2-2 unary", arbiter(2, 2)),
+        ("region-arbiter-2-2 binary", binary_arbiter(2, 2)),
+        ("region-arbiter-2-4 unary", arbiter(2, 4)),
+        ("region-arbiter-2-4 binary", binary_arbiter(2, 4)),
+        ("region-arbiter-2-6 unary", arbiter(2, 6)),
+        ("region-arbiter-2-6 binary", binary_arbiter(2, 6)),
+        ("region-arbiter-2-8 unary", arbiter(2, 8)),
+        ("region-arbiter-2-8 binary", binary_arbiter(2, 8)),
+        ("region-arbiter-2-12 unary", arbiter(2, 12)),
+        ("region-arbiter-2-12 binary", binary_arbiter(2, 12)),
+        ("region-arbiter-2-16 unary", arbiter(2, 16)),
+        ("region-arbiter-2-16 binary", binary_arbiter(2, 16)),
+        ("region-arbiter-3-3 unary", arbiter(3, 3)),
+        ("region-arbiter-3-3 binary", binary_arbiter(3, 3)),
+        ("region-arbiter-4-4 unary", arbiter(4, 4)),
+        ("region-arbiter-4-4 binary", binary_arbiter(4, 4)),
+    ] {
+        if let Some(filter) = std::env::args().nth(1) {
+            if !name.contains(&filter) {
+                continue;
+            }
+        }
+        let latches = text
+            .lines()
+            .next()
+            .and_then(|h| h.split_ascii_whitespace().nth(3))
+            .and_then(|f| f.parse::<usize>().ok())
+            .expect("header parses");
+        let start = Instant::now();
+        let outcome =
+            aiger::solve_safety(&text, Options::default()).expect("generated spec parses");
+        let elapsed = start.elapsed();
+        let width = if outcome.losing.is_empty() {
+            0.0
+        } else {
+            outcome.losing.iter().map(Vec::len).sum::<usize>() as f64
+                / outcome.losing.len() as f64
+        };
+        let ideal = minimal_cover(&text, latches).map_or("-".to_string(), |c| c.to_string());
+        println!(
+            "{name:<24} {latches:>7} {:>13} {:>7} {:>7} {ideal:>7} {width:>7.1} {elapsed:>12.3?}",
+            if outcome.realizable { "realizable" } else { "unrealizable" },
+            outcome.rounds,
+            outcome.losing.len(),
+        );
+    }
     println!("total: {:.3?}", total.elapsed());
+}
+
+/// The size of a near-minimal cube cover of the true losing region,
+/// computed without the solver: an explicit backward fixpoint over the
+/// state space, then greedy prime-implicant expansion and greedy set
+/// cover. This is the number the refinement loop's cube count should be
+/// compared against — not to the loop's own previous run.
+///
+/// Returns `None` when the state space is too large to sweep.
+fn minimal_cover(text: &str, latches: usize) -> Option<usize> {
+    if latches > 20 {
+        return None;
+    }
+    let losing = aiger::losing_states(text, latches).ok()?;
+    let states = 1usize << latches;
+    let targets: Vec<usize> = (0..states).filter(|&s| losing[s]).collect();
+    if targets.is_empty() {
+        return Some(0);
+    }
+
+    // every losing state expands to a maximal cube that stays losing;
+    // literals are dropped in a fixed order, so the result is a prime
+    // implicant of the losing set
+    let mut primes: Vec<(usize, usize)> = Vec::new(); // (mask of fixed bits, values)
+    for &state in &targets {
+        let mut mask = (1usize << latches) - 1;
+        for bit in 0..latches {
+            let candidate = mask & !(1 << bit);
+            let inside = (0..states).all(|s| {
+                s & candidate != state & candidate || losing[s]
+            });
+            if inside {
+                mask = candidate;
+            }
+        }
+        primes.push((mask, state & mask));
+    }
+    primes.sort_unstable();
+    primes.dedup();
+
+    // greedy set cover over the prime implicants
+    let mut uncovered: Vec<bool> = losing;
+    let mut chosen = 0;
+    while uncovered.iter().any(|&u| u) {
+        let best = primes
+            .iter()
+            .max_by_key(|&&(mask, values)| {
+                (0..states).filter(|&s| s & mask == values && uncovered[s]).count()
+            })
+            .copied()?;
+        let gain = (0..states).filter(|&s| s & best.0 == best.1 && uncovered[s]).count();
+        if gain == 0 {
+            return None;
+        }
+        for (s, covered) in uncovered.iter_mut().enumerate() {
+            if s & best.0 == best.1 {
+                *covered = false;
+            }
+        }
+        chosen += 1;
+    }
+    Some(chosen)
 }

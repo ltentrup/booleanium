@@ -603,15 +603,69 @@ Bit-vectors also keep the method intact, which EUF and LIA do not:
 * the industrial case (word-level controller synthesis) is the one
   people actually have.
 
-**The experiment that prices the prize, runnable today with no new
-solver.** Build a safety game with word-level structure — a counter
-against a threshold is enough — bit-blast it, and run the existing
-`solve_safety` as `n` grows, counting rounds and cubes. If the region
-needs O(2^n) cubes where a word-level region is one interval, that
-number *is* the argument for the theory track, measured rather than
-asserted. If the cubes generalize better than expected, the prize is
-smaller than it looks and that is worth knowing for the cost of a
-generator.
+**The experiment that prices the prize — run, and it inverts the
+hypothesis** (`bench_games region`, families `region-arbiter-k-b`).
+The same arbiter game with each client's age held two ways: as the
+existing unary shift register, and as a **binary counter**
+(`binary_arbiter`) — the state encoding a bit-vector frontend would
+produce. Three prices per row: the cubes the refinement loop actually
+discovered, a near-minimal cube cover of the *true* losing region
+computed without the solver (explicit backward fixpoint, greedy prime
+implicants, greedy set cover), and what a word-level description would
+be.
+
+Holding `k = 2` and growing the deadline `b` — the axis a word-level
+region is supposed to win on, since the unary state space grows with
+`b` and the binary one with `log b`:
+
+| `b` | unary latches / cubes / width | binary latches / cubes / width | ideal |
+|---|---|---|---|
+| 2 | 4 / 3 / 2.3 | 4 / 4 / 3.2 | 3 |
+| 4 | 8 / 3 / 2.3 | 6 / 5 / 4.8 | 3 |
+| 8 | 16 / 3 / 2.3 | 8 / 6 / 6.3 | 3 |
+| 12 | 24 / 3 / 2.3 | 8 / 6 / 6.3 | 3 |
+| 16 | 32 / 3 / 2.3 | 10 / 7 / 7.9 | 3 |
+
+Three things, and the first kills the hypothesis as posed.
+
+**There is no region blowup to rescue.** The true losing region needs
+**3 cubes at every width, in both encodings**. The premise — that a
+bit-blasted word-level region is exponentially larger as a cube set
+than as an interval — is simply false here. Thresholds have short DNFs.
+
+**The unary encoding is already optimal, and free.** It finds exactly
+the 3-cube cover at every deadline, in 5 rounds, with mean cube width
+2.3, while its state space grows to 2^32. The loop is completely
+insensitive to the size of the state space. That is a *tooling* result
+in the sharpest sense: the same game, written the way a hardware
+designer would naturally encode control state, costs the generic
+solver nothing.
+
+**The binary encoding degrades with word width, and never reaches the
+optimum.** Cubes 4 → 7 and mean width 3.2 → 7.9 as `b` goes 2 → 16 —
+roughly one extra cube per additional bit — against an ideal of 3
+throughout. At `k = 3, b = 3` the same split shows on the other axis:
+unary finds 10 of an ideal 10, binary finds 15.
+
+So the loop's generalization tracks **the state encoding, not the
+state-space size**, and one-hot beats binary at it.
+
+**What that does to the theory case.** It replaces a wrong argument
+with a better one. The prize is not that the region needs fewer
+constraints word-level — it needs three either way. The prize is that
+*the loop cannot find the good region on binary-encoded data, and
+unary is not available at real widths.* You can encode a deadline of
+16 in unary with 32 latches; you cannot do that to a 32-bit counter,
+and the binary trend measured above is what you are left with. A
+word-level region would recover what unary hands the Boolean solver
+for free at small widths.
+
+That is a narrower claim than "theories make games tractable" and a
+much better supported one. It also names the experiment that would
+falsify it: a family whose region is intrinsically complex rather than
+a threshold. This one's region is 3 cubes, which is exactly why it
+isolates generalization so cleanly — and exactly why it cannot speak
+to the other axis.
 
 **Scheduling.** Preprocessing is the highest QDIMACS-per-hour item and
 is largely independent of the architecture, so it can run in parallel
