@@ -765,6 +765,7 @@ Remaining performance work:
 * Replace the recursive `is_literal_redundant` with an explicit stack (the
   recursion is bounded by trail depth, but deep instances could still
   overflow the stack).
-* `qrat` module: revive or remove.
-* Wire `incdet::Options` into the CLI (`clap` is already a dependency but
-  `cli.rs` parses arguments by hand).
+* `cli.rs` parses arguments by hand and now only serves the secondary
+  `qdimacs` binary; the main CLI is `clap`-derived with every
+  `incdet::Options` field wired. Fold the one remaining user over or
+  drop it.
