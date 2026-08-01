@@ -760,6 +760,30 @@ Remaining performance work:
   refactor would not be measurable; revisit only if a profile ever shows
   it.
 
+### 3b. Open directions (see `RESEARCH.md` for the reasoning)
+
+Recorded from the solver-landscape review, roughly in leverage order:
+
+* **The missing control for RQ5**: the safety fixpoint driven by two
+  competing SAT solvers over the same circuit, as the baseline the
+  quantified-solver version has to match or beat. Everything measured
+  so far compares this solver against itself.
+* **A circuit-level construction interface** for that fixpoint —
+  hand over the transition relation once as gates, let the solver own
+  the region (canonical, shared, subsumption-aware) instead of the
+  caller hand-Tseitining a 55-deep membership chain out of clauses.
+* **Preprocessing** (Bloqqer/HQSpre-style), with the definition-
+  preservation experiment run *first*: blocked-clause elimination can
+  destroy exactly the gate structure ID runs on. Being fast on QDIMACS
+  is a requirement, so this is not optional — but neither is keeping
+  satisfiable answers certified through it.
+* **Clausal abstraction** as one calculus containing both search and
+  expansion, replacing the alternation front-end's ∃-loop, ∀-loop and
+  expansion-budget dispatch.
+* **Dependency-scheme survey** (cheap, prior against it, decisive
+  either way).
+* **Full-solver QRAT** via extension variables for CEGAR cases.
+
 ### 4. Robustness / cleanup
 
 * Replace the recursive `is_literal_redundant` with an explicit stack (the

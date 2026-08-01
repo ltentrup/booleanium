@@ -101,6 +101,33 @@ Open questions:
   determinize less and are harder — so the number argues for
   definition-level *inputs*, not for detection being the only
   bottleneck.
+* **Preprocessing, and the tension it has with this thesis — open.**
+  Bloqqer and HQSpre are not optional in practice; a large part of
+  QDIMACS-level performance comes from them, and being fast on QDIMACS
+  is a requirement here, not a nice-to-have. The tension is specific to
+  this solver: the result above says ID runs on gate structure that
+  one-sided CNF encoding destroyed, and classic CNF preprocessing —
+  blocked-clause elimination above all — can destroy exactly that
+  structure again. So "preprocess, then determinize" may be a large win
+  on clausal instances and a *loss* on circuit-derived ones, and which
+  it is on a given corpus is not obvious. HQSpre's gate detection and
+  structural preprocessing are presumably the right shape for that
+  reason.
+
+  The experiment to run before importing anything: the RQ1
+  paired-encoding generator already produces the same instance in
+  definitional, two-sided-clausal and one-sided-clausal form, and the
+  determinization-fraction metric is already instrumented. Preprocess
+  each form, measure the fraction *after* preprocessing, and see
+  whether preprocessing and determinization compete or compose.
+
+  Second constraint, heavier than usual here: every satisfiable answer
+  in this project is certified. Refutations through preprocessing are
+  what QRAT was built for and the checker is in-tree, but satisfiable
+  answers need *strategy reconstruction* through each preprocessing
+  step. That is the part to scope carefully, and it is why importing a
+  preprocessor wholesale is not a small change.
+
 * **QCIR frontend — done for prenex circuits at any depth**
   (`src/qcir.rs`, auto-detected by the CLI via the `#QCIR` header):
   `and`/`or`/`xor`/`ite` gates over cleansed or named identifiers
@@ -533,6 +560,50 @@ to push levels, the winning-strategy extraction maps to `get-model` (or
 an AIGER strategy circuit — see `PLAN.md` §2), and the incrementality
 between depths is where the interface (RQ2/RQ3) earns its keep — none
 of which a one-shot QDIMACS call can express.
+
+### What this actually has to beat, and does not yet measure against
+
+The standing complaint about QBF solvers is that a specialised
+algorithm beats them on any problem someone cares enough to
+specialise. The counter-thesis this project is really testing is that
+this is a **tooling** result rather than a complexity one: given the
+right abstraction, a developer should be able to write the fixpoint
+against a quantified solver and land at or below the cost of the
+hand-rolled alternative — and the hand-rolled alternative for a safety
+game is not an unrolling. It is **two competing SAT solvers**: one
+proposing a state and an uncontrollable move, one checking whether a
+controllable answer exists, generalising in both directions. That loop
+is what practitioners write, and it is what the abstraction has to
+match.
+
+Two consequences, and the second is a hole in the evaluation.
+
+**The interface has to be circuit-level, not clausal.** The transition
+relation is a circuit, it never changes, and the developer should hand
+it over once as gates. What varies between rounds is only the region.
+Today `solve_safety` builds its whole query through `add_clause`, and
+`IncrementalSolver::define_and` is sugar that expands to the same
+two-sided clauses — so the loop is hand-Tseitining a structure the
+solver could have owned. The region in particular is a *linear chain*
+of membership definitions, one link per round: 55 cubes means
+propagating through a 55-deep disjunction, where a specialised tool
+keeps the region canonical and shared. Nothing removes a cube that a
+later, more general one subsumes, either.
+
+**The control is missing.** Everything measured so far compares this
+solver against *itself*: unrolling versus region refinement (107x for
+refinement), in-place versus rebuild (parity), one option set versus
+another. The comparison that decides the thesis — region refinement
+through the quantified solver versus the same fixpoint driven by two
+competing SAT solvers over the same circuit — has never been run. It
+is the single most informative missing number in RQ5, and it is
+cheap: the same generator families, the same oracle, a baseline that
+shares no solver code.
+
+It also asks a sharp question of the core. Booleanium's CEGAR
+conflict resolution *is* the two-solver loop, with determinization on
+top. So the baseline measures exactly what determinization buys on
+this workload — or whether, here, it is only overhead.
 
 * Competition/baselines: Z3's quantifier engines, Yices `ef-solve`,
   SyGuS solvers. The niche for an ID-based engine is structure
@@ -1404,10 +1475,86 @@ Earlier drafts of this section reported the certification points as
 tens of milliseconds. The measurement that separated them was simply
 running the CLI with and without `--certify`.
 
-Next steps in order of leverage: ∀-side persistent oracles (needs ∃∀
-assumption support in the core), which is also the prerequisite for
-doing dual refinement properly; and the determinize-then-dispatch
-hybrid.
+### Directions from the solver-landscape review
+
+**Clausal abstraction, as the thing that *unifies* search and
+expansion.** Q-resolution and ∀Exp+Res are incomparable, and this
+solver happens to own one engine of each: ID's clause learning and the
+alternation front-end's expansion. The weak conclusion is to race
+them; the strong one, and the one CAQE actually demonstrated, is that
+clausal abstraction is QDPLL-shaped and expansion is compatible
+*inside* it, which is why CAQE decided instances that neither DepQBF
+nor RAReQS could. That reframes the front-end's future: not patching
+the ∀-loop, but replacing the ∃-loop, the ∀-loop and the
+expansion-budget dispatch with one per-block abstraction, where the
+universal side gets universal-independent refinements by construction
+— exactly what region learning failed to fake after the fact, twice
+(above). It also dissolves `MAX_EXPANDED_BLOCK` rather than tuning it,
+and it makes `biu` (∃48 ∀47 ∃52 ∀47 ∃49 ∀46 ∃498) a fair test again
+instead of an instance that defeats expansion by construction. This is
+a rewrite of `alternation.rs`, not a patch.
+
+**Dependency schemes — worth a survey, with a prior against.** The
+informed prior is that a dependency scheme mostly finds slack on
+Tseitin variables, which would make it uninteresting here. Two things
+cut the other way and are worth settling with the corpus rather than
+with priors:
+
+* The Tseitin variables are exactly the ones this solver *fails* to
+  recover on hard instances. The RQ1 survey measured a median 45% of
+  existentials determinized up front on solved instances and **6% on
+  timeouts**. A dependency scheme finds independence by clause
+  connectivity and does not need the definition to be two-sided, so
+  the two mechanisms are complementary precisely on the population
+  that currently loses.
+* In 2QBF the trivial scheme reduces *nothing*. `preprocess_clause`
+  drops universals bound after every existential of the clause, and in
+  ∀X ∃Y that condition never fires. Universal reduction does no work
+  at all in the core today, on any instance. A scheme is the only
+  thing that would make it do any — and shorter learnt clauses feed
+  straight into the measured problem that 81% of the complete conflict
+  checks prove there is no conflict.
+
+The cheap decisive version, before any scheme goes near the core:
+compute the *standard* (connectivity) scheme over the 384-instance
+corpus and cross it with the determinization fraction already
+instrumented. Slack inside the already-determinized set means the
+prior was right and this is one paragraph; slack concentrated in the
+0–20% band (182 instances, 21% solved) means it sits exactly where the
+solver loses. Note the soundness caveat: determinacy here means "a
+unique value under *every* universal assignment", and relativising
+that to a dependency set changes the semantics of the central notion —
+Q(D)-Res soundness does not transfer to a Skolem-function setting for
+free.
+
+**Long-distance resolution — deliberately not in the core.** In ∀X ∃Y
+every universal is left of every existential pivot, so LD merging
+never applies; its power is in the alternating case, which is where
+this solver has no clausal calculus at all. That is an argument for
+giving the deep path a real calculus (IR-calc/IRM-calc unify both
+systems and are strictly stronger), not for patching 2QBF.
+
+**Full-solver QRAT.** Proofs today require CEGAR and case splits off,
+because the clausal rules cannot express their derivations. But a
+CEGAR case *is* an expansion step, and QRAT p-simulates ∀Exp+Res, so
+an encoding via extension variables naming the case cubes should
+exist. That turns a documented limitation into a result.
+
+**Strategy extraction as a hardness classifier.** Strategy extraction
+into a circuit class plus a lower bound for that class yields
+proof-size lower bounds. This solver *is* a strategy extractor, into
+AIGs, and now instruments both strategy nodes and circuit gates — so
+the machinery to split instances into "search-hard" and
+"strategy-hard" already exists. Where the Skolem function is
+inherently large, no amount of conflict-check tuning helps, and that
+is worth knowing before spending more on the conflict check.
+
+Next steps in order of leverage: the two-solver baseline for RQ5
+(above), which is the missing control for the whole positioning; the
+dependency-scheme survey, which is cheap and could reorder the rest;
+∀-side persistent oracles (needs ∃∀ assumption support in the core),
+which is also the prerequisite for doing dual refinement properly; and
+the determinize-then-dispatch hybrid.
 
 ## Suggested experiment order
 
