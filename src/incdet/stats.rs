@@ -50,6 +50,18 @@ pub(crate) struct SkolemStats {
     /// of that, the time spent on checks that find *no* conflict — the
     /// ones a stronger filter in front of the solver could skip
     pub(crate) global_check_negative_time: Duration,
+    /// of the complete checks, the ones on variables whose implications
+    /// are a two-sided definition — which cannot be conflicted, so the
+    /// check is pure overhead
+    /// candidates whose implications are a two-sided definition, and how
+    /// many of those survive the cheap filter (measured: none). Behind
+    /// `probe`; see `conflict::check::is_functional`.
+    #[cfg(feature = "probe")]
+    pub(crate) functional_candidates: u32,
+    #[cfg(feature = "probe")]
+    pub(crate) functional_checks: u32,
+    #[cfg(feature = "probe")]
+    pub(crate) functional_check_time: Duration,
     /// level guards passed as assumptions, summed over the complete
     /// checks: one per live decision level, so it grows with search
     /// depth and is paid on every call

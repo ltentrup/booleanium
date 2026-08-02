@@ -180,6 +180,10 @@ impl IncDet {
         // syntactic, incomplete check
         trace!("local conflict check");
         self.stats.skolem.local_conflict_checks += 1;
+        #[cfg(feature = "probe")]
+        if self.is_functional(var) {
+            self.stats.skolem.functional_candidates += 1;
+        }
         if !self.may_be_conflicted(var) {
             return None;
         }
@@ -187,6 +191,12 @@ impl IncDet {
         trace!("global conflict check");
         self.stats.skolem.global_conflict_checks += 1;
         self.stats.skolem.check_assumptions += self.conflict_check.assumptions.len() as u64;
+        #[cfg(feature = "probe")]
+        let functional = self.is_functional(var);
+        #[cfg(feature = "probe")]
+        if functional {
+            self.stats.skolem.functional_checks += 1;
+        }
         let started = std::time::Instant::now();
         let checked = if self.options.incremental_conflict_check {
             self.is_conflicted_incremental(var)
@@ -195,6 +205,10 @@ impl IncDet {
         };
         let elapsed = started.elapsed();
         self.stats.skolem.global_check_time += elapsed;
+        #[cfg(feature = "probe")]
+        if functional {
+            self.stats.skolem.functional_check_time += elapsed;
+        }
         if checked.is_none() {
             self.stats.skolem.global_check_negative_time += elapsed;
         }
@@ -234,6 +248,53 @@ impl IncDet {
             }
         }
         false
+    }
+
+    /// Whether the implication clauses of `var` are a two-sided
+    /// *definition* — the classic gate pattern, `x <-> AND(l..)` or its
+    /// dual — rather than an incidental set a propagation happened to
+    /// determinize.
+    ///
+    /// A definition cannot be conflicted: for `x <-> a & b` the
+    /// forced-true condition is `a & b` and the forced-false condition
+    /// is `!a | !b`, which are mutually exclusive by construction. The
+    /// conflict check exists for variables whose determinacy was
+    /// *derived*, not for ones that were *declared*.
+    ///
+    /// Measured with this, and the answer was **skipping them saves
+    /// nothing**: on `corridor-4-stay`, 4 542 of 6 195 candidates
+    /// (73%) are definitions and *not one of them reaches the SAT
+    /// check* — `may_be_conflicted` already rejects every one, because
+    /// a definition's two sides always clash on a literal. Kept behind
+    /// `probe` so the measurement can be repeated, and not in the hot
+    /// path, where it would cost an allocation per candidate to learn
+    /// nothing.
+    #[cfg(feature = "probe")]
+    fn is_functional(&self, var: Var) -> bool {
+        let side = |lit: Lit| -> Vec<Vec<Lit>> {
+            self.skolem[lit]
+                .implications()
+                .map(|cid| {
+                    self.allocator[cid].iter().filter(|l| l.var() != var).copied().collect()
+                })
+                .collect()
+        };
+        let matches = |one: &[Vec<Lit>], many: &[Vec<Lit>]| -> bool {
+            // one wide clause against one binary clause per literal, with
+            // the polarities opposed
+            let [wide] = one else { return false };
+            if wide.is_empty() || many.len() != wide.len() {
+                return false;
+            }
+            let singles: HashSet<Lit> = many
+                .iter()
+                .filter(|c| c.len() == 1)
+                .map(|c| c[0])
+                .collect();
+            singles.len() == wide.len() && wide.iter().all(|&l| singles.contains(&!l))
+        };
+        let (pos, neg) = (side(Lit::positive(var)), side(Lit::negative(var)));
+        matches(&pos, &neg) || matches(&neg, &pos)
     }
 
     pub(crate) fn add_definition_to_conflict_check(&mut self, lit: Lit, is_decision: bool) {

@@ -1267,6 +1267,42 @@ that earns its place per-instance rather than as the trunk.
   checks that do the work, which no filter can remove because finding
   the conflict *is* the work.
 
+  **And the obvious way to remove calls was tried and is already
+  done.** A variable whose implication clauses are a two-sided
+  definition — `x <-> a & b` and its dual — *cannot* be conflicted: the
+  forced-true condition is `a & b`, the forced-false one `!a | !b`, and
+  they are mutually exclusive by construction. So the check is only
+  needed where determinacy was *derived*, never where it was
+  *declared*, and on circuit-derived instances most existentials are
+  declared. That looked like most of the calls gone.
+
+  It is worth nothing, because `may_be_conflicted` already does it. On
+  `corridor-4-stay`:
+
+  | | count | share of candidates |
+  |---|---|---|
+  | conflict-check candidates | 6 195 | |
+  | of those, two-sided definitions | 4 542 | **73%** |
+  | reaching the SAT check | 1 257 | 20% |
+  | of those, definitions | **0** | **0%** |
+
+  The cheap syntactic filter rejects every single definition, for the
+  same structural reason that makes them conflict-free: the two sides
+  always clash on a literal, so no compatible pair exists to test. What
+  survives the filter is exactly the derived, genuinely uncertain
+  variables. The filter is not weak — 80% rejection looked unambitious
+  and is in fact near-complete on the population it can decide
+  syntactically.
+
+  That closes off the cheapest route and leaves the harder ones:
+  finding conflicts by *simulation* before falling back to SAT (the
+  Skolem functions are already circuits, and model-finding is what
+  simulation is good at, which is exactly the expensive half); asking
+  for fewer checks by determinizing optimistically and repairing on
+  violation, as CDCL does; or scoping each query to the frontier rather
+  than the whole determinized formula. The probe that measured this is
+  kept behind the `probe` feature.
+
   So the item is not "build a stronger filter", which was the reading
   the call counts invited. It is either making the *positive* check
   cheaper, or asking for fewer of them — and the second is a question
