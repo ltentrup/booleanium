@@ -61,6 +61,10 @@ struct Frame {
     universals: Vec<u32>,
     existentials: Vec<u32>,
     clauses: Vec<Vec<i32>>,
+    /// terms encoded in this frame, keyed by their sorted inputs: a
+    /// term written twice is encoded once, and a pop retires exactly
+    /// the gates its own frame owned
+    gates: HashMap<Vec<i32>, i32>,
 }
 
 /// The continuation state of the last plain [`IncrementalSolver::solve`]:
@@ -163,15 +167,9 @@ pub struct IncrementalSolver {
     /// They are existential and innermost by construction, and they are
     /// the solver's business: no answer speaks about them.
     auxiliary: HashSet<u32>,
-    /// structural hash over the terms built so far, so an expression
-    /// written twice is encoded once. Cleared on `pop`, which can
-    /// retire the variables it names.
-    shared: HashMap<(i32, i32), i32>,
     /// the inputs of each gate, by variable: the reverse of `shared`,
     /// so asserting a term can walk its structure
     inputs: HashMap<u32, Vec<i32>>,
-    /// structural hash for conjunctions wider than two
-    shared_wide: HashMap<Vec<i32>, i32>,
     /// the constant-true node, allocated on first use
     truth: Option<i32>,
     /// the plain-SAT solver [`IncrementalSolver::unanswerable_core`]
@@ -204,9 +202,7 @@ impl IncrementalSolver {
             next_var: 1,
             extensions: 0,
             auxiliary: HashSet::new(),
-            shared: HashMap::new(),
             inputs: HashMap::new(),
-            shared_wide: HashMap::new(),
             truth: None,
             responder: None,
         }
@@ -254,8 +250,13 @@ impl IncrementalSolver {
         let truth = if let Some(truth) = self.truth {
             truth
         } else {
-            let var = self.aux_var();
-            self.add_clause(&[var]);
+            // in the *base* frame: gates built below it must not
+            // outlive the constant they were encoded against
+            let var = self.fresh_var();
+            self.frames[0].existentials.push(var);
+            self.auxiliary.insert(var);
+            let var = i32::try_from(var).expect("variable fits an i32");
+            self.add_clause_at(0, &[var]);
             self.truth = Some(var);
             var
         };
@@ -288,16 +289,15 @@ impl IncrementalSolver {
                 return self.constant(false);
             }
         }
-        let key = if a <= b { (a, b) } else { (b, a) };
-        if let Some(&existing) = self.shared.get(&key) {
+        let key = if a <= b { vec![a, b] } else { vec![b, a] };
+        if let Some(existing) = self.shared_gate(&key) {
             return Node(existing);
         }
         let gate = self.aux_var();
         self.add_clause(&[-gate, a]);
         self.add_clause(&[-gate, b]);
         self.add_clause(&[gate, -a, -b]);
-        self.shared.insert(key, gate);
-        self.inputs.insert(gate.unsigned_abs(), vec![a, b]);
+        self.share_gate(key, gate);
         Node(gate)
     }
 
@@ -335,7 +335,7 @@ impl IncrementalSolver {
         }
         let mut key = lits.clone();
         key.sort_unstable();
-        if let Some(&existing) = self.shared_wide.get(&key) {
+        if let Some(existing) = self.shared_gate(&key) {
             return Node(existing);
         }
         let gate = self.aux_var();
@@ -345,8 +345,7 @@ impl IncrementalSolver {
         let mut reverse = vec![gate];
         reverse.extend(lits.iter().map(|l| -l));
         self.add_clause(&reverse);
-        self.shared_wide.insert(key, gate);
-        self.inputs.insert(gate.unsigned_abs(), lits);
+        self.share_gate(key, gate);
         Node(gate)
     }
 
@@ -443,6 +442,16 @@ impl IncrementalSolver {
         node.0
     }
 
+    /// The gate for these inputs, if a live frame already has one.
+    fn shared_gate(&self, key: &[i32]) -> Option<i32> {
+        self.frames.iter().rev().find_map(|frame| frame.gates.get(key).copied())
+    }
+
+    fn share_gate(&mut self, key: Vec<i32>, gate: i32) {
+        self.inputs.insert(gate.unsigned_abs(), key.clone());
+        self.frames.last_mut().expect("base frame exists").gates.insert(key, gate);
+    }
+
     /// A fresh *auxiliary* variable: existential, innermost, and the
     /// solver's own. Auxiliaries are excluded from every answer, which
     /// is the whole point of building terms instead of clauses — a
@@ -530,12 +539,6 @@ impl IncrementalSolver {
     /// every carried learnt clause that was learnt while the frame was on
     /// the stack. Returns `false` if only the base frame is left.
     pub fn pop(&mut self) -> bool {
-        // a pop can retire auxiliary variables, so the terms built
-        // against them stop being shareable
-        self.shared.clear();
-        self.shared_wide.clear();
-        self.inputs.clear();
-        self.truth = None;
         if self.responder.as_ref().is_some_and(|r| self.frames.len() <= r.depth + 1) {
             self.responder = None;
         }
@@ -1353,6 +1356,30 @@ mod test {
         refuting.assert_node(both);
         refuting.assert_node(!nu);
         assert_eq!(refuting.solve(), SolverResult::Unsatisfiable);
+    }
+
+    #[test]
+    fn sharing_outlives_an_unrelated_pop() {
+        let mut solver = IncrementalSolver::default();
+        let (a, b) = (solver.fresh_var(), solver.fresh_var());
+        solver.declare_existential(a);
+        solver.declare_existential(b);
+        let (na, nb) = (IncrementalSolver::node(a), IncrementalSolver::node(b));
+        let base = solver.and(na, nb);
+
+        // a term built inside a scope belongs to that scope
+        solver.push();
+        let c = solver.fresh_var();
+        solver.declare_existential(c);
+        let scoped = solver.and(base, IncrementalSolver::node(c));
+        assert_ne!(scoped, base);
+        solver.pop();
+
+        // popping it must not cost the sharing of what was built below:
+        // clearing the cache wholesale, as a flat map has to, re-encodes
+        // every term the caller writes again after any pop
+        assert_eq!(solver.and(na, nb), base, "the base frame's gate survives");
+        assert_eq!(solver.and(nb, na), base);
     }
 
     #[test]

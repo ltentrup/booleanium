@@ -919,6 +919,30 @@ name its query; the unrolling has neither, and pays the encoding cost
 with nothing to set against it. A term interface is the right *shape*
 for a frontend; it is not automatically the right implementation of one.
 
+**The SMT-LIB frontend needs no port at all, and reviewing it found a
+bug in the new interface.** `smtlib::and_gate` already hash-conses on a
+structural key, folds constants and complementary pairs, and emits one
+variable per `k`-ary conjunction through `define_and` — everything the
+term interface offers, written by hand two research questions ago. But
+it keeps its gate cache **per frame** and looks it up across the live
+stack, where the term interface kept two flat maps and cleared them
+wholesale on any `pop`. So every pop threw away all sharing and made
+the caller re-encode terms it had already written — on a loop that
+pushes and pops once a round, which is every caller this interface has.
+
+The cache is per frame now, keyed uniformly by the sorted inputs so
+binary and wide gates share one table, and a pop retires exactly the
+gates its own frame owned. The constant moved to the base frame, since
+gates encoded against it must not outlive it. Pinned by a test that
+builds a term, pushes, builds another, pops, and checks the first is
+still shared.
+
+Worth recording as a pattern rather than an incident: the new interface
+was written from scratch against the *idea* of what a term API should
+do, while the code it was meant to replace had already solved the same
+problem correctly. Reading the older implementation first would have
+been faster than measuring the newer one twice.
+
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
 with cube quality equalised there is an order of magnitude in the
