@@ -837,13 +837,11 @@ part of it, and the open question is which signals deserve it — the
 hand-rolled encoding answered that by accident, and the port has to
 answer it on purpose.
 
-It does not pay yet, so it is not landed: `arbiter-3-3` is 6x slower
-and two more families are 2x. The term interface and the primitive are
-in; the port is parked with its measurements. What it needs is the
-per-round cost, which is the same conflict-check finding as everywhere
-else in this section.
+That first attempt did not pay — `arbiter-3-3` 6x slower, two more
+families 2x — and was not landed. **Two causes, both found, and the
+port then landed.**
 
-**One cause found and fixed, before the rest.** A `k`-ary conjunction
+**Cause one: k-ary terms.** A `k`-ary conjunction
 folded into binary gates costs `k - 1` existentials, and the port
 builds one per cube per round, twice — over the state and over the
 successor — where the hand-rolled `link` built exactly one variable
@@ -860,6 +858,37 @@ This is the same lesson as `named` from the other side: a term
 interface is free to be clever about *sharing*, and must not be clever
 about *dissolving*. Both mistakes hand incremental determinization a
 worse instance than the caller wrote.
+
+**Cause two: the successor bits.** They were variables in the
+hand-rolled encoding and terms in the first port, which is the `named`
+finding again — the region speaks about them every round, and a signal
+without a variable is one the solver cannot determinize, propagate
+through, or record a function for. Keeping them declared costs two
+clauses each and buys back most of what the port had lost.
+
+**With both, the port is net faster and it is landed.** Same machine,
+against the hand-rolled encoding it replaces:
+
+| family | hand-rolled | on terms |
+|---|---|---|
+| `arbiter-3-2` | 11 r / 9 c / 16.5 ms | 12 r / 10 c / 21.2 ms |
+| `arbiter-3-3` | 12 r / 10 c / 30.4 ms | 12 r / 10 c / 38.0 ms |
+| `ring-4` | 6 r / 4 c / 8.6 ms | 6 r / 4 c / **7.9 ms** |
+| `ring-6` | 8 r / 6 c / 17.7 ms | 8 r / 6 c / 18.5 ms |
+| `corridor-4-stay` | 23 r / 21 c / 115.5 ms | 22 r / 20 c / **68.4 ms** |
+| total | 188.7 ms | **154.0 ms** |
+
+`corridor-4-stay`, the family that dominates the set, is 1.7x faster
+and finds the **ideal** 20-cube region where the hand-rolled version
+found 21. The two arbiters cost ~25%, within the trajectory swing this
+loop shows whenever variable numbering moves — the same instance has
+been seen at one cube and at ten across these ports.
+
+What the port removes is the point: `solve_safety` no longer allocates
+a gate variable, writes a Tseitin clause, or carries its own mirror of
+the circuit for generalisation. It builds terms, names the signals it
+wants to talk about, and asks `unanswerable_core` about the question it
+just built. 128 lines of encoding became 69.
 
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
