@@ -890,6 +890,35 @@ the circuit for generalisation. It builds terms, names the signals it
 wants to talk about, and asks `unanswerable_core` about the question it
 just built. 128 lines of encoding became 69.
 
+**And the same port applied to the *unrolling* is a regression, which
+is the useful control.** `Unroller::step` hand-rolls the same Tseitin
+encoding, and moving it onto terms changes nothing else — there is no
+duplicated mirror to delete and no query to improve. Measured on the
+bounded-safety families:
+
+| | hand-rolled | on terms | on terms, error named |
+|---|---|---|---|
+| `arbiter-2-2` depth 16, in place | 785 ms | 580 ms | 939 ms |
+| `arbiter-2-2` depth 16, rebuild | 414 ms | 558 ms | 668 ms |
+| `arbiter-2-2` probed 12, in place | 319 ms | 318 ms | 311 ms |
+| `arbiter-2-2` probed 12, rebuild | 266 ms | 353 ms | 306 ms |
+| in-place monotone extensions | 1 | **0** | 1 |
+
+The middle column loses the in-place extension outright: asserting
+`!error` on a term flattens into a disjunction over the gate's inputs,
+where the hand-rolled version asserted a *unit* on a named output.
+Naming the error signal restores the extension and costs 25% instead.
+Neither is a win, so the unrolling keeps its own encoding.
+
+The contrast with `solve_safety` is the finding. Replacing a
+hand-rolled Tseitin encoding with the term interface is **not free** —
+it costs 0–25% here — and it pays only where it also removes duplicated
+work or enables a better question. `solve_safety` gained because the
+port deleted a second copy of the circuit and let the generalisation
+name its query; the unrolling has neither, and pays the encoding cost
+with nothing to set against it. A term interface is the right *shape*
+for a frontend; it is not automatically the right implementation of one.
+
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
 with cube quality equalised there is an order of magnitude in the

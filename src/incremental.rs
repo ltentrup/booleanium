@@ -375,6 +375,22 @@ impl IncrementalSolver {
         self.or(taken, skipped)
     }
 
+    /// Binds a term to a variable of its own.
+    ///
+    /// Folding and sharing are usually what a caller wants from a term
+    /// interface, but incremental determinization runs on *named*
+    /// definitions: a signal with a variable is one the solver can
+    /// determinize, propagate through and record a Skolem function for,
+    /// while the same signal inlined into its uses is none of those.
+    /// Naming the signals a hand-written encoding would have named
+    /// keeps that substrate.
+    pub fn named(&mut self, node: Node) -> Node {
+        let var = self.aux_var();
+        self.add_clause(&[-var, node.0]);
+        self.add_clause(&[var, -node.0]);
+        Node(var)
+    }
+
     /// Asserts a term in the current frame.
     ///
     /// The top-level structure becomes clauses rather than a unit on a
@@ -1337,6 +1353,26 @@ mod test {
         refuting.assert_node(both);
         refuting.assert_node(!nu);
         assert_eq!(refuting.solve(), SolverResult::Unsatisfiable);
+    }
+
+    #[test]
+    fn naming_a_term_gives_it_a_variable() {
+        let mut solver = IncrementalSolver::default();
+        let (a, b) = (solver.fresh_var(), solver.fresh_var());
+        solver.declare_existential(a);
+        solver.declare_existential(b);
+        let (na, nb) = (IncrementalSolver::node(a), IncrementalSolver::node(b));
+        let term = solver.and(na, nb);
+        let name = solver.named(term);
+        assert_ne!(name, term, "a name is its own variable");
+        assert!(solver.is_auxiliary(name.0.unsigned_abs()));
+
+        // and it means the same thing: asserting the name forces both
+        // conjuncts, asserting its negation forbids their conjunction
+        solver.assert_node(name);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+        solver.assert_node(!na);
+        assert_eq!(solver.solve(), SolverResult::Unsatisfiable);
     }
 
     #[test]
