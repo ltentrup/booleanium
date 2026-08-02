@@ -22,9 +22,19 @@
 //! safety queries of a synthesis loop (SYNTCOMP marks controllable inputs
 //! with the `controllable_` name prefix, accepted alongside `"2 "`).
 
-use crate::{incremental::IncrementalSolver, qcnf::QCNF, QuantTy, SolverResult};
+use crate::{
+    incremental::IncrementalSolver,
+    qcnf::QCNF,
+    sat::SatSolver as _,
+    QuantTy, SolverResult,
+};
 use std::collections::HashSet;
 use std::fmt;
+
+/// The plain-SAT solver the game layer uses to generalise a
+/// counterexample: the same circuit, carrying only the round's actual
+/// question, so its unsatisfiable core is a cube of losing states.
+type ResponderSolver = crate::sat::LookupSolver<crate::sat::varisat::Varisat>;
 
 /// Whether an input symbol name marks a controllable (existential) input:
 /// the QAIGER convention (`"2 "`, following CADET) or the SYNTCOMP
@@ -793,11 +803,40 @@ pub fn solve_safety_with_continuation(
             -dimacs(v)
         }
     };
+    // A plain-SAT *responder* over the same circuit, carrying exactly
+    // the question a counterexample has to be generalised against:
+    // "from this state, under this environment move, can the controller
+    // avoid the error and stay in the region?" Its unsatisfiable core
+    // is the generalisation, and it is one call rather than one per
+    // dropped literal.
+    //
+    // This belongs to the game layer, not to the solver, because it
+    // needs to know which variables are the *interface* — the state and
+    // the uncontrollable inputs — and which are encoding. Asking the
+    // solver to generalise instead minimises against the whole loaded
+    // stack, matrix and region chain and round constraint together, and
+    // a core of that carries no comparable signal: measured, that route
+    // finds 64 cubes on `ring-6` where this one finds the 6-cube
+    // optimum (`RESEARCH.md`, RQ5).
+    let mut responder = ResponderSolver::default();
+    // state, inputs, the constant, the gates, the successor state and
+    // the induction activation literal, in the numbering the quantified
+    // solver handed out
+    responder.set_var_count(2 * aiger.latches.len() + aiger.inputs.len() + aiger.ands.len() + 4);
+    let respond = |lits: &[i32], responder: &mut ResponderSolver| {
+        let clause: Vec<_> =
+            lits.iter().map(|&l| responder.lookup(crate::literal::Lit::from_dimacs(l))).collect();
+        responder.add_clause(&clause);
+    };
+    respond(&[dimacs(true_var)], &mut responder);
     for (idx, and) in aiger.ands.iter().enumerate() {
         let lhs = dimacs(gate_vars[idx]);
         solver.add_clause(&[-lhs, lit(and.rhs0)]);
         solver.add_clause(&[-lhs, lit(and.rhs1)]);
         solver.add_clause(&[lhs, -lit(and.rhs0), -lit(and.rhs1)]);
+        respond(&[-lhs, lit(and.rhs0)], &mut responder);
+        respond(&[-lhs, lit(and.rhs1)], &mut responder);
+        respond(&[lhs, -lit(and.rhs0), -lit(and.rhs1)], &mut responder);
     }
     // the successor state, named so the winning region can speak about it
     let next_vars: Vec<u32> = aiger
@@ -807,13 +846,29 @@ pub fn solve_safety_with_continuation(
             let v = existential(&mut solver);
             solver.add_clause(&[-dimacs(v), lit(latch.next)]);
             solver.add_clause(&[dimacs(v), -lit(latch.next)]);
+            respond(&[-dimacs(v), lit(latch.next)], &mut responder);
+            respond(&[dimacs(v), -lit(latch.next)], &mut responder);
             v
         })
         .collect();
+    // the responder's own question: avoid the error, and — once the
+    // induction phase begins — keep the successor inside the region.
+    // The second half hangs off an activation literal, because the safe
+    // phase asks only the first.
+    for &out in &aiger.outputs {
+        respond(&[-lit(out)], &mut responder);
+    }
+    let inducting = dimacs(existential(&mut solver));
 
     // `outside[k]` holds iff the state is in one of the first k losing
     // cubes; the same chain over the successor is `next_outside`. Both
     // grow by one link per round, so nothing is ever rewritten.
+    let input_set: HashSet<i32> = input_vars
+        .iter()
+        .zip(&controllable)
+        .filter(|(_, &c)| !c)
+        .map(|(&v, _)| dimacs(v))
+        .collect();
     let mut outside: Option<u32> = None;
     let mut next_outside: Option<u32> = None;
     let mut losing: Vec<Vec<(usize, bool)>> = Vec::new();
@@ -888,10 +943,52 @@ pub fn solve_safety_with_continuation(
         // empty-handed on an unsatisfiable round, so the region always
         // shrinks by a full cube.
         let state_set: HashSet<i32> = state_vars.iter().map(|&v| dimacs(v)).collect();
+        // Generalise here, against the round's own question, rather than
+        // asking the solver to minimise against everything it holds.
+        // The recorded conflicting assignment supplies the candidate;
+        // the responder's core says which of its literals the refutation
+        // needed.
+        let recorded = solver.universal_witness_candidate();
+        let cored = recorded.as_ref().and_then(|candidate| {
+            let mut assumptions: Vec<_> = candidate
+                .iter()
+                .filter(|l| state_set.contains(&l.abs()) || input_set.contains(&l.abs()))
+                .map(|&l| responder.lookup(crate::literal::Lit::from_dimacs(l)))
+                .collect();
+            if induction {
+                assumptions.push(responder.lookup(crate::literal::Lit::from_dimacs(inducting)));
+            }
+            if responder.solve_with_assumptions(&assumptions).expect("plain SAT") {
+                // the controller answers after all: this was a candidate,
+                // not a winning move, and the complete extraction below
+                // has to do the work
+                return None;
+            }
+            let core: HashSet<usize> = responder
+                .failed_assumptions()?
+                .iter()
+                .map(|&l| crate::sat::SatSolverLit::var_index(l))
+                .collect();
+            Some(
+                candidate
+                    .iter()
+                    .copied()
+                    .filter(|&l| {
+                        let mapped =
+                            responder.lookup(crate::literal::Lit::from_dimacs(l.abs()));
+                        state_set.contains(&l.abs())
+                            && core.contains(&crate::sat::SatSolverLit::var_index(mapped))
+                    })
+                    .collect::<Vec<i32>>(),
+            )
+        });
         let had_witness = solver.universal_witness().is_some();
-        let witness = solver
-            .universal_witness_complete(&|l| state_set.contains(&l.abs()))
-            .expect("an unsatisfiable round has a winning universal move");
+        let witness = match cored {
+            Some(cube) => cube,
+            None => solver
+                .universal_witness_complete(&|l| state_set.contains(&l.abs()))
+                .expect("an unsatisfiable round has a winning universal move"),
+        };
         if !had_witness {
             fallback_rounds += 1;
         }
@@ -961,6 +1058,17 @@ pub fn solve_safety_with_continuation(
         solver.pop();
         link(&mut solver, &state_vars, &mut outside);
         link(&mut solver, &next_vars, &mut next_outside);
+        // the responder learns the same thing: the successor may not
+        // land in the new cube, once the induction phase is under way
+        let mut forbid = vec![-inducting];
+        forbid.extend(cube.iter().map(|&(idx, value)| {
+            if value {
+                -dimacs(next_vars[idx])
+            } else {
+                dimacs(next_vars[idx])
+            }
+        }));
+        respond(&forbid, &mut responder);
         losing.push(cube.clone());
     }
 }
