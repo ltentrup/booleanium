@@ -767,10 +767,35 @@ self-reduced universal move and then drops literals greedily, each
 drop paid for with a `move_is_unanswerable` check — and greedy
 descent from a full assignment lands in a poor local minimum. The
 antitonicity argument recorded above says a second pass cannot help;
-it says nothing about the starting point, and the starting point is
-the problem. **Seeding the minimization from the response query's
-unsat core is the concrete fix, with a measured 10x target on
-`ring-6`.**
+it says nothing about the starting point, and the starting point
+looked like the problem.
+
+**Seeding from the core was the obvious fix, and it was measured and
+rejected — twice.** `unsat_witness_minimized`'s verification solve
+already computes a core and throws it away. Using it to pre-drop every
+removable literal the refutation did not need, then running the greedy
+pass over what survives, took `ring-6` from **238 ms to 15 s** (66
+rounds and 64 cubes became 73 and 71). Keeping the shorter of the two
+cubes — greedy from the complete move, greedy from the core — pays for
+the extra pass and buys nothing: 477 ms on `ring-6`, every other family
+a few percent slower. Both reverted.
+
+**Why it does not transfer is worth more than the attempt.** The
+control's core comes from a *different query*: "from this state, under
+this uncontrollable move, can the controller avoid the error and stay
+in the region?", with only state and input literals assumed. That
+formula is small, and its core is exactly the state bits the refutation
+needed. This solver's verification solve is over the whole loaded
+instance — matrix, region chain, the round's constraint, the caller's
+query assumptions — with the *complete* universal witness assumed, and
+a core of that carries no comparable signal.
+
+So the cube-quality half of the gap is not an extraction problem, it is
+an **interface** problem: generalising like the control requires being
+asked the control's question, which means being told what the region
+*is* rather than receiving it as undifferentiated clauses. That is the
+circuit-level interface above, now with a second independent
+measurement pointing at it.
 
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
