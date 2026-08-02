@@ -764,10 +764,15 @@ Remaining performance work:
 
 Recorded from the solver-landscape review, roughly in leverage order:
 
-* **The missing control for RQ5**: the safety fixpoint driven by two
-  competing SAT solvers over the same circuit, as the baseline the
-  quantified-solver version has to match or beat. Everything measured
-  so far compares this solver against itself.
+* **The control for RQ5 — run, and the solver loses 11x to 356x**
+  (`bench_games control`): the same fixpoint driven by two competing
+  SAT solvers over the same circuit, sharing no code with the solver.
+  Two independent causes, both actionable. Cube quality: the control's
+  unsat-core generalisation is *optimal* on the pursuit games (4 and 6
+  cubes against near-minimal covers of 4 and 6) where greedy dropping
+  from a complete move finds 15 and 64 — **seed the minimization from
+  the response query's unsat core**. And per-round cost: `arbiter-3-3`
+  matches the control's rounds and cubes and is still 70x slower.
 * **A circuit-level construction interface** for that fixpoint —
   hand over the transition relation once as gates, let the solver own
   the region (canonical, shared, subsumption-aware) instead of the

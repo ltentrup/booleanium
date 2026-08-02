@@ -714,20 +714,79 @@ propagating through a 55-deep disjunction, where a specialised tool
 keeps the region canonical and shared. Nothing removes a cube that a
 later, more general one subsumes, either.
 
-**The control is missing.** Everything measured so far compares this
-solver against *itself*: unrolling versus region refinement (107x for
-refinement), in-place versus rebuild (parity), one option set versus
-another. The comparison that decides the thesis — region refinement
-through the quantified solver versus the same fixpoint driven by two
-competing SAT solvers over the same circuit — has never been run. It
-is the single most informative missing number in RQ5, and it is
-cheap: the same generator families, the same oracle, a baseline that
-shares no solver code.
+**The control — run, and it loses badly** (`bench_games control`).
+Everything measured before it compared this solver against *itself*:
+unrolling versus region refinement (107x for refinement), in-place
+versus rebuild (parity), one option set versus another. The control is
+the same fixpoint driven by two competing SAT solvers over the same
+circuit — a candidate solver proposing a state and an uncontrollable
+move, a responder checking for a controllable answer, refinement by
+instantiation, generalisation by the responder's unsatisfiable core.
+It shares nothing with the solver: its own AIGER parser, its own CNF
+encoding, varisat used directly. The verdicts are asserted equal on
+every row.
 
-It also asks a sharp question of the core. Booleanium's CEGAR
-conflict resolution *is* the two-solver loop, with determinization on
-top. So the baseline measures exactly what determinization buys on
-this workload — or whether, here, it is only overhead.
+| family | latches | booleanium | time | two solvers | time |
+|---|---|---|---|---|---|
+| `arbiter-2-2` | 4 | 5 r / 3 c | 1.8 ms | 4 r / 3 c | **0.17 ms** |
+| `arbiter-2-8` | 16 | 5 r / 3 c | 4.3 ms | 4 r / 3 c | **0.21 ms** |
+| `arbiter-3-2` | 6 | 10 r / 8 c | 8.4 ms | 10 r / 10 c | **0.56 ms** |
+| `arbiter-3-3` | 9 | 12 r / 10 c | 50 ms | 11 r / 10 c | **0.72 ms** |
+| `ring-4` | 8 | 17 r / 15 c | 19 ms | 5 r / 4 c | **0.39 ms** |
+| `corridor-4-stay` | 8 | 34 r / 32 c | 524 ms | 22 r / 21 c | **2.7 ms** |
+| `ring-6` | 12 | 66 r / 64 c | 238 ms | 7 r / 6 c | **0.67 ms** |
+
+**11x to 356x, in favour of two SAT solvers.** That is the answer to
+the positioning question, and it is not the one the rest of RQ5 was
+heading towards. The 107x that region refinement won over the
+unrolling was real, but it was a race against another of this
+solver's own encodings.
+
+The gap decomposes into two independent factors, and both are
+actionable.
+
+**Cube quality.** Priced against the near-minimal cover of the true
+losing region (`bench_games region`, same method as above):
+
+| family | ideal | two solvers | booleanium |
+|---|---|---|---|
+| `arbiter-3-3` | 10 | 10 | 10 |
+| `ring-4` | 4 | **4** | 15 |
+| `corridor-4-stay` | 20 | **21** | 32 |
+| `ring-6` | 6 | **6** | 64 |
+
+The control's generalisation is *optimal* on the pursuit games — it
+finds the 4-cube and 6-cube covers exactly — while this solver finds
+15 and 64. On the arbiter family both are optimal, which is why the
+earlier region experiment, run only on arbiters, saw nothing wrong.
+
+The mechanism is the difference. The control takes the responder's
+**unsatisfiable core**: one SAT call, and the core is by construction
+the subset the refutation needed. This solver takes a *complete*
+self-reduced universal move and then drops literals greedily, each
+drop paid for with a `move_is_unanswerable` check — and greedy
+descent from a full assignment lands in a poor local minimum. The
+antitonicity argument recorded above says a second pass cannot help;
+it says nothing about the starting point, and the starting point is
+the problem. **Seeding the minimization from the response query's
+unsat core is the concrete fix, with a measured 10x target on
+`ring-6`.**
+
+**Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
+11 and finds the same 10 cubes, and still takes 70x longer. So even
+with cube quality equalised there is an order of magnitude in the
+round itself — consistent with the conflict-check profile below, where
+81% of the complete checks prove there is no conflict.
+
+**What this says about determinization.** Booleanium's CEGAR
+conflict resolution *is* the two-solver loop, with determinization
+layered on top. On this workload the layer is not paying for itself.
+That is a narrow claim — safety-game rounds are shallow ∀∃ queries
+over a circuit, which is the case CEGAR alone handles well, and it
+says nothing about the instances where determinization wins outright
+(`adder2`, the `stmt` family). But it is exactly the workload the
+theory ambition runs through, and it argues for ID as a component
+that earns its place per-instance rather than as the trunk.
 
 * Competition/baselines: Z3's quantifier engines, Yices `ef-solve`,
   SyGuS solvers. The niche for an ID-based engine is structure

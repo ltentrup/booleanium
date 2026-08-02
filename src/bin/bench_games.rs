@@ -616,6 +616,9 @@ fn main() {
         ("region-arbiter-3-3 binary", binary_arbiter(3, 3)),
         ("region-arbiter-4-4 unary", arbiter(4, 4)),
         ("region-arbiter-4-4 binary", binary_arbiter(4, 4)),
+        ("region-ring-4", pursuit(4, true, false)),
+        ("region-ring-6", pursuit(6, true, false)),
+        ("region-corridor-4-stay", pursuit(4, false, true)),
     ] {
         if let Some(filter) = std::env::args().nth(1) {
             if !name.contains(&filter) {
@@ -644,6 +647,54 @@ fn main() {
             if outcome.realizable { "realizable" } else { "unrealizable" },
             outcome.rounds,
             outcome.losing.len(),
+        );
+    }
+    // The control (RQ5): the same fixpoint driven by two competing SAT
+    // solvers, which is what a developer writes when they do not want
+    // to depend on a quantified solver. Same games, same oracle, no
+    // shared code — the number that says whether the quantified path is
+    // buying anything.
+    println!();
+    println!(
+        "{:<26} {:>7} {:>13} {:>16} {:>12} {:>16} {:>12}",
+        "family", "latches", "verdict", "booleanium", "time", "two solvers", "time"
+    );
+    for (name, text) in [
+        ("control-arbiter-2-2", arbiter(2, 2)),
+        ("control-arbiter-3-2", arbiter(3, 2)),
+        ("control-arbiter-3-3", arbiter(3, 3)),
+        ("control-arbiter-2-8", arbiter(2, 8)),
+        ("control-ring-4", pursuit(4, true, false)),
+        ("control-corridor-4-stay", pursuit(4, false, true)),
+        ("control-arbiter-4-4", arbiter(4, 4)),
+        ("control-ring-6", pursuit(6, true, false)),
+    ] {
+        if let Some(filter) = std::env::args().nth(1) {
+            if !name.contains(&filter) {
+                continue;
+            }
+        }
+        let latches = text
+            .lines()
+            .next()
+            .and_then(|h| h.split_ascii_whitespace().nth(3))
+            .and_then(|f| f.parse::<usize>().ok())
+            .expect("header parses");
+        let start = Instant::now();
+        let ours = aiger::solve_safety(&text, Options::default()).expect("spec parses");
+        let ours_time = start.elapsed();
+        let start = Instant::now();
+        let theirs = two_solver_fixpoint(&text);
+        let theirs_time = start.elapsed();
+        assert_eq!(
+            ours.realizable, theirs.realizable,
+            "the control disagrees with the solver on {name}"
+        );
+        println!(
+            "{name:<26} {latches:>7} {:>13} {:>16} {ours_time:>12.3?} {:>16} {theirs_time:>12.3?}",
+            if ours.realizable { "realizable" } else { "unrealizable" },
+            format!("{} r / {} c", ours.rounds, ours.losing.len()),
+            format!("{} r / {} c / {} i", theirs.rounds, theirs.cubes, theirs.refinements),
         );
     }
     println!("total: {:.3?}", total.elapsed());
@@ -709,4 +760,310 @@ fn minimal_cover(text: &str, latches: usize) -> Option<usize> {
         chosen += 1;
     }
     Some(chosen)
+}
+
+// ---------------------------------------------------------------------
+// The control for RQ5: the same winning-region fixpoint, driven by two
+// competing SAT solvers instead of by a quantified solver.
+//
+// This is what a practitioner writes when they want a safety game
+// solved and do not want to depend on a QBF solver: CEGAR over the
+// round's ∀∃ query, with one solver proposing a state and an
+// uncontrollable move and a second checking whether a controllable
+// answer exists. It shares nothing with `booleanium` — its own AIGER
+// parser, its own CNF encoding, varisat used directly — because a
+// control that reuses the machinery under test is not a control.
+// ---------------------------------------------------------------------
+
+use varisat::ExtendFormula;
+
+struct Spec {
+    /// input literals, with the controllable ones flagged
+    inputs: Vec<u64>,
+    controllable: Vec<bool>,
+    /// `(literal, next, reset)` per latch
+    latches: Vec<(u64, u64, u64)>,
+    outputs: Vec<u64>,
+    ands: Vec<(u64, u64, u64)>,
+}
+
+fn parse_spec(text: &str) -> Spec {
+    let mut lines = text.lines();
+    let header: Vec<u64> = lines
+        .next()
+        .expect("header")
+        .split_ascii_whitespace()
+        .skip(1)
+        .map(|f| f.parse().expect("header field"))
+        .collect();
+    let (num_inputs, num_latches, num_outputs, num_ands) =
+        (header[1] as usize, header[2] as usize, header[3] as usize, header[4] as usize);
+    let mut take = |n: usize| -> Vec<Vec<u64>> {
+        (0..n)
+            .map(|_| {
+                lines
+                    .next()
+                    .expect("line")
+                    .split_ascii_whitespace()
+                    .map(|f| f.parse().expect("literal"))
+                    .collect()
+            })
+            .collect()
+    };
+    let inputs: Vec<u64> = take(num_inputs).into_iter().map(|l| l[0]).collect();
+    let latches: Vec<(u64, u64, u64)> = take(num_latches)
+        .into_iter()
+        .map(|l| (l[0], l[1], l.get(2).copied().unwrap_or(0)))
+        .collect();
+    let outputs: Vec<u64> = take(num_outputs).into_iter().map(|l| l[0]).collect();
+    let ands: Vec<(u64, u64, u64)> =
+        take(num_ands).into_iter().map(|l| (l[0], l[1], l[2])).collect();
+
+    let mut controllable = vec![false; inputs.len()];
+    for line in lines {
+        if let Some(rest) = line.strip_prefix('i') {
+            if let Some((pos, name)) = rest.split_once(' ') {
+                if let Ok(pos) = pos.parse::<usize>() {
+                    if pos < controllable.len() {
+                        controllable[pos] =
+                            name.starts_with("controllable_") || name.starts_with("2 ");
+                    }
+                }
+            }
+        }
+    }
+    Spec { inputs, controllable, latches, outputs, ands }
+}
+
+/// Encodes one copy of the combinational circuit. `input_lit` supplies a
+/// literal per input — a shared variable for the free ones, a constant
+/// for the ones this copy fixes — and `state` the current-state
+/// literals. Returns the error literal and the next-state literals.
+fn encode_copy(
+    spec: &Spec,
+    solver: &mut varisat::Solver<'static>,
+    one: varisat::Lit,
+    state: &[varisat::Lit],
+    input_lit: &[varisat::Lit],
+) -> (varisat::Lit, Vec<varisat::Lit>) {
+    let mut wire: std::collections::HashMap<u64, varisat::Lit> = std::collections::HashMap::new();
+    for (position, &lit) in spec.inputs.iter().enumerate() {
+        wire.insert(lit / 2, input_lit[position]);
+    }
+    for (idx, &(lit, _, _)) in spec.latches.iter().enumerate() {
+        wire.insert(lit / 2, state[idx]);
+    }
+    let value = |l: u64, wire: &std::collections::HashMap<u64, varisat::Lit>| match l {
+        0 => !one,
+        1 => one,
+        _ => {
+            let base = wire[&(l / 2)];
+            if l & 1 == 1 {
+                !base
+            } else {
+                base
+            }
+        }
+    };
+    for &(lhs, rhs0, rhs1) in &spec.ands {
+        let gate = solver.new_lit();
+        let (a, b) = (value(rhs0, &wire), value(rhs1, &wire));
+        solver.add_clause(&[!gate, a]);
+        solver.add_clause(&[!gate, b]);
+        solver.add_clause(&[gate, !a, !b]);
+        wire.insert(lhs / 2, gate);
+    }
+    // the error is the disjunction of the outputs
+    let error = solver.new_lit();
+    let mut forward = vec![!error];
+    for &out in &spec.outputs {
+        let lit = value(out, &wire);
+        solver.add_clause(&[error, !lit]);
+        forward.push(lit);
+    }
+    solver.add_clause(&forward);
+    let next = spec.latches.iter().map(|&(_, n, _)| value(n, &wire)).collect();
+    (error, next)
+}
+
+struct ControlOutcome {
+    realizable: bool,
+    rounds: u32,
+    cubes: usize,
+    refinements: u32,
+}
+
+/// `νW. CPre(W)` by CEGAR over two SAT solvers.
+fn two_solver_fixpoint(text: &str) -> ControlOutcome {
+    let spec = parse_spec(text);
+    let latches = spec.latches.len();
+    let uncontrollable: Vec<usize> =
+        (0..spec.inputs.len()).filter(|&i| !spec.controllable[i]).collect();
+    let controllable: Vec<usize> =
+        (0..spec.inputs.len()).filter(|&i| spec.controllable[i]).collect();
+
+    // the responder: "given this state and uncontrollable move, can the
+    // controller avoid the error and stay in the region?" One solver for
+    // the whole run — the region only ever shrinks, which only ever adds
+    // clauses
+    let mut responder = varisat::Solver::new();
+    let one = responder.new_lit();
+    responder.add_clause(&[one]);
+    let state: Vec<varisat::Lit> = (0..latches).map(|_| responder.new_lit()).collect();
+    let inputs: Vec<varisat::Lit> =
+        (0..spec.inputs.len()).map(|_| responder.new_lit()).collect();
+    let (error, next) = encode_copy(&spec, &mut responder, one, &state, &inputs);
+    responder.add_clause(&[!error]);
+
+    let mut cubes: Vec<Vec<(usize, bool)>> = Vec::new();
+    let mut responses: Vec<Vec<bool>> = Vec::new();
+    let mut rounds = 0;
+    let mut refinements = 0;
+
+    loop {
+        // the candidate solver is rebuilt per round: its refinements
+        // speak about the region, and the region just changed. The
+        // responses themselves are kept and re-instantiated, so nothing
+        // learnt about the game is thrown away.
+        rounds += 1;
+        let mut candidate = varisat::Solver::new();
+        let c_one = candidate.new_lit();
+        candidate.add_clause(&[c_one]);
+        let c_state: Vec<varisat::Lit> = (0..latches).map(|_| candidate.new_lit()).collect();
+        let c_inputs: Vec<varisat::Lit> =
+            (0..spec.inputs.len()).map(|_| candidate.new_lit()).collect();
+        // the proposed state must still be in the region
+        for cube in &cubes {
+            let clause: Vec<varisat::Lit> = cube
+                .iter()
+                .map(|&(idx, v)| if v { !c_state[idx] } else { c_state[idx] })
+                .collect();
+            candidate.add_clause(&clause);
+        }
+        for response in &responses {
+            let mut lits = c_inputs.clone();
+            for (bit, &position) in controllable.iter().enumerate() {
+                lits[position] = if response[bit] { c_one } else { !c_one };
+            }
+            let (err, nxt) = encode_copy(&spec, &mut candidate, c_one, &c_state, &lits);
+            // this response is answered only if it errors or leaves the
+            // region: `err ∨ ⋁_k next ∈ cube_k`
+            let mut clause = vec![err];
+            for cube in &cubes {
+                // `inside` *is* "the successor lands in this cube", in
+                // both directions: the clause below uses it positively,
+                // and a one-sided definition lets the solver set it
+                // true for free, which excludes nothing
+                let inside = candidate.new_lit();
+                let mut reverse = vec![inside];
+                for &(idx, v) in cube {
+                    let lit = if v { nxt[idx] } else { !nxt[idx] };
+                    candidate.add_clause(&[!inside, lit]);
+                    reverse.push(!lit);
+                }
+                candidate.add_clause(&reverse);
+                clause.push(inside);
+            }
+            candidate.add_clause(&clause);
+        }
+
+        let (found, model) = loop {
+            if !candidate.solve().expect("plain SAT") {
+                break (false, Vec::new());
+            }
+            // index by variable, not by position: varisat's model omits
+            // variables it never had to assign, and reading those as
+            // false silently asks the responder about a different
+            // candidate than the one the solver found — which loops
+            // forever, because the refinement then excludes nothing
+            let valuation: std::collections::HashMap<usize, bool> =
+                candidate.model().expect("model after sat")
+                    .iter()
+                    .map(|l| (l.var().index(), l.is_positive()))
+                    .collect();
+            let read = |l: varisat::Lit| {
+                valuation.get(&l.var().index()).copied().unwrap_or(false) == l.is_positive()
+            };
+
+            // ask the responder about this candidate
+            let mut assumptions: Vec<varisat::Lit> = Vec::new();
+            for (idx, &l) in c_state.iter().enumerate() {
+                assumptions.push(if read(l) { state[idx] } else { !state[idx] });
+            }
+            for &position in &uncontrollable {
+                let l = c_inputs[position];
+                assumptions
+                    .push(if read(l) { inputs[position] } else { !inputs[position] });
+            }
+            responder.assume(&assumptions);
+            if responder.solve().expect("plain SAT") {
+                // the controller answers: refine and try again
+                let valuation: std::collections::HashMap<usize, bool> =
+                    responder.model().expect("model after sat")
+                        .iter()
+                        .map(|l| (l.var().index(), l.is_positive()))
+                        .collect();
+                let answer: Vec<bool> = controllable
+                    .iter()
+                    .map(|&p| {
+                        let l = inputs[p];
+                        valuation.get(&l.var().index()).copied().unwrap_or(false)
+                            == l.is_positive()
+                    })
+                    .collect();
+                let mut lits = c_inputs.clone();
+                for (bit, &position) in controllable.iter().enumerate() {
+                    lits[position] = if answer[bit] { c_one } else { !c_one };
+                }
+                let (err, nxt) = encode_copy(&spec, &mut candidate, c_one, &c_state, &lits);
+                let mut clause = vec![err];
+                for cube in &cubes {
+                    let inside = candidate.new_lit();
+                    let mut reverse = vec![inside];
+                    for &(idx, v) in cube {
+                        let lit = if v { nxt[idx] } else { !nxt[idx] };
+                        candidate.add_clause(&[!inside, lit]);
+                        reverse.push(!lit);
+                    }
+                    candidate.add_clause(&reverse);
+                    clause.push(inside);
+                }
+                candidate.add_clause(&clause);
+                responses.push(answer);
+                refinements += 1;
+                continue;
+            }
+            // no answer: a genuine losing state, generalised by the
+            // responder's own unsatisfiable core
+            let core: Vec<varisat::Lit> =
+                responder.failed_core().expect("core after unsat").to_vec();
+            let cube: Vec<(usize, bool)> = state
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &s)| {
+                    core.iter().find(|c| c.var() == s.var()).map(|c| (idx, c.is_positive()))
+                })
+                .collect();
+            break (true, cube);
+        };
+
+        if !found {
+            let initial: Vec<bool> = spec.latches.iter().map(|&(_, _, r)| r == 1).collect();
+            let realizable = !cubes
+                .iter()
+                .any(|cube| cube.iter().all(|&(idx, v)| initial[idx] == v));
+            return ControlOutcome { realizable, rounds, cubes: cubes.len(), refinements };
+        }
+        if model.is_empty() {
+            // every state loses
+            let realizable = false;
+            cubes.push(Vec::new());
+            return ControlOutcome { realizable, rounds, cubes: cubes.len(), refinements };
+        }
+        // the successor may no longer land in the new cube
+        let clause: Vec<varisat::Lit> =
+            model.iter().map(|&(idx, v)| if v { !next[idx] } else { next[idx] }).collect();
+        responder.add_clause(&clause);
+        cubes.push(model);
+    }
 }
