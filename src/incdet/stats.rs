@@ -47,6 +47,9 @@ pub(crate) struct SkolemStats {
     /// long search actually spends itself
     pub(crate) det_check_time: Duration,
     pub(crate) global_check_time: Duration,
+    /// of that, the time spent on checks that find *no* conflict — the
+    /// ones a stronger filter in front of the solver could skip
+    pub(crate) global_check_negative_time: Duration,
     /// level guards passed as assumptions, summed over the complete
     /// checks: one per live decision level, so it grows with search
     /// depth and is paid on every call

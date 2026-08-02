@@ -193,7 +193,11 @@ impl IncDet {
         } else {
             self._is_conflicted::<ConflictSolver>(var, true)
         };
-        self.stats.skolem.global_check_time += started.elapsed();
+        let elapsed = started.elapsed();
+        self.stats.skolem.global_check_time += elapsed;
+        if checked.is_none() {
+            self.stats.skolem.global_check_negative_time += elapsed;
+        }
         let mut assignment = checked?;
         // the model contains no meaningful value for the checked variable
         assignment.remove(&Lit::positive(var));

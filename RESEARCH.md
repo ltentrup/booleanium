@@ -1136,6 +1136,19 @@ that earns its place per-instance rather than as the trunk.
   (`aiger::test::safety_arbiter_4_4_is_realizable`, ignored by default
   — the fixpoint sweep and the solve both run for minutes).
 
+  **Re-measured after the generalisation work: 63 rounds, 61 cubes,
+  465 s** (the 753 s was on a different container, so read the
+  improvement loosely). The two-solver control decides the same game in
+  **22 ms**, with 55 rounds and 54 cubes.
+
+  That is a **20 000x** gap, the largest anywhere in this project, and
+  the cube counts say it is not the region: 61 against 54 is close, and
+  the generalisation work that fixed `ring-6` did what it could here
+  too. Every bit of the gap is per-round solve cost. `arbiter-4-4` is
+  therefore the instance to hold up against any future work on the
+  core — it is the one where this solver's central mechanism is most
+  visibly not earning its place.
+
   The instructive part is the cost profile: **21 ms wrong, 753 s
   right.** The bug was not making the solver look good on easy games,
   it was making it skip the game. Every other family kept its verdict
@@ -1228,23 +1241,36 @@ that earns its place per-instance rather than as the trunk.
   call** (437 988 over 42 472), so assumption handling is not where
   the 890 µs goes.
 
-  **The same shape on a different family, after the port.** The
+  **The same shape on a different family, and a correction.** The
   finding above came from one hard round of `arbiter-4-4`. Summed over
-  every round of `corridor-4-stay` — a different game, and measured
-  after the generalisation and the term interface changed how the loop
-  drives the core:
+  every round of `corridor-4-stay` — a different game, measured after
+  the generalisation and the term interface changed how the loop drives
+  the core — the complete check is **46% of core solve time** over
+  1 257 calls, of which 1 073 (**85%**) find no conflict. (An earlier
+  draft of this paragraph reported 62% over 6 552 calls; that came from
+  an aggregation that double-counted the nested statistics dumps of the
+  throwaway query solvers. The figures here reproduce across runs.)
 
-  | phase | time | share | calls |
+  **But splitting that time by outcome changes what to do about it**,
+  and it is worth the paragraph because the obvious reading of "85% of
+  the calls prove nothing is there" is wrong:
+
+  | | calls | time | per call |
   |---|---|---|---|
-  | complete conflict check | **260 ms** | **62%** | 6 552 |
-  | determinacy check | 31 ms | 7% | 51 265 |
-  | total core solve | 420 ms | | |
+  | finds no conflict | 1 073 (85%) | 19.0 ms (**47%**) | 17.7 µs |
+  | finds one | 184 (15%) | 21.9 ms (**53%**) | 118.9 µs |
 
-  752 of those 6 552 checks find a conflict, so **89% prove there is
-  none** — against 81% on `arbiter-4-4`. Two families, two very
-  different games, one shared profile: the complete check owns the
-  round, and most of what it does is establish absence. That is now the
-  best-supported open item in this document.
+  The negative checks are many and *cheap*; the positive ones are few
+  and **6.7x more expensive each**. A perfect filter — one that skipped
+  every check destined to find nothing, for free — would save 19 ms of
+  an 88 ms core solve, about **20%**. The remaining time is in the
+  checks that do the work, which no filter can remove because finding
+  the conflict *is* the work.
+
+  So the item is not "build a stronger filter", which was the reading
+  the call counts invited. It is either making the *positive* check
+  cheaper, or asking for fewer of them — and the second is a question
+  about the search, not about the check.
 
   The appealing symmetry — do to the conflict check what the budgeted
   micro-DPLL did to the determinacy check — does not transfer as
