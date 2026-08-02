@@ -843,6 +843,24 @@ in; the port is parked with its measurements. What it needs is the
 per-round cost, which is the same conflict-check finding as everywhere
 else in this section.
 
+**One cause found and fixed, before the rest.** A `k`-ary conjunction
+folded into binary gates costs `k - 1` existentials, and the port
+builds one per cube per round, twice — over the state and over the
+successor — where the hand-rolled `link` built exactly one variable
+each. On a nine-latch game with cubes around six literals wide that is
+roughly ten new variables a round against two, every one of them
+something the solver has to determinize and propagate through.
+`and_all`/`or_all` now allocate a single variable with `k + 1` clauses,
+which is what a hand-written encoding would have done, with the wide
+term structurally shared like the binary ones. Pinned by a test that
+counts the variables, since the property is invisible from the outside
+and easy to lose.
+
+This is the same lesson as `named` from the other side: a term
+interface is free to be clever about *sharing*, and must not be clever
+about *dissolving*. Both mistakes hand incremental determinization a
+worse instance than the caller wrote.
+
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
 with cube quality equalised there is an order of magnitude in the

@@ -169,7 +169,9 @@ pub struct IncrementalSolver {
     shared: HashMap<(i32, i32), i32>,
     /// the inputs of each gate, by variable: the reverse of `shared`,
     /// so asserting a term can walk its structure
-    inputs: HashMap<u32, (i32, i32)>,
+    inputs: HashMap<u32, Vec<i32>>,
+    /// structural hash for conjunctions wider than two
+    shared_wide: HashMap<Vec<i32>, i32>,
     /// the constant-true node, allocated on first use
     truth: Option<i32>,
     /// the plain-SAT solver [`IncrementalSolver::unanswerable_core`]
@@ -204,6 +206,7 @@ impl IncrementalSolver {
             auxiliary: HashSet::new(),
             shared: HashMap::new(),
             inputs: HashMap::new(),
+            shared_wide: HashMap::new(),
             truth: None,
             responder: None,
         }
@@ -294,17 +297,57 @@ impl IncrementalSolver {
         self.add_clause(&[-gate, b]);
         self.add_clause(&[gate, -a, -b]);
         self.shared.insert(key, gate);
-        self.inputs.insert(gate.unsigned_abs(), (a, b));
+        self.inputs.insert(gate.unsigned_abs(), vec![a, b]);
         Node(gate)
     }
 
     /// The conjunction of any number of terms.
+    ///
+    /// One variable, not one per pair. A `k`-ary conjunction folded
+    /// into binary gates costs `k - 1` existentials, and every one of
+    /// them is a variable the solver has to determinize and propagate
+    /// through — which is how a term interface can quietly hand the
+    /// solver several times the instance a hand-written encoding would
+    /// have.
     pub fn and_all(&mut self, nodes: &[Node]) -> Node {
-        let mut acc = self.constant(true);
+        let mut lits: Vec<i32> = Vec::with_capacity(nodes.len());
         for &n in nodes {
-            acc = self.and(acc, n);
+            if let Some(truth) = self.truth {
+                if n.0 == truth {
+                    continue;
+                }
+                if n.0 == -truth {
+                    return self.constant(false);
+                }
+            }
+            if lits.contains(&-n.0) {
+                return self.constant(false);
+            }
+            if !lits.contains(&n.0) {
+                lits.push(n.0);
+            }
         }
-        acc
+        match lits.len() {
+            0 => return self.constant(true),
+            1 => return Node(lits[0]),
+            2 => return self.and(Node(lits[0]), Node(lits[1])),
+            _ => {}
+        }
+        let mut key = lits.clone();
+        key.sort_unstable();
+        if let Some(&existing) = self.shared_wide.get(&key) {
+            return Node(existing);
+        }
+        let gate = self.aux_var();
+        for &l in &lits {
+            self.add_clause(&[-gate, l]);
+        }
+        let mut reverse = vec![gate];
+        reverse.extend(lits.iter().map(|l| -l));
+        self.add_clause(&reverse);
+        self.shared_wide.insert(key, gate);
+        self.inputs.insert(gate.unsigned_abs(), lits);
+        Node(gate)
     }
 
     /// The disjunction of two terms.
@@ -332,22 +375,6 @@ impl IncrementalSolver {
         self.or(taken, skipped)
     }
 
-    /// Binds a term to a variable of its own.
-    ///
-    /// Folding and sharing are usually what a caller wants from a term
-    /// interface, but incremental determinization runs on *named*
-    /// definitions: a signal with a variable is a variable the solver
-    /// can determinize, propagate through and record a Skolem function
-    /// for, while the same signal inlined into its uses is none of
-    /// those things. Naming the signals a hand-written encoding would
-    /// have named keeps that substrate.
-    pub fn named(&mut self, node: Node) -> Node {
-        let var = self.aux_var();
-        self.add_clause(&[-var, node.0]);
-        self.add_clause(&[var, -node.0]);
-        Node(var)
-    }
-
     /// Asserts a term in the current frame.
     ///
     /// The top-level structure becomes clauses rather than a unit on a
@@ -361,10 +388,9 @@ impl IncrementalSolver {
         let mut conjuncts = vec![node];
         let mut clauses: Vec<Vec<i32>> = Vec::new();
         while let Some(node) = conjuncts.pop() {
-            if let Some((a, b)) = self.gate(node.0) {
-                // a positive gate is a conjunction: assert both sides
-                conjuncts.push(Node(a));
-                conjuncts.push(Node(b));
+            if let Some(children) = self.gate(node.0) {
+                // a positive gate is a conjunction: assert every side
+                conjuncts.extend(children.into_iter().map(Node));
                 continue;
             }
             let mut clause = Vec::new();
@@ -372,9 +398,8 @@ impl IncrementalSolver {
             while let Some(term) = pending.pop() {
                 match self.gate(-term.0) {
                     // a negated gate is a disjunction: flatten it
-                    Some((a, b)) => {
-                        pending.push(Node(-a));
-                        pending.push(Node(-b));
+                    Some(children) => {
+                        pending.extend(children.into_iter().map(|l| Node(-l)));
                     }
                     None => clause.push(term.0),
                 }
@@ -388,11 +413,11 @@ impl IncrementalSolver {
 
     /// The two inputs of a term, when it is a positively-signed gate the
     /// solver introduced itself.
-    fn gate(&self, literal: i32) -> Option<(i32, i32)> {
+    fn gate(&self, literal: i32) -> Option<Vec<i32>> {
         if literal <= 0 || !self.auxiliary.contains(&literal.unsigned_abs()) {
             return None;
         }
-        self.inputs.get(&literal.unsigned_abs()).copied()
+        self.inputs.get(&literal.unsigned_abs()).cloned()
     }
 
     /// The literal a term denotes, for callers that still speak in
@@ -492,6 +517,7 @@ impl IncrementalSolver {
         // a pop can retire auxiliary variables, so the terms built
         // against them stop being shareable
         self.shared.clear();
+        self.shared_wide.clear();
         self.inputs.clear();
         self.truth = None;
         if self.responder.as_ref().is_some_and(|r| self.frames.len() <= r.depth + 1) {
@@ -1311,6 +1337,33 @@ mod test {
         refuting.assert_node(both);
         refuting.assert_node(!nu);
         assert_eq!(refuting.solve(), SolverResult::Unsatisfiable);
+    }
+
+    #[test]
+    fn wide_conjunctions_cost_one_variable() {
+        let mut solver = IncrementalSolver::default();
+        let vars: Vec<u32> = (0..8).map(|_| solver.fresh_var()).collect();
+        for &v in &vars {
+            solver.declare_existential(v);
+        }
+        let nodes: Vec<Node> = vars.iter().map(|&v| IncrementalSolver::node(v)).collect();
+        let before = solver.fresh_var();
+        let wide = solver.and_all(&nodes);
+        let after = solver.fresh_var();
+        // one gate, not seven: folding a k-ary conjunction into binary
+        // pairs would hand the solver k-1 existentials to determinize
+        assert_eq!(after - before, 2, "one auxiliary variable plus the probe");
+        assert!(solver.is_auxiliary(wide.0.unsigned_abs()));
+
+        // the same conjunction in another order is the same gate
+        let mut reversed: Vec<Node> = nodes.clone();
+        reversed.reverse();
+        assert_eq!(solver.and_all(&reversed), wide);
+        // and the folds still apply
+        let truth = solver.constant(true);
+        assert_eq!(solver.and_all(&[nodes[0], truth, nodes[0]]), nodes[0]);
+        let falsehood = solver.constant(false);
+        assert_eq!(solver.and_all(&[nodes[0], !nodes[0], nodes[1]]), falsehood);
     }
 
     #[test]
