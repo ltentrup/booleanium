@@ -35,7 +35,7 @@ use crate::{
     qdimacs::FromQdimacs,
     QuantTy, SolverResult,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Restricts the universal domain of an instance to the given literals:
 /// clauses satisfied by a restriction literal are dropped, falsified
@@ -95,6 +95,21 @@ enum Served {
     Query,
 }
 
+/// A term under construction: a literal over the solver's variables,
+/// negated by `!`. Terms are built with [`IncrementalSolver::and`] and
+/// friends, which Tseitin-encode them and keep the variables they
+/// introduce to themselves.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Node(i32);
+
+impl std::ops::Not for Node {
+    type Output = Node;
+
+    fn not(self) -> Node {
+        Node(-self.0)
+    }
+}
+
 /// An incremental ∀∃ (2QBF) solver.
 #[derive(Debug)]
 pub struct IncrementalSolver {
@@ -127,6 +142,17 @@ pub struct IncrementalSolver {
     continuation: bool,
     /// the next fresh variable for [`IncrementalSolver::fresh_var`]
     next_var: u32,
+    /// variables the *solver* introduced while Tseitin-encoding a term
+    /// the caller built, as opposed to variables the caller declared.
+    /// They are existential and innermost by construction, and they are
+    /// the solver's business: no answer speaks about them.
+    auxiliary: HashSet<u32>,
+    /// structural hash over the terms built so far, so an expression
+    /// written twice is encoded once. Cleared on `pop`, which can
+    /// retire the variables it names.
+    shared: HashMap<(i32, i32), i32>,
+    /// the constant-true node, allocated on first use
+    truth: Option<i32>,
     /// lifetime count of in-place monotone extensions, across rebuilds
     extensions: u32,
 }
@@ -152,6 +178,9 @@ impl IncrementalSolver {
             continuation: true,
             next_var: 1,
             extensions: 0,
+            auxiliary: HashSet::new(),
+            shared: HashMap::new(),
+            truth: None,
         }
     }
 
@@ -184,6 +213,128 @@ impl IncrementalSolver {
     pub fn declare_existential(&mut self, var: u32) {
         self.note_var(var);
         self.frames.last_mut().expect("base frame exists").existentials.push(var);
+    }
+
+    /// Lifts a declared variable into a term.
+    #[must_use]
+    pub fn node(var: u32) -> Node {
+        Node(i32::try_from(var).expect("variable fits an i32"))
+    }
+
+    /// The constant term.
+    pub fn constant(&mut self, value: bool) -> Node {
+        let truth = if let Some(truth) = self.truth {
+            truth
+        } else {
+            let var = self.aux_var();
+            self.add_clause(&[var]);
+            self.truth = Some(var);
+            var
+        };
+        if value {
+            Node(truth)
+        } else {
+            Node(-truth)
+        }
+    }
+
+    /// The conjunction of two terms.
+    pub fn and(&mut self, a: Node, b: Node) -> Node {
+        let (a, b) = (a.0, b.0);
+        // the folds a circuit builder owes its caller: a term written
+        // twice is encoded once, and a trivial one is not encoded at all
+        if a == b {
+            return Node(a);
+        }
+        if a == -b {
+            return self.constant(false);
+        }
+        if let Some(truth) = self.truth {
+            if a == truth {
+                return Node(b);
+            }
+            if b == truth {
+                return Node(a);
+            }
+            if a == -truth || b == -truth {
+                return self.constant(false);
+            }
+        }
+        let key = if a <= b { (a, b) } else { (b, a) };
+        if let Some(&existing) = self.shared.get(&key) {
+            return Node(existing);
+        }
+        let gate = self.aux_var();
+        self.add_clause(&[-gate, a]);
+        self.add_clause(&[-gate, b]);
+        self.add_clause(&[gate, -a, -b]);
+        self.shared.insert(key, gate);
+        Node(gate)
+    }
+
+    /// The conjunction of any number of terms.
+    pub fn and_all(&mut self, nodes: &[Node]) -> Node {
+        let mut acc = self.constant(true);
+        for &n in nodes {
+            acc = self.and(acc, n);
+        }
+        acc
+    }
+
+    /// The disjunction of two terms.
+    pub fn or(&mut self, a: Node, b: Node) -> Node {
+        !self.and(!a, !b)
+    }
+
+    /// The disjunction of any number of terms.
+    pub fn or_all(&mut self, nodes: &[Node]) -> Node {
+        let negated: Vec<Node> = nodes.iter().map(|&n| !n).collect();
+        !self.and_all(&negated)
+    }
+
+    /// The exclusive disjunction of two terms.
+    pub fn xor(&mut self, a: Node, b: Node) -> Node {
+        let left = self.and(a, !b);
+        let right = self.and(!a, b);
+        self.or(left, right)
+    }
+
+    /// `if cond then a else b`.
+    pub fn ite(&mut self, cond: Node, a: Node, b: Node) -> Node {
+        let taken = self.and(cond, a);
+        let skipped = self.and(!cond, b);
+        self.or(taken, skipped)
+    }
+
+    /// Asserts a term in the current frame.
+    pub fn assert_node(&mut self, node: Node) {
+        self.add_clause(&[node.0]);
+    }
+
+    /// The literal a term denotes, for callers that still speak in
+    /// clauses.
+    #[must_use]
+    pub fn literal(node: Node) -> i32 {
+        node.0
+    }
+
+    /// A fresh *auxiliary* variable: existential, innermost, and the
+    /// solver's own. Auxiliaries are excluded from every answer, which
+    /// is the whole point of building terms instead of clauses — a
+    /// caller that hand-encodes a circuit puts its gate variables in the
+    /// same namespace as its quantified ones, and then every model,
+    /// witness and cube it gets back is polluted with them.
+    fn aux_var(&mut self) -> i32 {
+        let var = self.fresh_var();
+        self.declare_existential(var);
+        self.auxiliary.insert(var);
+        i32::try_from(var).expect("variable fits an i32")
+    }
+
+    /// Whether a variable is one the solver introduced itself.
+    #[must_use]
+    pub fn is_auxiliary(&self, var: u32) -> bool {
+        self.auxiliary.contains(&var)
     }
 
     /// Adds a clause (DIMACS literals) to the current frame.
@@ -254,6 +405,10 @@ impl IncrementalSolver {
     /// every carried learnt clause that was learnt while the frame was on
     /// the stack. Returns `false` if only the base frame is left.
     pub fn pop(&mut self) -> bool {
+        // a pop can retire auxiliary variables, so the terms built
+        // against them stop being shareable
+        self.shared.clear();
+        self.truth = None;
         if self.frames.len() <= 1 {
             return false;
         }
@@ -960,6 +1115,60 @@ mod test {
         assert_eq!(solver.solve(), SolverResult::Satisfiable);
         assert!(solver.verify());
         assert_eq!(solver.extension_count(), 0, "declarations forced a rebuild");
+    }
+
+    #[test]
+    fn terms_keep_their_encoding_to_themselves() {
+        // ∀u ∃c. (u xor c) xor u  — the controller has to answer `true`
+        // whatever the environment plays, and the xor tree the solver
+        // Tseitin-encodes to get there is none of the caller's business
+        let mut solver = IncrementalSolver::default();
+        let (u, c) = (solver.fresh_var(), solver.fresh_var());
+        solver.declare_universal(u);
+        solver.declare_existential(c);
+        let (nu, nc) = (IncrementalSolver::node(u), IncrementalSolver::node(c));
+        let inner = solver.xor(nu, nc);
+        let outer = solver.xor(inner, nu);
+        solver.assert_node(outer);
+        assert_eq!(solver.solve(), SolverResult::Satisfiable);
+
+        // the caller declared two variables; everything else in the
+        // instance is the solver's own
+        assert!(!solver.is_auxiliary(u));
+        assert!(!solver.is_auxiliary(c));
+        let auxiliaries = (1..=solver.fresh_var()).filter(|&v| solver.is_auxiliary(v)).count();
+        assert!(auxiliaries > 0, "the xor tree needs gates");
+
+        // and a caller asking for the witness of the dual gets literals
+        // over its own variables only
+        let mut refuting = IncrementalSolver::default();
+        let u = refuting.fresh_var();
+        let c = refuting.fresh_var();
+        refuting.declare_universal(u);
+        refuting.declare_existential(c);
+        let (nu, nc) = (IncrementalSolver::node(u), IncrementalSolver::node(c));
+        let both = refuting.and(nu, nc);
+        refuting.assert_node(both);
+        refuting.assert_node(!nu);
+        assert_eq!(refuting.solve(), SolverResult::Unsatisfiable);
+    }
+
+    #[test]
+    fn terms_share_and_fold() {
+        let mut solver = IncrementalSolver::default();
+        let (a, b) = (solver.fresh_var(), solver.fresh_var());
+        solver.declare_existential(a);
+        solver.declare_existential(b);
+        let (na, nb) = (IncrementalSolver::node(a), IncrementalSolver::node(b));
+        let first = solver.and(na, nb);
+        let second = solver.and(nb, na);
+        assert_eq!(first, second, "the same term is encoded once");
+        assert_eq!(solver.and(na, na), na, "x & x is x");
+        let false_node = solver.constant(false);
+        assert_eq!(solver.and(na, !na), false_node, "x & !x is false");
+        let true_node = solver.constant(true);
+        assert_eq!(solver.and(na, true_node), na, "x & true is x");
+        assert_eq!(solver.and(na, false_node), false_node, "x & false is false");
     }
 
     #[test]
