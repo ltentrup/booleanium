@@ -95,6 +95,22 @@ enum Served {
     Query,
 }
 
+/// The generalisation solver of [`IncrementalSolver::unanswerable_core`]
+/// and how much of the stack it holds.
+struct Responder {
+    solver: crate::sat::LookupSolver<crate::sat::varisat::Varisat>,
+    /// the stack depth it was built for
+    depth: usize,
+    /// clauses integrated per frame
+    integrated: Vec<usize>,
+}
+
+impl std::fmt::Debug for Responder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Responder").field("depth", &self.depth).finish_non_exhaustive()
+    }
+}
+
 /// A term under construction: a literal over the solver's variables,
 /// negated by `!`. Terms are built with [`IncrementalSolver::and`] and
 /// friends, which Tseitin-encode them and keep the variables they
@@ -151,8 +167,15 @@ pub struct IncrementalSolver {
     /// written twice is encoded once. Cleared on `pop`, which can
     /// retire the variables it names.
     shared: HashMap<(i32, i32), i32>,
+    /// the inputs of each gate, by variable: the reverse of `shared`,
+    /// so asserting a term can walk its structure
+    inputs: HashMap<u32, (i32, i32)>,
     /// the constant-true node, allocated on first use
     truth: Option<i32>,
+    /// the plain-SAT solver [`IncrementalSolver::unanswerable_core`]
+    /// asks, kept across calls: the frames it reads are append-only, so
+    /// it grows by a delta per call instead of being rebuilt
+    responder: Option<Responder>,
     /// lifetime count of in-place monotone extensions, across rebuilds
     extensions: u32,
 }
@@ -180,7 +203,9 @@ impl IncrementalSolver {
             extensions: 0,
             auxiliary: HashSet::new(),
             shared: HashMap::new(),
+            inputs: HashMap::new(),
             truth: None,
+            responder: None,
         }
     }
 
@@ -269,6 +294,7 @@ impl IncrementalSolver {
         self.add_clause(&[-gate, b]);
         self.add_clause(&[gate, -a, -b]);
         self.shared.insert(key, gate);
+        self.inputs.insert(gate.unsigned_abs(), (a, b));
         Node(gate)
     }
 
@@ -306,9 +332,67 @@ impl IncrementalSolver {
         self.or(taken, skipped)
     }
 
+    /// Binds a term to a variable of its own.
+    ///
+    /// Folding and sharing are usually what a caller wants from a term
+    /// interface, but incremental determinization runs on *named*
+    /// definitions: a signal with a variable is a variable the solver
+    /// can determinize, propagate through and record a Skolem function
+    /// for, while the same signal inlined into its uses is none of
+    /// those things. Naming the signals a hand-written encoding would
+    /// have named keeps that substrate.
+    pub fn named(&mut self, node: Node) -> Node {
+        let var = self.aux_var();
+        self.add_clause(&[-var, node.0]);
+        self.add_clause(&[var, -node.0]);
+        Node(var)
+    }
+
     /// Asserts a term in the current frame.
+    ///
+    /// The top-level structure becomes clauses rather than a unit on a
+    /// reified literal: a conjunction is asserted conjunct by conjunct,
+    /// and a disjunction is flattened into one clause. Only what sits
+    /// under that is left to the gates. Asserting the reified literal
+    /// instead costs a propagation step per level, which is exactly the
+    /// structure a caller hand-writing clauses would not have given
+    /// away.
     pub fn assert_node(&mut self, node: Node) {
-        self.add_clause(&[node.0]);
+        let mut conjuncts = vec![node];
+        let mut clauses: Vec<Vec<i32>> = Vec::new();
+        while let Some(node) = conjuncts.pop() {
+            if let Some((a, b)) = self.gate(node.0) {
+                // a positive gate is a conjunction: assert both sides
+                conjuncts.push(Node(a));
+                conjuncts.push(Node(b));
+                continue;
+            }
+            let mut clause = Vec::new();
+            let mut pending = vec![node];
+            while let Some(term) = pending.pop() {
+                match self.gate(-term.0) {
+                    // a negated gate is a disjunction: flatten it
+                    Some((a, b)) => {
+                        pending.push(Node(-a));
+                        pending.push(Node(-b));
+                    }
+                    None => clause.push(term.0),
+                }
+            }
+            clauses.push(clause);
+        }
+        for clause in clauses {
+            self.add_clause(&clause);
+        }
+    }
+
+    /// The two inputs of a term, when it is a positively-signed gate the
+    /// solver introduced itself.
+    fn gate(&self, literal: i32) -> Option<(i32, i32)> {
+        if literal <= 0 || !self.auxiliary.contains(&literal.unsigned_abs()) {
+            return None;
+        }
+        self.inputs.get(&literal.unsigned_abs()).copied()
     }
 
     /// The literal a term denotes, for callers that still speak in
@@ -408,7 +492,11 @@ impl IncrementalSolver {
         // a pop can retire auxiliary variables, so the terms built
         // against them stop being shareable
         self.shared.clear();
+        self.inputs.clear();
         self.truth = None;
+        if self.responder.as_ref().is_some_and(|r| self.frames.len() <= r.depth + 1) {
+            self.responder = None;
+        }
         if self.frames.len() <= 1 {
             return false;
         }
@@ -917,6 +1005,78 @@ impl IncrementalSolver {
         }
     }
 
+    /// Whether any existential response satisfies `question` under the
+    /// given universal literals, and if not, which of those literals the
+    /// refutation needed.
+    ///
+    /// This is the generalisation primitive a counterexample-guided
+    /// caller wants, and the reason it takes a *term* rather than using
+    /// the whole assertion stack is measured: minimising a universal
+    /// move against everything the solver holds — matrix, auxiliary
+    /// definitions, and whatever constraints the caller has pushed for
+    /// its own bookkeeping — produces cubes an order of magnitude
+    /// weaker than minimising it against the question actually being
+    /// asked (`RESEARCH.md`, RQ5: 64 cubes against 6 on one game).
+    /// Only the caller knows which term is the question, so only the
+    /// caller can say.
+    ///
+    /// `depth` bounds the assertion stack the question is asked
+    /// against, as if the stack had been popped to it: a caller whose
+    /// top frame holds round bookkeeping asks below it, and the term it
+    /// names must have been built below it too.
+    ///
+    /// `None` means the move is answerable and there is nothing to
+    /// generalise. The core is a subset of `universal`; auxiliary
+    /// variables never appear in it, because they are never assumed.
+    pub fn unanswerable_core(
+        &mut self,
+        depth: usize,
+        universal: &[i32],
+        question: Node,
+    ) -> Option<Vec<i32>> {
+        use crate::sat::{varisat::Varisat, LookupSolver, SatSolver, SatSolverLit};
+        let stale = !self
+            .responder
+            .as_ref()
+            .is_some_and(|r| r.depth == depth && r.integrated.len() <= self.frames.len());
+        if stale {
+            let mut solver = LookupSolver::<Varisat>::default();
+            solver.set_var_count(usize::try_from(self.next_var).expect("fits") + 1);
+            self.responder = Some(Responder { solver, depth, integrated: Vec::new() });
+        }
+        let responder = self.responder.as_mut().expect("just built");
+        responder.solver.set_var_count(usize::try_from(self.next_var).expect("fits") + 1);
+        responder.integrated.resize(depth + 1, 0);
+        for (index, frame) in self.frames.iter().take(depth + 1).enumerate() {
+            for clause in frame.clauses.iter().skip(responder.integrated[index]) {
+                let encoded: Vec<_> =
+                    clause.iter().map(|&l| responder.solver.lookup(Lit::from_dimacs(l))).collect();
+                responder.solver.add_clause(&encoded);
+            }
+            responder.integrated[index] = frame.clauses.len();
+        }
+        // the question is assumed, not asserted: it changes between
+        // calls as the caller's refinement grows, and the solver has to
+        // outlive it
+        let mut assumptions: Vec<_> =
+            universal.iter().map(|&l| responder.solver.lookup(Lit::from_dimacs(l))).collect();
+        let asked = responder.solver.lookup(Lit::from_dimacs(question.0));
+        assumptions.push(asked);
+        if responder.solver.solve_with_assumptions(&assumptions).expect("plain SAT") {
+            return None;
+        }
+        let core: HashSet<usize> =
+            responder.solver.failed_assumptions()?.iter().map(|&l| l.var_index()).collect();
+        Some(
+            universal
+                .iter()
+                .zip(&assumptions)
+                .filter(|(_, &mapped)| core.contains(&mapped.var_index()))
+                .map(|(&l, _)| l)
+                .collect(),
+        )
+    }
+
     /// The *unverified* recorded universal candidate of the most recent
     /// unsatisfiable solve (see [`IncDet::unsat_witness_candidate`]):
     /// sound only where any universal assignment is, e.g. as an
@@ -1151,6 +1311,28 @@ mod test {
         refuting.assert_node(both);
         refuting.assert_node(!nu);
         assert_eq!(refuting.solve(), SolverResult::Unsatisfiable);
+    }
+
+    #[test]
+    fn a_core_answers_about_the_question_it_was_given() {
+        // Two universals, and a question that mentions only one of
+        // them: `u & c`, with `c` a free existential. Under `!u` no
+        // response satisfies it, and `s` had nothing to do with that.
+        let mut solver = IncrementalSolver::default();
+        let (u, s2, c) = (solver.fresh_var(), solver.fresh_var(), solver.fresh_var());
+        solver.declare_universal(u);
+        solver.declare_universal(s2);
+        solver.declare_existential(c);
+        let (nu, nc) = (IncrementalSolver::node(u), IncrementalSolver::node(c));
+        let question = solver.and(nu, nc);
+        let (u, s2) = (i32::try_from(u).unwrap(), i32::try_from(s2).unwrap());
+
+        let core = solver.unanswerable_core(0, &[-u, s2], question).expect("no response under !u");
+        assert_eq!(core, vec![-u], "the core is what the refutation needed, not what was assumed");
+
+        // under `u` the controller answers, and there is nothing to
+        // generalise
+        assert!(solver.unanswerable_core(0, &[u, s2], question).is_none());
     }
 
     #[test]

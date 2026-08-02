@@ -797,6 +797,52 @@ asked the control's question, which means being told what the region
 circuit-level interface above, now with a second independent
 measurement pointing at it.
 
+### The interface, built — and the port that does not pay yet
+
+The solver accepts terms now (`Node`, `and`/`or`/`xor`/`ite`,
+`assert_node`, `named`), Tseitin-encodes them itself, and keeps the
+variables that takes to itself (`is_auxiliary`). A caller that hands
+over a circuit no longer puts its gate variables in the same namespace
+as the variables it quantifies over. On top of that sits the
+generalisation primitive the measurement above asked for:
+`unanswerable_core(depth, universal, question)` — "is this universal
+move answerable, and if not, which of its literals did the refutation
+need", asked against *a term the caller names* rather than against
+everything the solver holds.
+
+Porting `solve_safety` onto it deletes the hand-rolled encoding and
+the special-cased responder outright. It also, measured on one
+machine against the pre-port code, **costs time**:
+
+| family | hand-rolled | on terms | on terms, signals named |
+|---|---|---|---|
+| `arbiter-3-2` | 11 r / 9 c / 17.7 ms | 12 r / 10 c / 33 ms | **8 r / 1 c / 8.9 ms** |
+| `arbiter-3-3` | 12 r / 10 c / 32.4 ms | 12 r / 10 c / 225 ms | 12 r / 10 c / 208 ms |
+| `ring-4` | 6 r / 4 c / 8.7 ms | 6 r / 4 c / 21 ms | 6 r / 4 c / 19 ms |
+| `ring-6` | 8 r / 6 c / 18.0 ms | 8 r / 6 c / 23 ms | 8 r / 6 c / 21 ms |
+| `corridor-4-stay` | 23 r / 21 c / 115 ms | 22 r / 20 c / 302 ms | 23 r / 21 c / 194 ms |
+
+The middle column is the naive port; the right one adds `named` on the
+successor bits and the region terms, which the hand-rolled version had
+as variables. That recovers a lot — `arbiter-3-2` finds a **one-cube**
+region where every other configuration needs nine or ten — and the
+finding behind it is worth keeping:
+
+**For incremental determinization, naming an intermediate signal is not
+overhead, it is the substrate.** A term interface that folds and shares
+aggressively, as an SMT frontend should, dissolves exactly the named
+definitions the solver determinizes, propagates through, and extracts
+Skolem functions for. `named` is therefore not a wart on the API but
+part of it, and the open question is which signals deserve it — the
+hand-rolled encoding answered that by accident, and the port has to
+answer it on purpose.
+
+It does not pay yet, so it is not landed: `arbiter-3-3` is 6x slower
+and two more families are 2x. The term interface and the primitive are
+in; the port is parked with its measurements. What it needs is the
+per-round cost, which is the same conflict-check finding as everywhere
+else in this section.
+
 **Per-round cost.** `arbiter-3-3` runs 12 rounds against the control's
 11 and finds the same 10 cubes, and still takes 70x longer. So even
 with cube quality equalised there is an order of magnitude in the
