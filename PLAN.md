@@ -760,6 +760,16 @@ Remaining performance work:
   refactor would not be measurable; revisit only if a profile ever shows
   it.
 
+* **Re-validated after the interface work** (the term API, the
+  `solve_safety` port onto it, the frame-scoped gate cache): the CADET
+  alternation suite is unchanged at **125 correct with the same single
+  give-up** (`biu`), and **all 19** satisfiable multi-block instances
+  still certify. The 2QBF core benchmark returns the expected verdicts
+  throughout. Worth stating explicitly because the changes reached into
+  `incremental.rs`, which every frontend sits on, and nothing in the
+  safety-game work should have been able to move those numbers — the
+  point of running them is that "should not" is not a measurement.
+
 ### 3b. Open directions (see `RESEARCH.md` for the reasoning)
 
 Recorded from the solver-landscape review, roughly in leverage order:
