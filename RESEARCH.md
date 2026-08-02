@@ -1228,6 +1228,24 @@ that earns its place per-instance rather than as the trunk.
   call** (437 988 over 42 472), so assumption handling is not where
   the 890 µs goes.
 
+  **The same shape on a different family, after the port.** The
+  finding above came from one hard round of `arbiter-4-4`. Summed over
+  every round of `corridor-4-stay` — a different game, and measured
+  after the generalisation and the term interface changed how the loop
+  drives the core:
+
+  | phase | time | share | calls |
+  |---|---|---|---|
+  | complete conflict check | **260 ms** | **62%** | 6 552 |
+  | determinacy check | 31 ms | 7% | 51 265 |
+  | total core solve | 420 ms | | |
+
+  752 of those 6 552 checks find a conflict, so **89% prove there is
+  none** — against 81% on `arbiter-4-4`. Two families, two very
+  different games, one shared profile: the complete check owns the
+  round, and most of what it does is establish absence. That is now the
+  best-supported open item in this document.
+
   The appealing symmetry — do to the conflict check what the budgeted
   micro-DPLL did to the determinacy check — does not transfer as
   cleanly as it looks. A determinacy check is *local*, over the
