@@ -654,8 +654,13 @@ fn main() {
             outcome.losing.len(),
         );
         #[cfg(feature = "probe")]
-        for report in
-            [booleanium::probe::cone_report(), booleanium::probe::hint_report()].into_iter().flatten()
+        for report in [
+            booleanium::probe::wave_report(),
+            booleanium::probe::cone_report(),
+            booleanium::probe::hint_report(),
+        ]
+        .into_iter()
+        .flatten()
         {
             println!("    {report}");
         }

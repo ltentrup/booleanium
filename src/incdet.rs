@@ -1469,6 +1469,8 @@ impl IncDet {
                 break;
             };
             self.stats.global.decisions += 1;
+            #[cfg(feature = "probe")]
+            crate::probe::add(&crate::probe::DECISIONS, 1);
             assert!(!self.assignment.is_assigned(var));
 
             // Note: deciding the polarity with the *non-empty* implication
@@ -1619,6 +1621,8 @@ impl IncDet {
     }
 
     fn propagate(&mut self) -> Option<Conflict> {
+        #[cfg(feature = "probe")]
+        crate::probe::add(&crate::probe::WAVES, 1);
         loop {
             // constants are the cheapest propagation, handle them first
             if let Some(lit) = self.constant_propagation.pop_front() {
@@ -1650,6 +1654,8 @@ impl IncDet {
             trace!("{} has unique consquence", var);
             if let Some(assignment) = self.is_conflicted(var) {
                 trace!("{} is conflicted", var);
+                #[cfg(feature = "probe")]
+                crate::probe::add(&crate::probe::WAVES_CONFLICTED, 1);
                 return Some(Conflict { var, assignment });
             }
             trace!("{} is deterministic", var);

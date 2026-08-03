@@ -35,6 +35,28 @@ pub static HINT_TRIES: AtomicU64 = AtomicU64::new(0);
 pub static HINT_HITS: AtomicU64 = AtomicU64::new(0);
 pub static HINT_NANOS: AtomicU64 = AtomicU64::new(0);
 
+/// Propagation waves (calls to `IncDet::propagate`), the complete
+/// conflict checks inside them, and how many waves ended on a conflict.
+///
+/// The batching factor for a *batched* conflict check: one query per
+/// wave asking whether any variable determinized in it is conflicted,
+/// instead of one query per variable. Checks per wave is what such a
+/// query would replace; waves that end on a conflict are the ones where
+/// the batch would have to be re-run after the repair.
+pub static WAVES: AtomicU64 = AtomicU64::new(0);
+pub static WAVES_CONFLICTED: AtomicU64 = AtomicU64::new(0);
+pub static COMPLETE_CHECKS: AtomicU64 = AtomicU64::new(0);
+/// Decisions, the next coarser boundary a batched check could sit on.
+pub static DECISIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether to measure the cone of influence, which costs a traversal of
+/// the determinized formula per check and so distorts everything else.
+/// Set `BOOLEANIUM_PROBE_CONE` to enable.
+pub(crate) fn cone_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("BOOLEANIUM_PROBE_CONE").is_ok())
+}
+
 pub(crate) fn add(counter: &AtomicU64, by: u64) {
     counter.fetch_add(by, Ordering::Relaxed);
 }
@@ -55,9 +77,35 @@ pub fn reset() {
         &HINT_TRIES,
         &HINT_HITS,
         &HINT_NANOS,
+        &WAVES,
+        &WAVES_CONFLICTED,
+        &COMPLETE_CHECKS,
+        &DECISIONS,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
+}
+
+/// What a batched conflict check — one query per propagation wave
+/// instead of one per determinized variable — would replace.
+#[must_use]
+pub fn wave_report() -> Option<String> {
+    let waves = get(&WAVES);
+    if waves == 0 {
+        return None;
+    }
+    let (checks, conflicted) = (get(&COMPLETE_CHECKS), get(&WAVES_CONFLICTED));
+    #[allow(clippy::cast_precision_loss)]
+    let per_wave = checks as f64 / waves as f64;
+    #[allow(clippy::cast_precision_loss)]
+    let rate = 100.0 * conflicted as f64 / waves as f64;
+    let decisions = get(&DECISIONS);
+    #[allow(clippy::cast_precision_loss)]
+    let per_decision = if decisions == 0 { 0.0 } else { checks as f64 / decisions as f64 };
+    Some(format!(
+        "{waves} waves, {checks} complete checks ({per_wave:.1} per wave, \
+         {per_decision:.1} per decision), {conflicted} waves conflicted ({rate:.0}%)"
+    ))
 }
 
 /// How well the conflict hint pays: how often a remembered conflicting

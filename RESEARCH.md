@@ -1420,16 +1420,51 @@ that earns its place per-instance rather than as the trunk.
   subsystems — the games here are all one connected fixpoint, which is
   precisely why everything is in everyone's cone.
 
-  Both cheap routes are now closed, and with them the whole "make the
-  check cheaper" family except one: asking for **fewer** checks by
-  determinizing optimistically and repairing on violation, the way CDCL
-  commits to a decision and lets propagation find the contradiction.
-  That is the one idea left that changes the *search* rather than the
-  query, and it is the one the two closed experiments both point at —
-  the corridor result says a conflict found under bias is worth less
-  than one found freely, and the cone result says the query cannot be
-  made local. Neither says anything against asking for the conflict
-  later, or not at all.
+  **Can the checks be batched? There is no batch.** The last idea in
+  the family was the real CDCL analogy: stop checking each
+  determinization before committing it, commit optimistically, and ask
+  once per epoch whether *any* determinized variable is conflicted —
+  one query with a selector per variable, the model naming the guilty
+  one, the repair being the backtrack conflict analysis already does.
+  The appeal is that it collapses the negative direction, 85% of calls
+  and 47% of the time at 17.7 µs each, most of which is per-call
+  overhead rather than search: a thousand cheap queries become one.
+
+  It needs a batch to exist. The soundest epoch boundary is the
+  propagation wave (checking before anything is concluded), the
+  coarsest defensible one is the decision. Measured at both:
+
+  | family | waves | complete checks | per wave | per decision | waves ending on a conflict |
+  |---|---|---|---|---|---|
+  | `corridor-4-stay` | 679 | 1 257 | 1.9 | 2.4 | 23% |
+  | `ring-6` | 155 | 644 | 4.2 | 6.5 | 34% |
+  | `arbiter-3-3` | 1 182 | 1 222 | 1.0 | 1.1 | 9% |
+  | `arbiter-2-16` | 333 | 199 | 0.6 | 0.7 | 7% |
+  | `arbiter-4-4` | 188 119 | 247 876 | 1.3 | 1.4 | 5% |
+
+  **About one complete check per decision.** On `arbiter-3-3` and
+  `arbiter-2-16` the batch would hold a single query, and on
+  `arbiter-4-4` — 248 000 checks, the family that costs a minute and a
+  half and the one this was meant to rescue — it holds 1.4. The best
+  case is the ring at 6.5, where 34% of waves end on a conflict, which
+  forces the batch to be re-run after the repair. There is nothing to
+  amortize.
+
+  That is the real answer to "the conflict check is too expensive", and
+  it is not an answer about the check. Incremental determinization
+  spends **one SAT call per search step** — the check is the algorithm's
+  unit of work, not an overhead sitting on top of it. CDCL's per-step
+  obligation is unit propagation, which is linear and searchless;
+  ID's is "this Skolem function is well defined", which is a
+  satisfiability question by its nature. The three experiments closed
+  here say the same thing from three directions: the query cannot be
+  made local (the cone is 56–84% where it matters), it cannot be
+  guessed (hints hit 0–12%, and hitting is itself harmful), and it
+  cannot be batched (one per decision). What is left is either a
+  cheaper backend per call, or an algorithm whose per-step obligation is
+  weaker — which is exactly what clausal abstraction is, and it is
+  already the architecture bet recorded above. ID's beauty and its
+  price are the same property.
 
   So the item is not "build a stronger filter", which was the reading
   the call counts invited. It is either making the *positive* check

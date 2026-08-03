@@ -619,10 +619,17 @@ defaults — recorded here so they are not retried naively:
 
 Remaining performance work:
 
-* **Sharper conflict gating**: the syntactic pair check filters only ~10% of
-  global checks; investigate stronger cheap filters (e.g. incorporating
-  determined constants/functions of premise variables, or caching
-  compatible-pair witnesses across checks of the same variable).
+* **Sharper conflict gating — closed**: the syntactic pair check was
+  suspected of being weak; it is not. It rejects 80% of candidates and
+  *every* two-sided definition among them, which is the whole
+  conflict-free population it can decide syntactically. What survives
+  is the genuinely uncertain remainder, and the profile says the
+  surviving positives are where the time is. Three follow-ups —
+  localizing the query to a cone, guessing it from remembered
+  conflicts, and batching it per epoch — are all measured and rejected;
+  see `RESEARCH.md`. The residual finding is that ID spends about one
+  complete check per decision, so the check is the algorithm's unit of
+  work rather than an overhead on it.
 * **Cone-of-influence reduction — measured and rejected**: only clauses
   of variables in the transitive premise cone of the checked variable
   are relevant, but the cone is 56–84% of the determinized formula on

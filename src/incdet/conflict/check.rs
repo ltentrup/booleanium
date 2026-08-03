@@ -208,6 +208,11 @@ impl IncDet {
         #[cfg(feature = "probe")]
         {
             use crate::probe;
+            probe::add(&probe::COMPLETE_CHECKS, 1);
+        }
+        #[cfg(feature = "probe")]
+        if crate::probe::cone_enabled() {
+            use crate::probe;
             let (clauses, vars, root) = self.check_cone(var);
             probe::add(&probe::CONE_SAMPLES, 1);
             probe::add(&probe::CONE_CLAUSES, clauses as u64);
