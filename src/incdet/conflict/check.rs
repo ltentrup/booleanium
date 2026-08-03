@@ -208,7 +208,18 @@ impl IncDet {
         #[cfg(feature = "probe")]
         {
             use crate::probe;
+            use std::sync::atomic::Ordering;
             probe::add(&probe::COMPLETE_CHECKS, 1);
+            // sample at powers of two: the cost is O(trail) in BDD
+            // operations, and a feasibility rate does not need density
+            let checks = probe::COMPLETE_CHECKS.load(Ordering::Relaxed);
+            if checks.is_power_of_two() && probe::bdd_enabled() {
+                probe::add(&probe::BDD_SAMPLES, 1);
+                if let Some(total) = self.trail_bdd(probe::BDD_LIMIT) {
+                    probe::add(&probe::BDD_FITS, 1);
+                    probe::observe_max(&probe::BDD_PEAK_TOTAL, total as u64);
+                }
+            }
         }
         #[cfg(feature = "probe")]
         if crate::probe::cone_enabled() {
@@ -305,6 +316,78 @@ impl IncDet {
             }
         }
         false
+    }
+
+    /// Can the state this conflict check runs against be carried as
+    /// BDDs over the universal variables at all?
+    ///
+    /// A BDD-backed check turns the query into a pointer comparison, so
+    /// the only thing that decides it is whether the Skolem functions
+    /// fit. This builds them the way such a solver would — walk the
+    /// trail in dependency order and compose each variable's firing
+    /// condition from the BDDs of the variables its implication clauses
+    /// mention — under a node budget, and reports the nodes allocated,
+    /// or `None` when the budget trips. Only the package total is
+    /// tracked: per-function sizes would cost a reachability walk per
+    /// trail entry, which is quadratic and would distort the run it is
+    /// measuring.
+    ///
+    /// Sampled rather than run on every check: this is O(trail) in BDD
+    /// operations and exists to answer a feasibility question, not to
+    /// be fast. The variable order is the prefix order, so a `None` is
+    /// evidence about *this order*, not about BDDs — which is the whole
+    /// difficulty, and why the caller reports the rate rather than a
+    /// verdict.
+    #[cfg(feature = "probe")]
+    fn trail_bdd(&self, limit: usize) -> Option<usize> {
+        use crate::bdd::{Bdd, FALSE, TRUE};
+
+        let mut bdd = Bdd::with_limit(limit);
+        let mut values: HashMap<Var, crate::bdd::NodeId> = HashMap::new();
+        let mut level = 0;
+        for scope in &self.prefix {
+            if scope.quantifier != crate::QuantTy::Forall {
+                continue;
+            }
+            for &var in &scope.variables {
+                values.insert(var, bdd.variable(level));
+                level += 1;
+            }
+        }
+        for &lit in self.trail.iter() {
+            if values.contains_key(&lit.var()) {
+                // an assumed universal: a constant on this branch
+                continue;
+            }
+            let value = if self.assignment.constant_value(lit) == Some(true) {
+                if lit.is_positive() {
+                    TRUE
+                } else {
+                    FALSE
+                }
+            } else {
+                let mut fires = FALSE;
+                for cid in self.skolem[lit].implications() {
+                    let mut all = TRUE;
+                    for &l in self.allocator[cid].iter().filter(|l| l.var() != lit.var()) {
+                        let known = values.get(&l.var()).copied().unwrap_or(FALSE);
+                        let known = if l.is_positive() { bdd.not(known) } else { known };
+                        all = bdd.and(all, known);
+                    }
+                    fires = bdd.or(fires, all);
+                }
+                if lit.is_positive() {
+                    fires
+                } else {
+                    bdd.not(fires)
+                }
+            };
+            if bdd.exceeded() {
+                return None;
+            }
+            values.insert(lit.var(), value);
+        }
+        Some(bdd.allocated())
     }
 
     /// The cone of influence of a conflict check on `var`: the

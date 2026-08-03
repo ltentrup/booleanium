@@ -614,9 +614,16 @@ defaults — recorded here so they are not retried naively:
   permutation, on exactly the family ID solves order-obliviously with
   zero decisions. The region numbers are friendlier (`arbiter-4-4`: 59
   BDD nodes against an ideal 53-cube cover and the 75 cubes the loop
-  builds). Verdict in `RESEARCH.md`: a budgeted alternative rather than
-  a replacement, and the strongest form is BDDs for the *region* in the
-  RQ5 game layer, not for the check.
+  builds). Measured again on the population that actually matters —
+  the *live* conflict-check state during real solves, sampled by
+  `ConflictCheck::trail_bdd` under a one-million-node budget, on the
+  CADET suite and QBFEVAL'17: 70 of 72 CADET states fit with a **median
+  peak of 7 nodes**, but `adder2` needs 169 053 and `bug10rr(r)` and
+  three of five QBFEVAL instances exceed a million. The BDD is cheap
+  where the check is already cheap and explodes on arithmetic, which is
+  the structure ID handles best. Verdict in `RESEARCH.md`: not a
+  replacement; defensible only as a budgeted accelerator, with a low
+  ceiling.
 * **Conflict hints** (`Options::conflict_hints`, kept but off by
   default): re-try the universal values a recent conflict came back
   with, pinned as assumptions, before searching freely — sound in one

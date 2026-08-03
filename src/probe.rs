@@ -49,9 +49,36 @@ pub static COMPLETE_CHECKS: AtomicU64 = AtomicU64::new(0);
 /// Decisions, the next coarser boundary a batched check could sit on.
 pub static DECISIONS: AtomicU64 = AtomicU64::new(0);
 
+/// Sampled conflict-check states whose Skolem functions were built as
+/// BDDs over the universals, how many fit inside the node budget, and
+/// the largest single function seen among those that fit.
+///
+/// The feasibility question for a BDD-backed conflict check: the check
+/// itself becomes a pointer comparison, so the only thing that can
+/// sink it is whether the functions fit.
+pub static BDD_SAMPLES: AtomicU64 = AtomicU64::new(0);
+pub static BDD_FITS: AtomicU64 = AtomicU64::new(0);
+pub static BDD_PEAK_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Records the largest value seen.
+pub(crate) fn observe_max(counter: &AtomicU64, value: u64) {
+    counter.fetch_max(value, Ordering::Relaxed);
+}
+
 /// Whether to measure the cone of influence, which costs a traversal of
 /// the determinized formula per check and so distorts everything else.
 /// Set `BOOLEANIUM_PROBE_CONE` to enable.
+/// Node budget for the sampled conflict-check BDDs: past this the
+/// answer is "it does not fit", which is the answer that matters.
+pub const BDD_LIMIT: usize = 1_000_000;
+
+/// Whether to sample conflict-check states as BDDs, which costs a
+/// trail walk per sample. Set `BOOLEANIUM_PROBE_BDD` to enable.
+pub(crate) fn bdd_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("BOOLEANIUM_PROBE_BDD").is_ok())
+}
+
 pub(crate) fn cone_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("BOOLEANIUM_PROBE_CONE").is_ok())
@@ -81,6 +108,9 @@ pub fn reset() {
         &WAVES_CONFLICTED,
         &COMPLETE_CHECKS,
         &DECISIONS,
+        &BDD_SAMPLES,
+        &BDD_FITS,
+        &BDD_PEAK_TOTAL,
     ] {
         counter.store(0, Ordering::Relaxed);
     }
@@ -105,6 +135,23 @@ pub fn wave_report() -> Option<String> {
     Some(format!(
         "{waves} waves, {checks} complete checks ({per_wave:.1} per wave, \
          {per_decision:.1} per decision), {conflicted} waves conflicted ({rate:.0}%)"
+    ))
+}
+
+/// Whether the conflict-check state fits in BDDs over the universals.
+#[must_use]
+pub fn bdd_report() -> Option<String> {
+    let samples = get(&BDD_SAMPLES);
+    if samples == 0 {
+        return None;
+    }
+    let fits = get(&BDD_FITS);
+    #[allow(clippy::cast_precision_loss)]
+    let rate = 100.0 * fits as f64 / samples as f64;
+    Some(format!(
+        "{fits}/{samples} sampled states fit as BDDs ({rate:.0}%), \
+         peak package {} nodes",
+        get(&BDD_PEAK_TOTAL),
     ))
 }
 

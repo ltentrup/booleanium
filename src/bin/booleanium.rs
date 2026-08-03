@@ -86,7 +86,27 @@ impl Args {
     }
 }
 
+/// Prints whatever the `probe` counters have to say, to stderr so the
+/// verdict on stdout stays machine-readable.
+#[cfg(feature = "probe")]
+fn report_probes() {
+    for report in [booleanium::probe::bdd_report()].into_iter().flatten() {
+        eprintln!("probe: {report}");
+    }
+}
+
+#[cfg(not(feature = "probe"))]
+fn report_probes() {}
+
+
+
 fn main() -> Result<SolverResult> {
+    let result = run();
+    report_probes();
+    result
+}
+
+fn run() -> Result<SolverResult> {
     tracing_subscriber::fmt::init();
     let args = Args::parse();
 

@@ -1645,11 +1645,76 @@ that earns its place per-instance rather than as the trunk.
   needs sifting, which is the real cost of the idea and should be
   costed as such rather than assumed away.
 
-  The strongest form is narrower than "BDDs for the conflict check" and
-  better supported by these numbers: **BDDs for the region** in the RQ5
-  game layer, where they match the ideal cover on the hard family and
-  the refinement loop's 77 rounds are pure loss. That is also precisely
-  where the literature says they win.
+  A first reading of the above went to "so the strongest form is BDDs
+  for the *region*, in the game layer". That is a deflection: safety
+  games are a test vehicle here, not the application, and the question
+  asked was about the conflict check inside ID. It also rested on the
+  wrong population — the numbers above are *final* Skolem models of
+  *satisfiable synthetic* instances, and the conflict check runs
+  mid-search, on partial states, mostly on instances that end
+  unsatisfiable. So the measurement was redone on the population that
+  actually matters.
+
+  **The right measurement: sample the live conflict-check state.**
+  `ConflictCheck::trail_bdd` (behind `probe`, enabled with
+  `BOOLEANIUM_PROBE_BDD`) builds the Skolem functions of the current
+  trail as BDDs over the universals, exactly the way a BDD-backed
+  solver would — walk the trail in dependency order, compose each
+  variable's firing condition from the BDDs of the variables its
+  implication clauses mention — under a one-million-node budget.
+  Sampled at powers of two of the complete-check count, on the CADET
+  suite and QBFEVAL'17:
+
+  | corpus | instances with data | every sample fit | blew the budget | median peak | max peak |
+  |---|---|---|---|---|---|
+  | CADET | 72 | 70 | 2 | **7 nodes** | 169 053 |
+  | QBFEVAL'17 | 5 | 2 | **3** | — | 46 400 |
+
+  **On the CADET suite the answer is yes, emphatically**: 61 of 70
+  instances peak under 100 nodes and the median is *seven*. On those,
+  the conflict check really would collapse to a pointer comparison, and
+  the CEGAR cube would come out ideal for free.
+
+  **And it fails exactly where it would matter.** The instances that
+  blow the budget or come close are the ones this project has spent its
+  time on: `adder2` — the instance frontier CEGAR was built for — needs
+  **169 053 nodes**, four orders of magnitude above the median;
+  `bug10rr` and `bug10rrr` — the instances that exposed the frontier
+  certificate soundness bug — exceed a million; on QBFEVAL, `add20y`
+  and two `cache-coherence` instances exceed a million. `add20y`
+  *solves in under five seconds* and still blows up, so this is not
+  "hard instances are hard": it is structural, and the structure is
+  arithmetic.
+
+  That is the anti-correlation that decides it. **The BDD is cheap
+  where the check is already cheap, and it explodes on exactly the
+  structure ID handles best.** `bv-add-inverse` is the same point in
+  the clean case: ID determinizes it at every width with zero decisions
+  and zero conflicts, order-obliviously, while its Skolem functions are
+  >10⁶ BDD nodes in the prefix order and 194 interleaved.
+
+  And the ordering escape does not survive contact with the corpus. For
+  `bv-add-inverse` the good order was hand-built from knowing which
+  bits are operands. `add20y.qdimacs` is a CNF file — there is no
+  operand structure to read, so a real implementation has to *find* the
+  order, which means sifting a 10⁵–10⁶ node BDD during search, and the
+  cost of that has to be set against a SAT call that costs 17.7 µs when
+  it finds nothing and 118.9 µs when it does.
+
+  **Answer to the question as asked**: BDDs cannot replace the SAT
+  conflict check in ID. As a *budgeted accelerator* they remain
+  defensible and the CADET median of seven nodes is a real argument for
+  trying — maintain the BDDs while they stay under a few thousand
+  nodes, hand the check back to SAT permanently once they do not, which
+  is the shape that already worked for the determinacy check.
+  `Bdd::with_limit`/`Bdd::exceeded` are that signal. But the honest
+  expectation is set by the anti-correlation: the instances that would
+  keep the budget are the ones that are already fast, so the ceiling on
+  the win is low and the engineering (incremental maintenance across
+  backtracking, plus reordering) is not.
+
+  The region result stands on its own and is recorded above, but it
+  belongs to the RQ5 track and answers a different question.
 
   So the item is not "build a stronger filter", which was the reading
   the call counts invited. It is either making the *positive* check
