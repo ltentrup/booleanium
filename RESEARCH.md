@@ -1665,26 +1665,52 @@ that earns its place per-instance rather than as the trunk.
   Sampled at powers of two of the complete-check count, on the CADET
   suite and QBFEVAL'17:
 
-  | corpus | instances with data | every sample fit | blew the budget | median peak | max peak |
-  |---|---|---|---|---|---|
-  | CADET | 72 | 70 | 2 | **7 nodes** | 169 053 |
-  | QBFEVAL'17 | 5 | 2 | **3** | — | 46 400 |
+  | corpus | run | with data | every sample fit | blew the budget | median peak | max peak |
+  |---|---|---|---|---|---|---|
+  | CADET | 154 | 72 | 70 | 2 | **7 nodes** | 169 053 |
+  | QBFEVAL'17 | 385 | 63 | 38 | **25** | **4 079** | 987 575 |
 
-  **On the CADET suite the answer is yes, emphatically**: 61 of 70
-  instances peak under 100 nodes and the median is *seven*. On those,
-  the conflict check really would collapse to a pointer comparison, and
-  the CEGAR cube would come out ideal for free.
+  (Instances without data hit the per-instance timeout — 30 s on
+  CADET, 5 s on QBFEVAL — and were killed before they could report.
+  That selection favours *small* BDDs, since the instances that finish
+  fastest are the ones with least state, so the QBFEVAL column is if
+  anything optimistic.)
 
-  **And it fails exactly where it would matter.** The instances that
-  blow the budget or come close are the ones this project has spent its
-  time on: `adder2` — the instance frontier CEGAR was built for — needs
-  **169 053 nodes**, four orders of magnitude above the median;
-  `bug10rr` and `bug10rrr` — the instances that exposed the frontier
-  certificate soundness bug — exceed a million; on QBFEVAL, `add20y`
-  and two `cache-coherence` instances exceed a million. `add20y`
-  *solves in under five seconds* and still blows up, so this is not
-  "hard instances are hard": it is structural, and the structure is
-  arithmetic.
+  **The two corpora disagree, and the disagreement is the finding.**
+  On CADET the answer is yes, emphatically: 61 of 70 instances peak
+  under 100 nodes, the median is *seven*, and the check would collapse
+  to a pointer comparison with the ideal CEGAR cube falling out for
+  free. On QBFEVAL'17 the answer is no: **40% of the instances blow a
+  million nodes outright**, the median among those that fit is 4 079,
+  and *not one* is under 100. Counting the population where a BDD check
+  would actually be cheap — fits and stays under a thousand nodes —
+  gives **92% of CADET and 21% of QBFEVAL**.
+
+  The QBFEVAL distribution is the more informative one, because it is
+  the corpus of record for the thing this solver is meant to be good
+  at. Several instances sit right at the budget (`stmt46_111_238` at
+  987 575, `stmt27_16_224` at 853 242, `stmt19_66_214` and
+  `stmt21_84_215` at 772 865 each), which means the true peaks are
+  unknown and the budget is merely where the measurement stopped. And
+  the `small-dyn-partition-fixpoint-k` family grows cleanly with the
+  fixpoint depth — 2 061, 4 079, 6 110, 8 154, 10 182, 12 230, 14 285,
+  18 467, 20 523 for k = 1…10 — so on that family the BDD state grows
+  linearly in a parameter the user is free to increase.
+
+  **And on CADET it fails exactly where it would matter.** The two
+  instances that blow the budget, and the one that comes closest, are
+  the ones this project has spent its time on: `adder2` — the instance
+  frontier CEGAR was built for — needs **169 053 nodes**, four orders
+  of magnitude above that corpus's median of seven; `bug10rr` and
+  `bug10rrr` — which exposed the frontier certificate soundness bug —
+  exceed a million. The CADET median is not describing the instances
+  anyone cares about there.
+
+  On QBFEVAL the same shape appears without needing to pick instances,
+  since 40% blow the budget outright. `add20y` *solves in under five
+  seconds* and still blows up, so this is not "hard instances are
+  hard": it is structural, and the structure is arithmetic —
+  `add20y`, the `rankfunc38_*_64` pair, `cache-coherence-*`.
 
   That is the anti-correlation that decides it. **The BDD is cheap
   where the check is already cheap, and it explodes on exactly the
@@ -1702,16 +1728,27 @@ that earns its place per-instance rather than as the trunk.
   it finds nothing and 118.9 µs when it does.
 
   **Answer to the question as asked**: BDDs cannot replace the SAT
-  conflict check in ID. As a *budgeted accelerator* they remain
-  defensible and the CADET median of seven nodes is a real argument for
-  trying — maintain the BDDs while they stay under a few thousand
-  nodes, hand the check back to SAT permanently once they do not, which
-  is the shape that already worked for the determinacy check.
-  `Bdd::with_limit`/`Bdd::exceeded` are that signal. But the honest
-  expectation is set by the anti-correlation: the instances that would
-  keep the budget are the ones that are already fast, so the ceiling on
-  the win is low and the engineering (incremental maintenance across
-  backtracking, plus reordering) is not.
+  conflict check in ID. On the corpus of record, 40% of instances put
+  the state past a million nodes and only 21% keep it under a thousand.
+
+  As a *budgeted accelerator* they stay defensible — maintain the BDDs
+  while they stay under a few thousand nodes, hand the check back to
+  SAT permanently once they do not, the shape that already worked for
+  the determinacy check, with `Bdd::with_limit`/`Bdd::exceeded` as the
+  signal. But the expected value is small and now quantified: the
+  budget would hold on about a fifth of QBFEVAL, and that fifth is the
+  end of the corpus where the check is not the bottleneck. The
+  engineering it buys that with — incremental maintenance across
+  backtracking, plus a reordering strategy — is not small.
+
+  The one reading of these numbers that *is* encouraging is the growth
+  shape rather than the level. Where the BDDs fit they often fit
+  comfortably and grow linearly in the instance parameter
+  (`small-dyn-partition-fixpoint-k`, `small-bug1-fixpoint-k`), which is
+  the profile under which a budget rarely trips and the fallback stays
+  rare. Whether that is a family artifact or a property of fixpoint
+  instances generally is not settled by 63 data points, and it is the
+  question a follow-up should ask.
 
   The region result stands on its own and is recorded above, but it
   belongs to the RQ5 track and answers a different question.

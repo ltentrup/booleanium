@@ -617,13 +617,17 @@ defaults — recorded here so they are not retried naively:
   builds). Measured again on the population that actually matters —
   the *live* conflict-check state during real solves, sampled by
   `ConflictCheck::trail_bdd` under a one-million-node budget, on the
-  CADET suite and QBFEVAL'17: 70 of 72 CADET states fit with a **median
-  peak of 7 nodes**, but `adder2` needs 169 053 and `bug10rr(r)` and
-  three of five QBFEVAL instances exceed a million. The BDD is cheap
-  where the check is already cheap and explodes on arithmetic, which is
-  the structure ID handles best. Verdict in `RESEARCH.md`: not a
-  replacement; defensible only as a budgeted accelerator, with a low
-  ceiling.
+  CADET suite and QBFEVAL'17. The corpora disagree and the
+  disagreement is the finding: 70 of 72 CADET states fit with a
+  **median peak of 7 nodes**, but on QBFEVAL **25 of 63 blow a million
+  nodes** and the median among the rest is 4 079, with none under 100.
+  Counting where a BDD check would actually be cheap (fits, under a
+  thousand nodes) gives 92% of CADET and **21% of QBFEVAL**. The
+  failures are arithmetic (`add20y`, `rankfunc38_*_64`,
+  `cache-coherence-*`), and on CADET they are the instances the project
+  spent its time on (`adder2` at 169 053, `bug10rr(r)` over a million).
+  Verdict in `RESEARCH.md`: not a replacement; defensible only as a
+  budgeted accelerator, with a low and now-quantified ceiling.
 * **Conflict hints** (`Options::conflict_hints`, kept but off by
   default): re-try the universal values a recent conflict came back
   with, pinned as assumptions, before searching freely — sound in one
