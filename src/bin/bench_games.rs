@@ -6,8 +6,8 @@
 //! `cargo run --release --bin bench_games`.
 
 use booleanium::{
-    aiger, aiger::Unroller, alternation, incdet::Options, incremental::IncrementalSolver,
-    SolverResult,
+    aiger, aiger::Unroller, alternation, bdd::Bdd, incdet::Options,
+    incremental::IncrementalSolver, SolverResult,
 };
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -592,8 +592,8 @@ fn main() {
     // description would be.
     println!();
     println!(
-        "{:<24} {:>7} {:>13} {:>7} {:>7} {:>7} {:>7} {:>12}",
-        "family", "latches", "verdict", "rounds", "cubes", "ideal", "width", "time"
+        "{:<24} {:>7} {:>13} {:>7} {:>7} {:>7} {:>12} {:>7} {:>12}",
+        "family", "latches", "verdict", "rounds", "cubes", "ideal", "bdd nat/best", "width", "time"
     );
     // (k, b) pairs: k = b sits on the realizability boundary, and
     // holding k at 2 while b grows is the axis a word-level region
@@ -647,8 +647,10 @@ fn main() {
                 / outcome.losing.len() as f64
         };
         let ideal = minimal_cover(&text, latches).map_or("-".to_string(), |c| c.to_string());
+        let bdd = region_bdd(&text, latches)
+            .map_or("-".to_string(), |(natural, best)| format!("{natural}/{best}"));
         println!(
-            "{name:<24} {latches:>7} {:>13} {:>7} {:>7} {ideal:>7} {width:>7.1} {elapsed:>12.3?}",
+            "{name:<24} {latches:>7} {:>13} {:>7} {:>7} {ideal:>7} {bdd:>12} {width:>7.1} {elapsed:>12.3?}",
             if outcome.realizable { "realizable" } else { "unrealizable" },
             outcome.rounds,
             outcome.losing.len(),
@@ -723,6 +725,53 @@ fn main() {
 /// compared against — not to the loop's own previous run.
 ///
 /// Returns `None` when the state space is too large to sweep.
+/// The same losing region as a BDD over the latch variables, in nodes.
+///
+/// The comparison the BDD question turns on: `cubes` is what the
+/// refinement loop actually builds, `ideal` is the smallest cube cover
+/// that exists, and this is what a BDD-based solver would carry
+/// instead. The variable order is the latch order — no reordering — so
+/// this is an upper bound.
+fn region_bdd(text: &str, latches: usize) -> Option<(usize, usize)> {
+    if latches > 20 {
+        return None;
+    }
+    let losing = aiger::losing_states(text, latches).ok()?;
+    let bits = u32::try_from(latches).ok()?;
+    let build = |order: &[usize]| {
+        // the entry for a BDD assignment `j` is the state whose latch
+        // `order[i]` carries bit `i` of `j`
+        let table: Vec<bool> = (0..1usize << latches)
+            .map(|j| {
+                let state = (0..latches)
+                    .filter(|&i| j >> i & 1 == 1)
+                    .fold(0usize, |acc, i| acc | 1 << order[i]);
+                losing[state]
+            })
+            .collect();
+        let mut bdd = Bdd::new();
+        let root = bdd.from_truth_table(&table, bits);
+        bdd.size(root)
+    };
+    let mut order: Vec<usize> = (0..latches).collect();
+    let natural = build(&order);
+    // how much of the size is the *order* rather than the region: a
+    // few hundred random orders is a cheap empirical lower bound on
+    // what a package with dynamic reordering could reach
+    let mut best = natural;
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    for _ in 0..300 {
+        for i in (1..latches).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            order.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+        best = best.min(build(&order));
+    }
+    Some((natural, best))
+}
+
 fn minimal_cover(text: &str, latches: usize) -> Option<usize> {
     if latches > 20 {
         return None;

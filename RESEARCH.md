@@ -1550,8 +1550,106 @@ that earns its place per-instance rather than as the trunk.
   cannot be batched (one per decision). What is left is either a
   cheaper backend per call, or an algorithm whose per-step obligation is
   weaker — which is exactly what clausal abstraction is, and it is
-  already the architecture bet recorded above. ID's beauty and its
-  price are the same property.
+  the QDIMACS answer recorded above. ID's beauty and its price are the
+  same property.
+
+  **A cheaper backend per call, taken seriously: BDDs.** That was the
+  half of the conclusion left hanging, and it is the one with a real
+  precedent — BDD-based solvers dominated SYNTCOMP's safety track for
+  years while SAT-based ones were not competitive, which is the same
+  problem shape this project's RQ5 track is losing at. The idea is not
+  "call a BDD library instead of varisat" but to change what a Skolem
+  function *is*: carry each one as a BDD over the universal variables,
+  built by composition as determinization proceeds. Then
+
+  * the conflict check is `fire_pos ∧ fire_neg ≠ ⊥`, a **pointer
+    comparison** after a handful of applies;
+  * the conflicting *set* comes out whole rather than one assignment at
+    a time — and cube quality is worth a great deal here, since
+    generalising `ring-6`'s counterexamples from 64 cubes to the ideal
+    6 was one of the larger wins in the RQ5 track. A BDD hands you the
+    ideal cube by prime-implicant extraction, for free;
+  * determinacy, constant detection and certification collapse into
+    the same representation — the strategy *is* the BDD, so the AIG
+    compilation and its relevance-keyed memo stop being needed.
+
+  So the whole question is representation size, and nothing else. That
+  is measurable, so it was measured (`src/bdd.rs`, a minimal ROBDD
+  package written for this: unique table, memoised apply, node budget,
+  no reordering). Skolem functions of the RQ1/RQ3 families, largest
+  single function, in prefix order and in the order interleaving the
+  two halves of the universal block:
+
+  | family | prefix order | interleaved | ID's own cost |
+  |---|---|---|---|
+  | `parity-eq-64` | 129 | 129 | 0.38 ms |
+  | `mux-tree-5` | 65 | 75 | 0.28 ms |
+  | `choice-16` | 5 | 5 | 23 ms |
+  | `random-6-10-40-*` | 6–13 | 6–11 | 0.6–1.9 ms |
+  | `bv-ult-choice-8` | 10 | 10 | 4.6 ms |
+  | `bv-add-inverse-8` | 513 | 26 | 0.15 ms |
+  | `bv-add-inverse-16` | **>1 000 000** | 50 | 0.35 ms |
+  | `bv-add-inverse-64` | **>1 000 000** | **194** | 1.07 ms |
+
+  **On twenty-two of twenty-four families the BDDs are trivially
+  small** — under 130 nodes, most under 20 — and on those the conflict
+  check really would be free. The exception is two-operand arithmetic,
+  where the prefix order gives the textbook exponential (33, 513,
+  >10⁶ at 4, 8, 16 bits) and the interleaved order gives the textbook
+  linear (3n + 2, so 194 nodes at 64 bits). The same function, the same
+  package: **a factor of over five thousand, decided by a permutation
+  of the inputs.**
+
+  And it is the family where ID is at its best — `bv-add-inverse` is
+  the definitional shape from the theory-lifting argument, solved at
+  every width with zero decisions and zero conflicts in about a
+  millisecond, *order-obliviously*. ID has no variable-order problem to
+  have. A BDD-backed ID would acquire one, on exactly the instances it
+  currently handles perfectly.
+
+  The region tells the same story from the other side, and more kindly
+  (`bench_games`, `region` mode, now reporting BDD nodes in the
+  natural latch order and the best of 300 random orders next to the
+  cube counts):
+
+  | family | cubes built | ideal cover | BDD natural | BDD best order |
+  |---|---|---|---|---|
+  | `arbiter-4-4` unary | 75 | 53 | **59** | 59 |
+  | `arbiter-4-4` binary | 53 | 25 | 70 | 70 |
+  | `corridor-4-stay` | 20 | 20 | 35 | 23 |
+  | `ring-6` | 6 | 6 | **128** | **14** |
+  | `ring-4` | 4 | 4 | 32 | 10 |
+  | `arbiter-3-3` unary | 10 | 10 | 20 | 14 |
+
+  On `arbiter-4-4` — the family that costs 88 s and 248 000 conflict
+  checks — the region BDD is 59 nodes against an ideal cube cover of 53
+  and the 75 cubes the refinement loop actually builds, and it is
+  completely insensitive to the order (59 either way). That is the
+  SYNTCOMP result reproduced in miniature: where the region is the
+  bottleneck, the BDD is as good as the best cube set anyone could
+  find, and it is reached in one step instead of 77 refinement rounds.
+  On the ring the natural order is 21x worse than the cube set and a
+  better order recovers most of it (128 → 14), which is the same
+  lesson: **the numbers are order numbers, not BDD numbers.**
+
+  **Verdict: not a replacement, a budgeted alternative.** Every
+  argument for BDDs here survives, and the single argument against is
+  concentrated and identified — the method acquires a sensitivity the
+  current one does not have, and the worst case is exponential memory
+  rather than slowness, which is the failure mode you cannot recover
+  from mid-solve. The shape that follows is the one that already
+  worked once in this project, for the determinacy check: run the cheap
+  complete method **under a budget**, fall back to the general one when
+  the budget trips. `Bdd::with_limit` and `Bdd::exceeded` exist for
+  exactly that signal, and the ordering result says a serious version
+  needs sifting, which is the real cost of the idea and should be
+  costed as such rather than assumed away.
+
+  The strongest form is narrower than "BDDs for the conflict check" and
+  better supported by these numbers: **BDDs for the region** in the RQ5
+  game layer, where they match the ideal cover on the hard family and
+  the refinement loop's 77 rounds are pure loss. That is also precisely
+  where the literature says they win.
 
   So the item is not "build a stronger filter", which was the reading
   the call counts invited. It is either making the *positive* check

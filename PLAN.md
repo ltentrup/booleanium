@@ -602,6 +602,21 @@ defaults — recorded here so they are not retried naively:
   waves touch most variables' implication sets — and skipping solver calls
   perturbs the incremental solver state enough that the search got slower
   on balance.
+* **BDDs for the conflict check — measured, not adopted** (`src/bdd.rs`,
+  a minimal ROBDD package with a node budget). Carrying Skolem
+  functions as BDDs over the universals makes the check a pointer
+  comparison and hands back the whole conflicting set instead of one
+  assignment, so the only question is representation size. On 22 of 24
+  RQ1/RQ3 families the BDDs are under 130 nodes and the check would be
+  free; on two-operand arithmetic the prefix order is the textbook
+  exponential (>10^6 nodes at 16 bits) and the interleaved order the
+  textbook linear (194 at 64 bits) — a factor over 5 000 decided by a
+  permutation, on exactly the family ID solves order-obliviously with
+  zero decisions. The region numbers are friendlier (`arbiter-4-4`: 59
+  BDD nodes against an ideal 53-cube cover and the 75 cubes the loop
+  builds). Verdict in `RESEARCH.md`: a budgeted alternative rather than
+  a replacement, and the strongest form is BDDs for the *region* in the
+  RQ5 game layer, not for the check.
 * **Conflict hints** (`Options::conflict_hints`, kept but off by
   default): re-try the universal values a recent conflict came back
   with, pinned as assumptions, before searching freely — sound in one

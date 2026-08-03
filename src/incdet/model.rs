@@ -206,6 +206,69 @@ impl SkolemModel {
         finish(&self.universals, final_values)
     }
 
+    /// Compiles the final chain into BDDs over the universal variables
+    /// and returns `(largest single function, total nodes allocated)`.
+    ///
+    /// This is the measurement that decides whether a BDD-backed
+    /// conflict check is possible at all. Such a check is a pointer
+    /// comparison — `fire_pos ∧ fire_neg ≠ ⊥` — and the conflicting
+    /// *set* comes out whole instead of one assignment at a time, so
+    /// the only thing that can sink it is the size of the functions it
+    /// has to carry. Computing them here is the same composition a
+    /// BDD-backed solver would do while determinizing: walk the chain
+    /// in order, and build each variable's firing condition from the
+    /// BDDs of the variables its implication clauses mention.
+    ///
+    /// `level_of` maps a universal's position in the prefix to its
+    /// level in the variable order, and `limit` caps the nodes: BDD
+    /// size is order-dominated and the failure mode is exponential
+    /// memory, so both have to be parameters of the measurement rather
+    /// than assumptions inside it. `None` means the limit was hit.
+    #[must_use]
+    pub fn bdd_size(&self, limit: usize, level_of: &dyn Fn(usize) -> u32) -> Option<(usize, usize)> {
+        use crate::bdd::{Bdd, FALSE, TRUE};
+
+        let mut bdd = Bdd::with_limit(limit);
+        let mut values: HashMap<Var, crate::bdd::NodeId> = self
+            .universals
+            .iter()
+            .enumerate()
+            .map(|(index, &var)| (var, bdd.variable(level_of(index))))
+            .collect();
+        let mut largest = 0;
+        for (lit, function) in &self.final_chain {
+            let fires = match function {
+                Function::Constant => TRUE,
+                Function::Implications(clauses) => {
+                    let mut any = FALSE;
+                    for clause in clauses {
+                        let mut all = TRUE;
+                        for &l in clause.iter().filter(|l| l.var() != lit.var()) {
+                            // the clause fires when every other literal
+                            // is false, so take the negation of each
+                            let value = values.get(&l.var()).copied().unwrap_or(FALSE);
+                            let value =
+                                if l.is_positive() { bdd.not(value) } else { value };
+                            all = bdd.and(all, value);
+                        }
+                        any = bdd.or(any, all);
+                    }
+                    any
+                }
+            };
+            if bdd.exceeded() {
+                return None;
+            }
+            let value = if lit.is_positive() { fires } else { bdd.not(fires) };
+            largest = largest.max(bdd.size(value));
+            values.insert(lit.var(), value);
+        }
+        if bdd.exceeded() {
+            return None;
+        }
+        Some((largest, bdd.allocated()))
+    }
+
     /// Renders the model as SMT-LIB `define-fun`s over the universal
     /// variables. `name` maps DIMACS variables to their surface names;
     /// unnamed variables get internal names. Only named existential

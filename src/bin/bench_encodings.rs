@@ -427,6 +427,10 @@ fn random_circuit(u: usize, e: usize, gates: usize, seed: u64) -> Circuit {
 
 /// Solves one encoding and reports verdict, time, and structure
 /// recovery (initially determinized variables / all existentials).
+/// Node cap for the Skolem-function BDDs: past this the answer is
+/// "it blew up", which is the only answer that matters.
+const BDD_LIMIT: usize = 1_000_000;
+
 fn measure(name: &str, encoding: &str, qcnf: &QCNF) -> SolverResult {
     let mut solver = IncDet::from_qcnf_with_options(qcnf, Options::default());
     let start = Instant::now();
@@ -434,13 +438,36 @@ fn measure(name: &str, encoding: &str, qcnf: &QCNF) -> SolverResult {
     let elapsed = start.elapsed();
     let existentials: usize =
         qcnf.prefix.iter().filter(|(q, _)| *q == QuantTy::Exists).map(|(_, vars)| vars.len()).sum();
+    // Skolem functions as BDDs, in the prefix order and in the order
+    // that interleaves the two halves of the universal block — the
+    // classic split between an exponential and a linear BDD for
+    // arithmetic over two operands.
+    let bdd = if result == SolverResult::Satisfiable {
+        let model = solver.skolem_model();
+        let universals = model.universals().len();
+        let half = (universals + 1) / 2;
+        let interleaved = |index: usize| -> u32 {
+            let level = if index < half { 2 * index } else { 2 * (index - half) + 1 };
+            u32::try_from(level).expect("level fits u32")
+        };
+        let show = |size: Option<(usize, usize)>| {
+            size.map_or_else(|| ">1M".to_string(), |(largest, _)| largest.to_string())
+        };
+        format!(
+            "{}/{}",
+            show(model.bdd_size(BDD_LIMIT, &|index| u32::try_from(index).expect("fits"))),
+            show(model.bdd_size(BDD_LIMIT, &interleaved)),
+        )
+    } else {
+        "-".to_string()
+    };
     let verdict = match result {
         SolverResult::Satisfiable => "sat",
         SolverResult::Unsatisfiable => "unsat",
         SolverResult::Unknown => "unknown",
     };
     println!(
-        "{name:<24} {encoding:>10} {verdict:>7} {elapsed:>12.3?}  initial {:>5}/{existentials:<5} decisions {:>6} conflicts {:>6}",
+        "{name:<24} {encoding:>10} {verdict:>7} {elapsed:>12.3?}  initial {:>5}/{existentials:<5} decisions {:>6} conflicts {:>6} bdd {bdd:>11}",
         solver.initial_deterministic(),
         solver.decisions(),
         solver.conflicts(),
