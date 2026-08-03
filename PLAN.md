@@ -204,8 +204,10 @@ increasing order of ambition:
   answer is conditional, not the predicted uniform win; results and
   analysis in `RESEARCH.md` (RQ1). Two bit-vector families
   (`bv-add-inverse`, `bv-ult-choice`) extend it to the bit-blasting
-  question: an 8-bit addition determinizes 61/61 with zero decisions
-  even though `y` must be recovered by *inverting* the adder, while an
+  question: the addition determinizes *completely* with zero decisions
+  and zero conflicts at every width from 4 to 64 bits (509/509 in
+  1.4 ms over a 2¹²⁸ universal domain), even though `y` must be
+  recovered by *inverting* the adder, while an
   8-bit comparison under a disjunctive top determinizes 2/40 and PG
   beats the definition-level encoding 2.4x — so what predicts the
   outcome is output-forcing, not word-level-ness (`RESEARCH.md`, RQ3). The larger questions this opens — an

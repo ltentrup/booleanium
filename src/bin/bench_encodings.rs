@@ -478,7 +478,11 @@ fn main() {
     for seed in 1..=6 {
         run(&format!("random-6-10-40-{seed}"), &random_circuit(6, 10, 40, seed));
     }
-    for n in [4, 6, 8] {
+    // widths chosen to show *scaling*: the inverted adder is the
+    // definitional shape (∀x ∃y. x = y + c), where ID determinizes
+    // every bit by propagation and nothing enumerates, so it should
+    // stay linear in the width
+    for n in [4, 8, 16, 32, 64] {
         run(&format!("bv-add-inverse-{n}"), &adder_inverse(n));
     }
     for n in [4, 6, 8] {

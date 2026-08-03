@@ -534,15 +534,18 @@ What generalizes cleanly, judged against the current architecture:
   literal; the domain solver becomes a theory solver.
 * **The frontier does** — "settled by definitions" is theory-agnostic;
   the frontier is the boundary of the defined terms.
-* **The clausal core does not** — watched literals, unique
-  consequences, and implication-clause resolution are Boolean.
-  Determinacy modulo a theory means "this constraint *defines* x given
-  earlier variables" (x = t as a definition; more generally
-  single-valuedness), which is a per-theory notion. Research direction:
-  theory-aware unique consequences (equalities and functional
-  congruences as definitions), or the layered architecture — ID on the
-  Boolean skeleton, theory solver for the atoms — which converges
-  toward quantified abstraction (QuAbS) from the other side.
+* **Determinacy does, and lifts *better* than it runs here** — this
+  bullet used to say the opposite ("the clausal core does not"), on the
+  grounds that watched literals, unique consequences and
+  implication-clause resolution are Boolean. They are, but they are the
+  *implementation*. The notion is "this constraint *defines* x given
+  the earlier variables", and modulo a theory that is usually available
+  syntactically — solving an equality in LIA, an invertibility
+  condition in BV, congruence closure in EUF — where in CNF it has to
+  be found by a SAT query per determinization. See "Where the two
+  tracks meet" below for the counterexample that forced the correction,
+  and for what genuinely does not lift (decisions become term
+  proposals; proofs have no counterpart).
 * **Measured warning on per-query cost**: the conflict-check workload
   is thousands of small incremental queries; even CaDiCaL and
   CryptoMiniSat lose to varisat on it (~6k vs ~9k conflicts/min on
@@ -554,25 +557,109 @@ What generalizes cleanly, judged against the current architecture:
 ### Where the two tracks meet
 
 The goal is games over *theories*; the entry ticket is being fast on
-QDIMACS. Those look like competing demands and mostly are, but they
-share exactly one investment, and it is worth being explicit about
-which.
+QDIMACS. Those look like competing demands and mostly are. They were
+recorded here as sharing exactly one investment — clausal abstraction,
+named as both the QDIMACS answer and the theory-liftable architecture —
+and that was **wrong in the direction that matters**. The two tracks
+share less than claimed, and the piece that lifts is the opposite one.
 
-**Clausal abstraction is the shared piece.** It is the QDIMACS answer
-(CAQE decided instances neither DepQBF nor RAReQS could, by containing
-both search and expansion in one calculus) and it is the
-theory-liftable architecture, because its refinement loop is
-model-based over *atoms* — which is how quantified SMT already works.
-The list at the top of this section says the same thing from the other
-side: CEGAR lifts, case splits lift, the frontier lifts, the clausal
-core does not. Abstraction is assembled from the parts that lift.
+**The counterexample that settles it.** Take `∀x ∃y. x = y + 1` over
+any theory with arithmetic. Clausal abstraction's interface between
+quantifier blocks is a set of *clause-satisfaction indicators*: one
+b-literal per clause, saying whether that clause is already satisfied
+from the outside. Two properties make that work in QBF — the clause
+set is finite and fixed, so the interface is a finite Boolean
+vocabulary; and the only thing an outer assignment can do to the inner
+player is satisfy some clauses, which is a *complete* summary, because
+a clause is satisfied or it is not.
 
-**The uncomfortable corollary is that ID is the part that does not.**
-Determinacy is a Boolean notion and becomes per-theory. That does not
-make it worthless — it is what produces certified Skolem functions
-cheaply and what reads circuit structure straight through — but it
-argues for ID as a *component*, an accelerator wherever the structure
-is definitional, rather than as the trunk everything else hangs from.
+The second property is what breaks modulo a theory. Here there is one
+clause holding one atom that mentions both blocks. It is satisfied by
+no assignment to `x` alone and by no assignment to `y` alone, so its
+b-literal reads the same for every `x` and carries no information at
+all. Everything that matters about `x` is the *value* it hands to `y`,
+and the abstraction has no vocabulary for values. Recovering
+completeness means splitting the atom into a family of atoms over
+values or intervals — reintroducing the domain — and then the
+abstraction's defining property, a fixed finite clause set, is gone.
+
+**ID's interface is the Skolem function itself**, which is a term in
+the theory's language. `y := x - 1` is a well-formed object in LIA, in
+BV, in EUF, and the two obligations ID places on it are theory
+queries, not Boolean ones:
+
+* *determinacy* — is `y` uniquely forced? `∃y₁ y₂. C(x, y₁) ∧ C(x, y₂)
+  ∧ y₁ ≠ y₂` is unsatisfiable;
+* *conflict-freedom* — are the accumulated definitions jointly
+  consistent under every `x`?
+
+And there is an inversion worth stating plainly, because it reverses
+the bullet list above. In CNF, determinacy has to be **discovered by
+search** — precisely the SAT-backed machinery this project spends
+about one call per search step on. In a theory it is usually
+**syntax**: solving `x = y + 1` for `y` is Gaussian elimination in
+LIA, an invertibility condition in BV, congruence closure in EUF. The
+expensive half of ID gets *cheaper* when it is lifted, not more
+expensive. The old claim confused the implementation (watched
+literals, implication-clause resolution) with the notion (unique
+consequence = definitional determinacy). The implementation is
+Boolean; the notion is not, and the notion is the algorithm.
+
+**The Boolean measurement already agreed, and was read backwards.**
+The bit-blasted form of the same shape — `bv-add-inverse-n`,
+`∀a,b ∃y. a + y = b` — determinizes completely, and it scales:
+
+| width | universal domain | initially determinized | decisions | conflicts | time |
+|---|---|---|---|---|---|
+| 4 | 2⁸ | 29/29 | 0 | 0 | 0.16 ms |
+| 8 | 2¹⁶ | 61/61 | 0 | 0 | 0.19 ms |
+| 16 | 2³² | 125/125 | 0 | 0 | 0.36 ms |
+| 32 | 2⁶⁴ | 253/253 | 0 | 0 | 0.67 ms |
+| 64 | 2¹²⁸ | **509/509** | **0** | **0** | **1.45 ms** |
+
+Linear in the width, nothing enumerated, over a universal domain of
+2¹²⁸ — and this requires *inverting* the adder, since the gates define
+the sum from `a` and `y`, not `y` from `a` and `b`. It does **not**
+show that clausal abstraction fails on the bit-blasted instance:
+bit-blasting hands it a circuit full of inner Tseitin variables and
+plenty of clauses to learn about, and how fast it is there is an open
+empirical question this repo has not answered. What it shows is the
+thing that matters for the lift — ID's advantage on definitional
+structure is *not an artifact of word-level input*. It survives being
+compiled down to CNF, so it is a property of the algorithm rather than
+of the frontend, and that is what makes it worth carrying up into a
+theory.
+
+**So the corrected position.** Two investments, not one:
+
+* **Clausal abstraction is the QDIMACS play**, and only that. It is
+  still the right answer there, for the reason it always was — it
+  contains both search and expansion in one calculus, which is why
+  CAQE decided instances neither DepQBF nor RAReQS could. Nothing here
+  argues against it as the way to be fast on the benchmark that buys
+  attention.
+* **ID is the theory-liftable trunk.** Its central object is a
+  definition, which is exactly what a theory can represent and often
+  what it can read off syntactically, and the game machinery already
+  built on top of it — CEGAR, case splits, the frontier — was already
+  judged to lift.
+
+What still does not lift, stated so this is not a second over-claim in
+the other direction:
+
+* **Decisions.** When nothing is forced — `∀x ∃y. y > x` — ID has to
+  *choose*, and over a theory a choice is not a coin flip between two
+  polarities but a proposed **term**. That is the genuinely hard part,
+  and it is syntax-guided synthesis / model-based projection territory
+  rather than anything the current code hints at.
+* **Proofs.** Learned clauses become theory lemmas; the QRAT emission
+  has no obvious counterpart.
+* **The per-call cost warning stands**, with its premise corrected. An
+  SMT query is far more expensive than a varisat query, and it is paid
+  about once per search step. But over a theory most of those calls are
+  replaced by *syntactic* definition extraction — so what changes is
+  not only the cost per call but the number of them, which is the one
+  lever the Boolean measurements found to be shut.
 
 **Which theory: bit-vectors, revising an earlier answer.** EUF is the
 right answer to "what is determinacy modulo a theory" — `x = t` is
