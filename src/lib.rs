@@ -19,6 +19,8 @@ mod datastructure;
 pub mod incdet;
 pub mod incremental;
 mod literal;
+#[cfg(feature = "probe")]
+pub mod probe;
 pub mod qcir;
 pub mod qdimacs;
 pub mod qrat;

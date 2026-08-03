@@ -631,9 +631,14 @@ fn main() {
             .and_then(|h| h.split_ascii_whitespace().nth(3))
             .and_then(|f| f.parse::<usize>().ok())
             .expect("header parses");
+        #[cfg(feature = "probe")]
+        booleanium::probe::reset();
+        let mut options = Options::default();
+        if std::env::var("BENCH_CONFLICT_HINTS").is_ok() {
+            options.conflict_hints = true;
+        }
         let start = Instant::now();
-        let outcome =
-            aiger::solve_safety(&text, Options::default()).expect("generated spec parses");
+        let outcome = aiger::solve_safety(&text, options).expect("generated spec parses");
         let elapsed = start.elapsed();
         let width = if outcome.losing.is_empty() {
             0.0
@@ -648,6 +653,12 @@ fn main() {
             outcome.rounds,
             outcome.losing.len(),
         );
+        #[cfg(feature = "probe")]
+        for report in
+            [booleanium::probe::cone_report(), booleanium::probe::hint_report()].into_iter().flatten()
+        {
+            println!("    {report}");
+        }
     }
     // The control (RQ5): the same fixpoint driven by two competing SAT
     // solvers, which is what a developer writes when they do not want

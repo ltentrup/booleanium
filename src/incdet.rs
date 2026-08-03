@@ -99,6 +99,13 @@ pub struct Options {
     /// propagation, and this cost outweighed the variance reduction on all
     /// benchmarked instance families.
     pub restarts: bool,
+    /// Before searching for a conflict freely, re-try the universal
+    /// values a recent conflict came back with, pinned as assumptions.
+    ///
+    /// Disabled by default: measured, and the hint is right 0–12% of
+    /// the time, because conflict analysis has just excluded the very
+    /// assignment being re-tried. See `RESEARCH.md`.
+    pub conflict_hints: bool,
 }
 
 impl Default for Options {
@@ -112,6 +119,7 @@ impl Default for Options {
             case_split_threshold: 5000,
             proof: false,
             restarts: false,
+            conflict_hints: false,
         }
     }
 }
@@ -209,15 +217,18 @@ pub struct IncDet {
     /// that no extension has an existential response (valid for prefixes
     /// with the universal block first)
     unsat_witness: Option<Vec<Lit>>,
-    /// The assignments the last few conflict checks came back with.
+    /// The universal part of the assignments the last few conflict
+    /// checks came back with.
     ///
-    /// A probe for whether conflicts *cluster*: if the assignment that
-    /// conflicted one variable also conflicts the next, the expensive
-    /// half of the check — the calls that find a conflict, at 7x the
-    /// cost of the ones that do not — could be answered by evaluation
-    /// instead of search.
-    #[cfg(feature = "probe")]
-    recent_conflicts: std::collections::VecDeque<HashSet<Lit>>,
+    /// Conflicts *cluster*: the assignment that conflicted one variable
+    /// very often conflicts the next (measured at 50–76% recall). The
+    /// expensive half of the check is the calls that find a conflict, at
+    /// 7x the cost of the ones that do not, so a remembered assignment
+    /// is worth trying as an *assumption* before searching freely: it
+    /// only restricts the query, so a model found under it is a real
+    /// conflict, and an unsatisfiable answer costs one cheap solve
+    /// before the full one runs.
+    recent_conflicts: std::collections::VecDeque<Vec<Lit>>,
     /// the QRAT proof log; `Some` iff [`Options::proof`] is set
     proof_log: Option<crate::qrat::ProofLog>,
     stats: Statistics,

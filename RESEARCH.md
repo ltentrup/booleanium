@@ -1317,23 +1317,119 @@ that earns its place per-instance rather than as the trunk.
   checking consistency against the current Skolem functions, which is
   the propagation the SAT call was going to do anyway.
 
-  So the remembered assignment is a **hint, not an answer**. The usable
-  form is to seed the check solver's decision polarities from it rather
-  than to trust it: a hint that is right 50–76% of the time costs
-  nothing when wrong and points model-finding straight at the conflict
-  when right, which is where 53% of the check time sits. That needs
-  phase-setting on the SAT backend, which varisat does not expose
-  today — so it is a backend question before it is an algorithm one.
-  The probe stays behind the `probe` feature.
+  So the remembered assignment is a **hint, not an answer**. The next
+  question was what a hint is worth, and the answer corrects the
+  optimistic reading above: **it is worth nothing, and the 50–76%
+  recall was measuring the wrong thing.**
 
-  That closes off the cheapest route and leaves the harder ones:
-  finding conflicts by *simulation* before falling back to SAT (the
-  Skolem functions are already circuits, and model-finding is what
-  simulation is good at, which is exactly the expensive half); asking
-  for fewer checks by determinizing optimistically and repairing on
-  violation, as CDCL does; or scoping each query to the frontier rather
-  than the whole determinized formula. The probe that measured this is
-  kept behind the `probe` feature.
+  There is a way to use a hint soundly that needs no backend support at
+  all. Pinning the remembered universals as *assumptions* only
+  restricts the query, so a model found under them is a real conflict,
+  and an unsatisfiable answer costs one cheap solve before the full one
+  runs — a sound version of "simulate before you solve", executed
+  inside the solver where consistency comes for free. Implemented
+  (`Options::conflict_hints`, `try_conflict_hints`) and measured:
+
+  | family | hints tried | hit | pinning |
+  |---|---|---|---|
+  | `corridor-4-stay` | 1 107 | 30 (**3%**) | whole assignment |
+  | `ring-6` | 639 | 0 (**0%**) | whole assignment |
+  | `arbiter-3-3` | 2 370 | 56 (**2%**) | whole assignment |
+  | `corridor-4-stay` | 589 | 70 (**12%**) | local universals only |
+  | `ring-6` | 309 | 1 (**0%**) | local universals only |
+  | `arbiter-3-3` | 804 | 52 (**6%**) | local universals only |
+
+  Trying all sixteen remembered assignments instead of the newest drops
+  the rate further (120 hits in 35 688 tries on the corridor): the
+  extra candidates are older and staler, not better. Restricting the
+  pin to the universals the checked variable's own implications mention
+  — a much weaker restriction, which should have been the generous
+  version — reaches 12% at best.
+
+  **Why the syntactic probe was so much more optimistic**: it asked
+  only whether both polarities *fire* under the remembered assignment,
+  and firing is the easy half. The hard half is that the assignment
+  must still be consistent with everything the solver has determined
+  since — and the reason it usually is not is structural, not
+  incidental. The assignment was remembered *because* it conflicted,
+  and a conflict is immediately followed by analysis that learns a
+  clause, or by a CEGAR round that records a handled case excluding
+  exactly that universal cube. The search's response to a conflict is
+  to make that assignment impossible. Re-trying it asks the solver to
+  reproduce the one thing it has just ruled out, which is why the sound
+  rate is 0–12% where the unsound one was 50–76%.
+
+  End to end it is a **regression**, three runs each, hints on vs off:
+
+  | family | off | on |
+  |---|---|---|
+  | `corridor-4-stay` | 65.2 / 70.2 / 63.9 ms | 187.2 / 106.2 / 162.0 ms |
+  | `ring-6` | 17.5 / 19.5 / 21.7 ms | 19.2 / 19.6 / 19.1 ms |
+  | `arbiter-3-3` | 39.5 / 36.9 / 36.9 ms | 39.8 / 28.9 / 51.7 ms |
+
+  Two costs, and the second is the interesting one. The obvious cost is
+  the extra unsatisfiable solve on the ~90% of checks the hint misses.
+  The subtle one is that a *hit* is not free either: the model found
+  under a pinned assignment is more constrained than the one free
+  search would have found, so it generalizes to a worse cube, and the
+  corridor's 2.5x slowdown is mostly this. A biased conflict is a worse
+  conflict.
+
+  So the whole "conflicts cluster" line is closed, and closed on its
+  own merits rather than parked on a backend limitation: phase-seeding
+  would be a weaker version of the same hint, and the hint is wrong
+  almost always and harmful when right. Kept behind
+  `Options::conflict_hints` (default off, nothing recorded unless it is
+  set) so the measurement can be repeated.
+
+  **Is the query local? Not where it costs.** The other cheap idea was
+  to make each check *smaller* rather than to ask for fewer of them:
+  the check solver carries the whole determinized formula, but a
+  conflict on `v` can only depend on the implication clauses reachable
+  from `v` — its own, closed under the variables they mention. If that
+  cone were a small part of the formula, a scoped query would be a
+  constant factor on both directions at once. Measured (behind
+  `probe`, `check_cone`, one sample per complete check):
+
+  | family | checks | cone clauses | cone vars |
+  |---|---|---|---|
+  | `arbiter-2-2` | 109 | 26/40 (65%) | 14/17 (84%) |
+  | `arbiter-2-8` | 180 | 23/57 (40%) | 13/24 (55%) |
+  | `arbiter-2-16` | 199 | 17/77 (**22%**) | 11/37 (29%) |
+  | `ring-6` | 644 | 122/181 (68%) | 52/59 (88%) |
+  | `corridor-4-stay` | 1 257 | 234/306 (76%) | 81/95 (85%) |
+  | `arbiter-3-3` | 1 222 | 61/107 (58%) | 28/39 (73%) |
+  | `arbiter-4-4` | 247 876 | 762/905 (**84%**) | 136/152 (90%) |
+
+  The locality is real and it *scales the right way* on the family
+  built to grow: holding the arbiter at two clients and stretching the
+  deadline from 2 to 16 leaves the cone flat in absolute size (26 → 17
+  clauses) while the formula doubles, so the share falls from 65% to
+  22%. That is the signature you want.
+
+  It is on the wrong axis. The share is highest exactly where the check
+  is expensive — 84% on `arbiter-4-4`, the family that costs two
+  minutes and 248 000 complete checks, and 76% and 68% on the corridor
+  and the ring. The instances where the cone is small are the ones that
+  solve in 9 ms. Scoping would trim a sixth of the clause database on
+  the instances that need help, and to *realize* the trim the check
+  solver would have to be rebuilt per query, which is the
+  non-incremental path that was already measured slower. So: not
+  implemented. The measurement stays behind `probe`, because the
+  trend is worth re-testing on a family with genuinely independent
+  subsystems — the games here are all one connected fixpoint, which is
+  precisely why everything is in everyone's cone.
+
+  Both cheap routes are now closed, and with them the whole "make the
+  check cheaper" family except one: asking for **fewer** checks by
+  determinizing optimistically and repairing on violation, the way CDCL
+  commits to a decision and lets propagation find the contradiction.
+  That is the one idea left that changes the *search* rather than the
+  query, and it is the one the two closed experiments both point at —
+  the corridor result says a conflict found under bias is worth less
+  than one found freely, and the cone result says the query cannot be
+  made local. Neither says anything against asking for the conflict
+  later, or not at all.
 
   So the item is not "build a stronger filter", which was the reading
   the call counts invited. It is either making the *positive* check

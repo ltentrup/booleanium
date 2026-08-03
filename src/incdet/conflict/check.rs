@@ -34,6 +34,20 @@ use derivative::Derivative;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{debug, trace};
 
+/// How many conflicting universal assignments to remember as hints.
+pub(crate) const RECENT_CONFLICTS: usize = 16;
+
+/// How many of them to try as assumptions before searching freely. The
+/// hint is sound in one direction only — a model found under it is a
+/// real conflict, an unsatisfiable answer says nothing — so every miss
+/// is paid on top of the full query, and the budget is what keeps that
+/// bounded.
+const HINT_TRIES: usize = 1;
+
+/// Whether to pin only the universals the checked variable's own
+/// implications mention, rather than the whole remembered assignment.
+const HINT_LOCAL: bool = true;
+
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub(crate) struct ConflictCheck<S: SatSolver> {
@@ -192,10 +206,18 @@ impl IncDet {
         self.stats.skolem.global_conflict_checks += 1;
         self.stats.skolem.check_assumptions += self.conflict_check.assumptions.len() as u64;
         #[cfg(feature = "probe")]
-        let witnessed = self.conflict_witnessed(var);
-        #[cfg(feature = "probe")]
         {
-            self.stats.skolem.simulation_tries += 1;
+            use crate::probe;
+            let (clauses, vars, root) = self.check_cone(var);
+            probe::add(&probe::CONE_SAMPLES, 1);
+            probe::add(&probe::CONE_CLAUSES, clauses as u64);
+            probe::add(&probe::CONE_VARS, vars as u64);
+            probe::add(&probe::CONE_ROOT_CLAUSES, root as u64);
+            probe::add(
+                &probe::DETERMINIZED_CLAUSES,
+                self.iter_implication_clauses().collect::<HashSet<_>>().len() as u64,
+            );
+            probe::add(&probe::DETERMINIZED_VARS, self.trail.iter().count() as u64);
         }
         #[cfg(feature = "probe")]
         let functional = self.is_functional(var);
@@ -215,17 +237,6 @@ impl IncDet {
         if functional {
             self.stats.skolem.functional_check_time += elapsed;
         }
-        // a remembered assignment claiming a conflict is only *right*
-        // when the solver agrees: it was consistent when it was
-        // recorded, and later determinations may have invalidated it
-        #[cfg(feature = "probe")]
-        if witnessed {
-            if checked.is_some() {
-                self.stats.skolem.simulation_hits += 1;
-            } else {
-                self.stats.skolem.simulation_false += 1;
-            }
-        }
         if checked.is_none() {
             self.stats.skolem.global_check_negative_time += elapsed;
         }
@@ -234,14 +245,31 @@ impl IncDet {
         assignment.remove(&Lit::positive(var));
         assignment.remove(&Lit::negative(var));
         self.stats.global.conflicts += 1;
-        #[cfg(feature = "probe")]
-        {
-            if self.recent_conflicts.len() == 16 {
-                self.recent_conflicts.pop_front();
-            }
-            self.recent_conflicts.push_back(assignment.clone());
-        }
+        self.remember_conflict(&assignment);
         Some(assignment)
+    }
+
+    /// Records the universal part of a conflicting assignment as a hint
+    /// for the next checks. Only the universals are kept: they are the
+    /// free inputs of the query, and pinning them lets the determined
+    /// functions propagate the rest, so the hint stays useful even when
+    /// the existential part has moved since.
+    fn remember_conflict(&mut self, assignment: &HashSet<Lit>) {
+        if !self.options.conflict_hints {
+            return;
+        }
+        let universals: Vec<Lit> = assignment
+            .iter()
+            .copied()
+            .filter(|l| self.vars[l.var()].is_universal(&self.prefix))
+            .collect();
+        if universals.is_empty() {
+            return;
+        }
+        if self.recent_conflicts.len() == RECENT_CONFLICTS {
+            self.recent_conflicts.pop_front();
+        }
+        self.recent_conflicts.push_back(universals);
     }
 
     /// Syntactic over-approximation of the conflict check: ignoring all
@@ -274,6 +302,39 @@ impl IncDet {
         false
     }
 
+    /// The cone of influence of a conflict check on `var`: the
+    /// implication clauses the query can actually depend on — those of
+    /// `var`, closed under the variables they mention — against the
+    /// whole determinized function set the check solver carries.
+    ///
+    /// Returns `(cone clauses, cone variables, root-level cone clauses)`.
+    #[cfg(feature = "probe")]
+    fn check_cone(&self, var: Var) -> (usize, usize, usize) {
+        let mut seen: HashSet<Var> = HashSet::from([var]);
+        let mut clauses: HashSet<ClauseId> = HashSet::new();
+        let mut root = 0;
+        let mut queue = vec![var];
+        while let Some(v) = queue.pop() {
+            let at_root = self.dec_lvls[v].is_some_and(DecLvl::is_root);
+            for lit in [Lit::positive(v), Lit::negative(v)] {
+                for cid in self.skolem[lit].implications() {
+                    if !clauses.insert(cid) {
+                        continue;
+                    }
+                    if at_root {
+                        root += 1;
+                    }
+                    for &l in self.allocator[cid].iter() {
+                        if seen.insert(l.var()) {
+                            queue.push(l.var());
+                        }
+                    }
+                }
+            }
+        }
+        (clauses.len(), seen.len(), root)
+    }
+
     /// Whether the implication clauses of `var` are a two-sided
     /// *definition* — the classic gate pattern, `x <-> AND(l..)` or its
     /// dual — rather than an incidental set a propagation happened to
@@ -293,29 +354,6 @@ impl IncDet {
     /// `probe` so the measurement can be repeated, and not in the hot
     /// path, where it would cost an allocation per candidate to learn
     /// nothing.
-    /// Whether a remembered assignment already witnesses a conflict on
-    /// `var`: some implication of each polarity fires under it.
-    ///
-    /// The cheap half of "simulate before you solve" — the samples are
-    /// previous conflicting assignments rather than random ones, on the
-    /// guess that conflicts cluster. Conservative: a clause whose
-    /// literals the assignment does not mention counts as not firing,
-    /// so a hit is always real and the rate is a lower bound.
-    #[cfg(feature = "probe")]
-    fn conflict_witnessed(&self, var: Var) -> bool {
-        let fires = |assignment: &HashSet<Lit>, lit: Lit| {
-            self.skolem[lit].implications().any(|cid| {
-                self.allocator[cid]
-                    .iter()
-                    .filter(|l| l.var() != var)
-                    .all(|&l| assignment.contains(&!l))
-            })
-        };
-        self.recent_conflicts
-            .iter()
-            .any(|a| fires(a, Lit::positive(var)) && fires(a, Lit::negative(var)))
-    }
-
     #[cfg(feature = "probe")]
     fn is_functional(&self, var: Var) -> bool {
         let side = |lit: Lit| -> Vec<Vec<Lit>> {
@@ -504,12 +542,85 @@ impl IncDet {
             }
         }
         assumptions.extend(guard);
+        // Conflicts cluster, so before searching freely, try the
+        // universal assignments the last checks conflicted on: pinning
+        // them only *restricts* the query, so a model found under them
+        // is a conflict of `var` like any other, and the determined
+        // functions propagate the rest of the assignment. A miss costs
+        // one extra solve, which is why the budget is small.
+        if self.options.conflict_hints {
+            if let Some(result) = self.try_conflict_hints(var, &assumptions) {
+                return Some(result);
+            }
+        }
         // if the formula is satisfiable, there is a conflict
         let result = self.conflict_check.solve(&assumptions)?;
         let assign =
             result.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ");
         debug!("conflicting assignment: {}", assign);
         Some(result)
+    }
+
+    /// Tries the remembered conflicting universal assignments as extra
+    /// assumptions, newest first, and returns the first model found.
+    ///
+    /// Sound in one direction: the assumptions only restrict the query,
+    /// so satisfiability under them is satisfiability of the query, and
+    /// unsatisfiability under them says nothing — the caller falls back
+    /// to the unrestricted solve.
+    fn try_conflict_hints(
+        &mut self,
+        var: Var,
+        assumptions: &[<ConflictSolver as SatSolver>::Lit],
+    ) -> Option<HashSet<Lit>> {
+        // Pinning the *whole* remembered assignment asks whether the
+        // very assignment the search just resolved conflicts again,
+        // which it essentially never does. Only the universals `var`'s
+        // own implications mention are pinned, so the hint steers the
+        // local decisions and leaves the rest of the space open.
+        let local: HashSet<Var> = if HINT_LOCAL {
+            [Lit::positive(var), Lit::negative(var)]
+                .into_iter()
+                .flat_map(|lit| self.skolem[lit].implications())
+                .flat_map(|cid| self.allocator[cid].iter().map(|l| l.var()).collect::<Vec<_>>())
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        for index in (0..self.recent_conflicts.len()).rev().take(HINT_TRIES) {
+            #[cfg(feature = "probe")]
+            let started = std::time::Instant::now();
+            // taken out and put back so the borrow checker sees no
+            // overlap with the solver the hint is handed to
+            let hint = std::mem::take(&mut self.recent_conflicts[index]);
+            let mut restricted = assumptions.to_vec();
+            restricted.extend(
+                hint.iter()
+                    .filter(|l| !HINT_LOCAL || local.contains(&l.var()))
+                    .map(|&l| self.conflict_check.sat_solver.lookup(l)),
+            );
+            if restricted.len() == assumptions.len() {
+                // nothing local to pin: the hint would repeat the query
+                self.recent_conflicts[index] = hint;
+                continue;
+            }
+            let result = self.conflict_check.solve(&restricted);
+            self.recent_conflicts[index] = hint;
+            #[cfg(feature = "probe")]
+            {
+                use crate::probe;
+                probe::add(&probe::HINT_TRIES, 1);
+                let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                probe::add(&probe::HINT_NANOS, nanos);
+                if result.is_some() {
+                    probe::add(&probe::HINT_HITS, 1);
+                }
+            }
+            if let Some(model) = result {
+                return Some(model);
+            }
+        }
+        None
     }
 
     fn _is_conflicted<S: SatSolver>(&self, var: Var, exact: bool) -> Option<HashSet<Lit>> {

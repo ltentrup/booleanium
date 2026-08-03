@@ -56,7 +56,7 @@ mod fuzz {
         let expected = qcnf.brute_force();
         for constant_propagation in [false, true] {
             for incremental_conflict_check in [false, true] {
-                for flags in 0..16 {
+                for flags in 0..32 {
                     let options = Options {
                         constant_propagation,
                         incremental_conflict_check,
@@ -64,6 +64,7 @@ mod fuzz {
                         restarts: flags & 2 != 0,
                         cegar: flags & 4 != 0,
                         case_splits: flags & 8 != 0,
+                        conflict_hints: flags & 16 != 0,
                         // split almost immediately to exercise the machinery
                         case_split_threshold: 2,
                         proof: false,

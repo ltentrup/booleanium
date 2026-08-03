@@ -600,6 +600,16 @@ defaults — recorded here so they are not retried naively:
   waves touch most variables' implication sets — and skipping solver calls
   perturbs the incremental solver state enough that the search got slower
   on balance.
+* **Conflict hints** (`Options::conflict_hints`, kept but off by
+  default): re-try the universal values a recent conflict came back
+  with, pinned as assumptions, before searching freely — sound in one
+  direction, since assumptions only restrict the query. The hint is
+  right 0–12% of the time, because conflict analysis and CEGAR have
+  just made that very assignment impossible, and a hit is *also* a
+  loss: the model found under a pin is more constrained, so it
+  generalizes to a worse cube. 2.5x slower on `corridor-4-stay`,
+  neutral elsewhere. Covered by the differential option sweep so the
+  path cannot rot into an unsound one.
 * **Luby restarts** (`Options::restarts`, kept but off by default): on the
   random suite restarts lost about 2x in aggregate at both base intervals
   100 and 500. Unlike in a SAT solver, a restart discards the level-tagged
@@ -613,9 +623,15 @@ Remaining performance work:
   global checks; investigate stronger cheap filters (e.g. incorporating
   determined constants/functions of premise variables, or caching
   compatible-pair witnesses across checks of the same variable).
-* **Cone-of-influence reduction** for the rebuilt (non-incremental) global
-  check: only clauses of variables in the transitive premise cone of the
-  checked variable are relevant.
+* **Cone-of-influence reduction — measured and rejected**: only clauses
+  of variables in the transitive premise cone of the checked variable
+  are relevant, but the cone is 56–84% of the determinized formula on
+  every family where the check is expensive (84% on `arbiter-4-4`, 76%
+  on `corridor-4-stay`). It does shrink with formula size where the
+  formula grows without the game changing — 65% → 22% across
+  `arbiter-2-2` … `arbiter-2-16` — but those instances solve in
+  milliseconds. See `RESEARCH.md`; the probe is `check_cone`, behind
+  the `probe` feature.
 * **Watch bookkeeping**: `propagate_function` scans watch lists to find and
   move watched literals; storing the two watched literals per clause would
   make this O(1). Not measurable on current benchmarks, worth revisiting
