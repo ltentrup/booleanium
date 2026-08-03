@@ -1741,14 +1741,55 @@ that earns its place per-instance rather than as the trunk.
   engineering it buys that with — incremental maintenance across
   backtracking, plus a reordering strategy — is not small.
 
-  The one reading of these numbers that *is* encouraging is the growth
-  shape rather than the level. Where the BDDs fit they often fit
-  comfortably and grow linearly in the instance parameter
+  The one reading of these numbers that looked encouraging was the
+  growth *shape* rather than the level: where the BDDs fit they often
+  grew linearly in the instance parameter
   (`small-dyn-partition-fixpoint-k`, `small-bug1-fixpoint-k`), which is
-  the profile under which a budget rarely trips and the fallback stays
-  rare. Whether that is a family artifact or a property of fixpoint
-  instances generally is not settled by 63 data points, and it is the
-  question a follow-up should ask.
+  the profile under which a budget rarely trips. That was posed here as
+  an open question — family artifact, or a property of fixpoint
+  instances? — and it has now been answered by sweeping **all 86
+  `*fixpoint*` instances of QBFEVAL'17**, sixteen families, at the same
+  five-second budget.
+
+  **It is a family artifact, and worse, a selection effect.**
+
+  | family | instances | with data | fit | blew | peak by depth |
+  |---|---|---|---|---|---|
+  | `small-bug1-fixpoint` | 7 | 7 | **7** | 0 | 120, 172, 236, 298, 452, 538, 635 |
+  | `small-dyn-partition-fixpoint` | 9 | 9 | **9** | 0 | 2 061, 4 079, 6 110, 8 154, 10 182, 12 230, 14 285, 18 467, 20 523 |
+  | `ethernet-fixpoint` | 4 | 1 | 0 | 1 | blows at depth 1 |
+  | `sdlx-fixpoint` | 9 | 1 | 0 | 1 | blows at depth 1 |
+  | `usb-phy-fixpoint` | 4 | 1 | 0 | 1 | blows at depth 1 |
+  | `AR`, `cache-coherence-2/3`, `itc-b13`, `pi-bus`, `small-equiv`, `small-pipeline`, `small-seq`, `small-swap1`, `small-swap2`, `small-synabs` | 53 | **0** | — | — | never finishes |
+
+  Only **19 of the 86 instances produce any data at all**, and 16 of
+  those 19 are the two fitting families. Exactly **two of sixteen**
+  families show the encouraging profile, and they are two of the very
+  few that solve fast enough to be measured. Fifty-three instances
+  across ten families never finish inside the budget, so they are
+  evidence of nothing. Every family that *does* finish and is not one
+  of those two blows a million nodes at its **smallest** depth —
+  depth 1, the easiest instance the family has. (In the earlier
+  whole-corpus run, `cache-coherence-2/3-fixpoint` and
+  `ethernet-fixpoint-2` also reported, and also blew the budget.)
+
+  So the linear growth is not a property of fixpoint instances; it is a
+  property of `small-bug1` and `small-dyn-partition`, and what selects
+  them is the same thing that keeps their BDDs small. It is the
+  anti-correlation again, now visible *within* the fixpoint
+  subpopulation rather than across the corpus: the instances whose
+  state a BDD can hold are the instances the solver finishes in
+  milliseconds.
+
+  (Both growth sequences reproduce exactly — 120…635 and 2 061…20 523 —
+  across two independent runs on different container instances, so the
+  measurement is stable even though its conclusion is negative.)
+
+  That closes the last encouraging reading. The verdict on BDDs for the
+  conflict check is unqualified: **not a replacement, and not worth
+  building as an accelerator either**, because the population where the
+  budget would hold is the population where the check was never the
+  problem.
 
   The region result stands on its own and is recorded above, but it
   belongs to the RQ5 track and answers a different question.

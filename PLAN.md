@@ -626,8 +626,16 @@ defaults — recorded here so they are not retried naively:
   failures are arithmetic (`add20y`, `rankfunc38_*_64`,
   `cache-coherence-*`), and on CADET they are the instances the project
   spent its time on (`adder2` at 169 053, `bug10rr(r)` over a million).
-  Verdict in `RESEARCH.md`: not a replacement; defensible only as a
-  budgeted accelerator, with a low and now-quantified ceiling.
+  The one encouraging reading — that where BDDs fit they grow only
+  *linearly* in the instance parameter — was then tested by sweeping
+  all 86 `*fixpoint*` instances (16 families) and does not survive:
+  only 19 instances produce data at all, 16 of them from the two
+  families that show the linear profile (`small-bug1`,
+  `small-dyn-partition`), and every other family that finishes blows a
+  million nodes at its *smallest* depth. Verdict in `RESEARCH.md`: not
+  a replacement, and not worth building as an accelerator either — the
+  population where the budget would hold is the population where the
+  check was never the problem.
 * **Conflict hints** (`Options::conflict_hints`, kept but off by
   default): re-try the universal values a recent conflict came back
   with, pinned as assumptions, before searching freely — sound in one
