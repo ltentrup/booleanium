@@ -209,6 +209,15 @@ pub struct IncDet {
     /// that no extension has an existential response (valid for prefixes
     /// with the universal block first)
     unsat_witness: Option<Vec<Lit>>,
+    /// The assignments the last few conflict checks came back with.
+    ///
+    /// A probe for whether conflicts *cluster*: if the assignment that
+    /// conflicted one variable also conflicts the next, the expensive
+    /// half of the check — the calls that find a conflict, at 7x the
+    /// cost of the ones that do not — could be answered by evaluation
+    /// instead of search.
+    #[cfg(feature = "probe")]
+    recent_conflicts: std::collections::VecDeque<HashSet<Lit>>,
     /// the QRAT proof log; `Some` iff [`Options::proof`] is set
     proof_log: Option<crate::qrat::ProofLog>,
     stats: Statistics,

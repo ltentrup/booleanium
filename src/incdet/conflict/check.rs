@@ -192,6 +192,12 @@ impl IncDet {
         self.stats.skolem.global_conflict_checks += 1;
         self.stats.skolem.check_assumptions += self.conflict_check.assumptions.len() as u64;
         #[cfg(feature = "probe")]
+        let witnessed = self.conflict_witnessed(var);
+        #[cfg(feature = "probe")]
+        {
+            self.stats.skolem.simulation_tries += 1;
+        }
+        #[cfg(feature = "probe")]
         let functional = self.is_functional(var);
         #[cfg(feature = "probe")]
         if functional {
@@ -209,6 +215,17 @@ impl IncDet {
         if functional {
             self.stats.skolem.functional_check_time += elapsed;
         }
+        // a remembered assignment claiming a conflict is only *right*
+        // when the solver agrees: it was consistent when it was
+        // recorded, and later determinations may have invalidated it
+        #[cfg(feature = "probe")]
+        if witnessed {
+            if checked.is_some() {
+                self.stats.skolem.simulation_hits += 1;
+            } else {
+                self.stats.skolem.simulation_false += 1;
+            }
+        }
         if checked.is_none() {
             self.stats.skolem.global_check_negative_time += elapsed;
         }
@@ -217,6 +234,13 @@ impl IncDet {
         assignment.remove(&Lit::positive(var));
         assignment.remove(&Lit::negative(var));
         self.stats.global.conflicts += 1;
+        #[cfg(feature = "probe")]
+        {
+            if self.recent_conflicts.len() == 16 {
+                self.recent_conflicts.pop_front();
+            }
+            self.recent_conflicts.push_back(assignment.clone());
+        }
         Some(assignment)
     }
 
@@ -269,6 +293,29 @@ impl IncDet {
     /// `probe` so the measurement can be repeated, and not in the hot
     /// path, where it would cost an allocation per candidate to learn
     /// nothing.
+    /// Whether a remembered assignment already witnesses a conflict on
+    /// `var`: some implication of each polarity fires under it.
+    ///
+    /// The cheap half of "simulate before you solve" — the samples are
+    /// previous conflicting assignments rather than random ones, on the
+    /// guess that conflicts cluster. Conservative: a clause whose
+    /// literals the assignment does not mention counts as not firing,
+    /// so a hit is always real and the rate is a lower bound.
+    #[cfg(feature = "probe")]
+    fn conflict_witnessed(&self, var: Var) -> bool {
+        let fires = |assignment: &HashSet<Lit>, lit: Lit| {
+            self.skolem[lit].implications().any(|cid| {
+                self.allocator[cid]
+                    .iter()
+                    .filter(|l| l.var() != var)
+                    .all(|&l| assignment.contains(&!l))
+            })
+        };
+        self.recent_conflicts
+            .iter()
+            .any(|a| fires(a, Lit::positive(var)) && fires(a, Lit::negative(var)))
+    }
+
     #[cfg(feature = "probe")]
     fn is_functional(&self, var: Var) -> bool {
         let side = |lit: Lit| -> Vec<Vec<Lit>> {

@@ -1294,6 +1294,38 @@ that earns its place per-instance rather than as the trunk.
   and is in fact near-complete on the population it can decide
   syntactically.
 
+  **Do conflicts cluster? Yes, but not enough to answer with.** The
+  next idea was to find conflicts by evaluation instead of search,
+  since the expensive half of the check is exactly model-finding. The
+  cheapest version of that uses previous conflicting assignments as the
+  samples, on the guess that conflicts cluster. Measured — remembering
+  the last 16 and asking whether any of them already makes both
+  polarities of the candidate fire:
+
+  | family | conflicts | witness right | wrong | recall | precision |
+  |---|---|---|---|---|---|
+  | `corridor-4-stay` | 184 | 122 | 475 | **66%** | 20% |
+  | `ring-6` | 58 | 44 | 360 | **76%** | 11% |
+  | `arbiter-3-3` | 182 | 91 | 477 | **50%** | 16% |
+
+  **The clustering is real**: a remembered assignment witnesses half to
+  three quarters of all conflicts. But the precision is 11–20%, four to
+  nine false claims per true one, and the reason is instructive — the
+  test asks only whether both polarities *fire* under the assignment,
+  not whether the assignment is still *consistent* with everything the
+  solver has determined since it was recorded. Making it sound means
+  checking consistency against the current Skolem functions, which is
+  the propagation the SAT call was going to do anyway.
+
+  So the remembered assignment is a **hint, not an answer**. The usable
+  form is to seed the check solver's decision polarities from it rather
+  than to trust it: a hint that is right 50–76% of the time costs
+  nothing when wrong and points model-finding straight at the conflict
+  when right, which is where 53% of the check time sits. That needs
+  phase-setting on the SAT backend, which varisat does not expose
+  today — so it is a backend question before it is an algorithm one.
+  The probe stays behind the `probe` feature.
+
   That closes off the cheapest route and leaves the harder ones:
   finding conflicts by *simulation* before falling back to SAT (the
   Skolem functions are already circuits, and model-finding is what

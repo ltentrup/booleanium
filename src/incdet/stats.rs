@@ -56,6 +56,15 @@ pub(crate) struct SkolemStats {
     /// candidates whose implications are a two-sided definition, and how
     /// many of those survive the cheap filter (measured: none). Behind
     /// `probe`; see `conflict::check::is_functional`.
+    /// complete checks, and how many a remembered conflicting
+    /// assignment would already have answered
+    #[cfg(feature = "probe")]
+    pub(crate) simulation_tries: u32,
+    #[cfg(feature = "probe")]
+    pub(crate) simulation_hits: u32,
+    /// witnessed a conflict the solver then said was not there
+    #[cfg(feature = "probe")]
+    pub(crate) simulation_false: u32,
     #[cfg(feature = "probe")]
     pub(crate) functional_candidates: u32,
     #[cfg(feature = "probe")]
