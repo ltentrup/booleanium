@@ -614,6 +614,17 @@ defaults — recorded here so they are not retried naively:
   in the process: vacuous definability on unsatisfiable matrices, and
   `initial_deterministic` silently reading 0 for instances that refute
   before the first fixpoint (it now returns `Option`).
+* **Ceiling on the CADET suite** (`--definability N`): on the 73
+  two-block instances reaching a fixpoint, propagation is at the
+  definability ceiling on 40 and within 10pp on 49; 18 have a >30pp
+  gap but 16 of those are hand-reduced regression fixtures. At >=100
+  existentials only `16966_UNSAT` (96% definable, 0% recovered) and
+  `6061_SAT` (67% vs 6%) remain — real counterexamples to "detection is
+  complete", and the case for a reconstructing preprocessor. Fixed
+  three instrument defects on the way: `initial_deterministic` counted
+  trail length (up to 350% of existentials), the denominator omitted
+  free variables, and >2-block instances were being compared against a
+  sub-formula's fixpoint.
 * **Deep determinacy — measured and rejected**
   (`Options::deep_determinacy`, default off): the local determinacy
   check treats the premise variables of an implication clause as free,

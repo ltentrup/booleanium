@@ -226,6 +226,62 @@ Open questions:
   families where the count is dramatically low the count is *correct* —
   which is why forcing it up (`deep_determinacy`, above) made things
   worse rather than better.
+* **The ceiling on real instances, and the correction it forces.** The
+  measurement above ran on generated families and concluded that
+  detection is near-complete. On the **CADET suite** — real QDIMACS,
+  the corpus this solver is tuned against — that conclusion does not
+  survive unqualified. `QCNF::definable_from_universals` (CLI
+  `--definability N`, sampling at most `N` candidates) against the
+  existentials propagation recovers, on the 73 two-block instances that
+  reach a fixpoint:
+
+  | population | n | median gap | at the ceiling | within 10pp | gap > 30pp |
+  |---|---|---|---|---|---|
+  | all | 73 | **0pp** | 40 | 49 | 18 |
+  | ≥ 50 existentials | 16 | 9pp | 5 | 9 | 4 |
+  | ≥ 100 existentials | 13 | 5pp | 5 | 9 | **2** |
+
+  Read the first row alone and a quarter of the corpus leaves 30+
+  points of definable structure unrecovered. Read the size breakdown
+  and 16 of those 18 instances are **hand-reduced regression
+  fixtures** — `test_sat`, `example`, `fuzz*_reduced`, the minimal
+  inputs `qbfdd.py` produced while shrinking a bug — not workloads.
+  At real size only two remain, and they are worth naming because they
+  are the counterexample to "detection is complete":
+
+  * `16966_UNSAT` — 260 existentials, **96% definable, 0% recovered**;
+  * `6061_SAT` — 157 existentials, 67% definable, 6% recovered.
+
+  So the honest statement is narrower than either extreme. Propagation
+  is at the ceiling on the majority of real instances and on *every*
+  structured generated family, which is why strengthening the check
+  paid nothing. But there exist real, non-trivial instances where the
+  matrix determines almost everything and propagation finds none of
+  it — and those are exactly the instances a reconstructing
+  preprocessor is for. Two out of thirteen is not a mandate; it is a
+  reason to keep the direction open with a measurement attached to it
+  rather than an intuition.
+
+  Three instrument defects had to be fixed to get here, all of which
+  had been silently inflating the recovered fraction:
+
+  * `initial_deterministic` reported **trail length**, which also
+    counts assumed universals and — on deep prefixes routed through
+    the alternation front-end — variables of an *expanded sub-formula*.
+    Read as a fraction of existentials it reached **350%**. It now
+    counts existentials on the trail.
+  * The denominator counted only *prefix* existentials, while the
+    solver also determinizes **free variables** (treated as outermost
+    existentials, absent from the prefix). `bug3` reported 80
+    determinized against 25. The candidate set is now every
+    non-universal variable of the matrix.
+  * Instances with more than two blocks are not comparable at all,
+    since the logged fixpoint belongs to a sub-formula; they are
+    excluded rather than counted.
+
+  The RQ1 survey's fractions were computed with the first of these, so
+  its bucket boundaries are approximate — the monotone trend it reports
+  is not in doubt, the absolute percentages are.
 * **Preprocessing, and the tension it has with this thesis — open.**
   Bloqqer and HQSpre are not optional in practice; a large part of
   QDIMACS-level performance comes from them, and being fast on QDIMACS

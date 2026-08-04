@@ -13,6 +13,100 @@ pub struct QCNF {
 }
 
 impl QCNF {
+    /// How many existential variables the matrix *determines* from the
+    /// universals — the ceiling on what determinization could ever
+    /// recover, whatever the detector or the encoding.
+    ///
+    /// A variable is definable from the universals iff no two models
+    /// agreeing on every universal disagree on it (Padoa). Two copies
+    /// of the matrix sharing the universals decide it: if
+    /// `F(U,E) ∧ F(U,E′) ∧ v ∧ ¬v′` is unsatisfiable then `v` is a
+    /// function of the universals, which is exactly the condition for
+    /// determinizing it at the root.
+    ///
+    /// Returns `(definable, sampled, total existentials)`, or `None`
+    /// when the matrix itself is unsatisfiable — every variable is then
+    /// vacuously definable, since no two models can disagree when there
+    /// are none, and the count would measure nothing. At most `limit`
+    /// variables are sampled (evenly spread), so the answer is a
+    /// proportion on instances too large to ask about exhaustively.
+    #[must_use]
+    pub fn definable_from_universals(&self, limit: usize) -> Option<(usize, usize, usize)> {
+        use crate::sat::{varisat::Varisat, SatSolver};
+
+        let universals: std::collections::HashSet<Var> = self
+            .prefix
+            .iter()
+            .filter(|(q, _)| *q == QuantTy::Forall)
+            .flat_map(|(_, vars)| vars.iter().copied())
+            .collect();
+        // Everything that is not universal, which is what the solver
+        // determinizes: the prefix existentials *and* the free
+        // variables, which are treated as outermost existentials and
+        // are absent from the prefix. Counting only the prefix made the
+        // denominator too small and the recovered fraction exceed 100%.
+        let mut existentials: Vec<Var> = self
+            .matrix
+            .iter()
+            .flatten()
+            .map(|l| l.var())
+            .filter(|v| !universals.contains(v))
+            .collect();
+        existentials.sort_unstable();
+        existentials.dedup();
+        if existentials.is_empty() {
+            return Some((0, 0, 0));
+        }
+        let max_var = self
+            .matrix
+            .iter()
+            .flatten()
+            .map(|l| l.var().to_dimacs())
+            .chain(universals.iter().chain(existentials.iter()).map(|v| v.to_dimacs()))
+            .max()
+            .unwrap_or(0);
+
+        // the primed copy renames everything that is not universal
+        let prime = |l: Lit| -> i32 {
+            let (var, sign) = (l.var().to_dimacs(), if l.is_positive() { 1 } else { -1 });
+            sign * if universals.contains(&l.var()) { var } else { var + max_var }
+        };
+
+        let mut plain = Varisat::default();
+        let mut doubled = Varisat::default();
+        for solver in [&mut plain, &mut doubled] {
+            solver.add_variables(2 * max_var as usize + 2);
+        }
+        let encode = |solver: &mut Varisat, lit: i32| -> <Varisat as SatSolver>::Lit {
+            let _ = solver;
+            <Varisat as SatSolver>::Lit::from_dimacs(isize::try_from(lit).expect("fits"))
+        };
+        for clause in &self.matrix {
+            let original: Vec<_> =
+                clause.iter().map(|&l| encode(&mut plain, l.to_dimacs())).collect();
+            plain.add_clause(&original);
+            let copy: Vec<_> = clause.iter().map(|&l| encode(&mut plain, l.to_dimacs())).collect();
+            doubled.add_clause(&copy);
+            let primed: Vec<_> = clause.iter().map(|&l| encode(&mut plain, prime(l))).collect();
+            doubled.add_clause(&primed);
+        }
+        if !plain.solve().ok()? {
+            return None;
+        }
+        let total = existentials.len();
+        let step = ((total + limit.max(1) - 1) / limit.max(1)).max(1);
+        let sample: Vec<Var> = existentials.iter().copied().step_by(step).collect();
+        let mut definable = 0;
+        for var in &sample {
+            let positive = encode(&mut plain, var.to_dimacs());
+            let negated = encode(&mut plain, -prime(Lit::positive(*var)));
+            if !doubled.solve_with_assumptions(&[positive, negated]).ok()? {
+                definable += 1;
+            }
+        }
+        Some((definable, sample.len(), total))
+    }
+
     #[must_use]
     pub fn new(prefix: &[(QuantTy, &[u32])], matrix: &[&[i32]]) -> Self {
         let prefix = prefix

@@ -1417,7 +1417,19 @@ impl IncDet {
                 continue;
             }
             if initial.take().is_some() {
-                self.stats.global.initial_deterministic = self.trail.len();
+                // *Existentials* determinized, not trail length: the
+                // trail also carries assumed universals and, on deep
+                // prefixes, variables of expanded sub-formulas, so the
+                // raw length is not comparable to the existential count
+                // — read as a fraction it exceeded 100%.
+                self.stats.global.initial_deterministic = self
+                    .trail
+                    .iter()
+                    .filter(|l| {
+                        let data = &self.vars[l.var()];
+                        data.scope.is_some() && data.is_existential(&self.prefix)
+                    })
+                    .count();
                 self.stats.global.initial_fixpoint = true;
                 info!("number of initial deterministic vars: {}", self.trail.len());
             }

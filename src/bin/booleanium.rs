@@ -51,6 +51,13 @@ struct Args {
     #[arg(long)]
     deep_determinacy: bool,
 
+    /// Report how many existentials the matrix determines from the
+    /// universals (Padoa) against how many propagation recovers: the
+    /// ceiling on determinization, and the gap to it. Samples at most
+    /// this many existentials; 0 disables.
+    #[arg(long, default_value_t = 0)]
+    definability: usize,
+
     /// Verify the Skolem functions of a satisfiable result.
     #[arg(long)]
     certify: bool,
@@ -248,6 +255,15 @@ fn run() -> Result<SolverResult> {
         let reader = Cursor::new(&contents);
         if let Err(err) = QdimacsParser::new(reader).parse_into(&mut qcnf) {
             Err(ExtendedParseError { source_code: contents, related: vec![err] })?;
+        }
+        if args.definability > 0 {
+            match qcnf.definable_from_universals(args.definability) {
+                None => println!("definability: vacuous (the matrix is unsatisfiable)"),
+                Some((definable, sampled, total)) => println!(
+                    "definability: {definable}/{sampled} sampled definable from the universals \
+                     ({total} existentials)"
+                ),
+            }
         }
         let blocks = qcnf.prefix.iter().filter(|(_, vars)| !vars.is_empty()).count();
         if blocks > 2 {
