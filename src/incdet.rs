@@ -99,6 +99,17 @@ pub struct Options {
     /// propagation, and this cost outweighed the variance reduction on all
     /// benchmarked instance families.
     pub restarts: bool,
+    /// When the local determinacy check gives up on a variable, re-ask
+    /// against the Skolem functions already determined.
+    ///
+    /// The local check is incomplete: it treats the premise variables
+    /// of an implication clause as free, when the determined ones are
+    /// functions of the universals. Closing that gap determinizes more
+    /// variables up front, and the fraction determinized up front is
+    /// the strongest predictor of solvability measured on QBFEVAL'17
+    /// (median 45% on solved instances against 6% on timeouts) — at
+    /// the price of a SAT call per variable the local check rejects.
+    pub deep_determinacy: bool,
     /// Before searching for a conflict freely, re-try the universal
     /// values a recent conflict came back with, pinned as assumptions.
     ///
@@ -119,6 +130,7 @@ impl Default for Options {
             case_split_threshold: 5000,
             proof: false,
             restarts: false,
+            deep_determinacy: false,
             conflict_hints: false,
         }
     }
@@ -1620,6 +1632,27 @@ impl IncDet {
         None
     }
 
+    /// Whether the strengthened determinacy check is worth asking.
+    ///
+    /// It costs a SAT call, so it is only asked where the answer is
+    /// permanent and the payoff largest: at the root level, where a
+    /// determinized variable is never retracted and its function
+    /// becomes a premise every later check can use.
+    fn deep_determinacy_applies(&self) -> bool {
+        self.options.deep_determinacy
+            && self.options.incremental_conflict_check
+            && self.trail.decision_level().is_root()
+    }
+
+    fn is_determined_deeply(&mut self, var: Var) -> bool {
+        let determined = self.is_determined_globally(var);
+        if determined == Some(true) {
+            self.stats.skolem.deep_determinizations += 1;
+        }
+        self.stats.skolem.deep_det_checks += 1;
+        determined == Some(true)
+    }
+
     fn propagate(&mut self) -> Option<Conflict> {
         #[cfg(feature = "probe")]
         crate::probe::add(&crate::probe::WAVES, 1);
@@ -1640,7 +1673,15 @@ impl IncDet {
             match self.has_unique_consequence(var) {
                 determinacy::Determinacy::Undetermined => {
                     debug_assert!(!self.propagation.contained(var));
-                    continue;
+                    // The local check treats the premise variables as
+                    // free. The determined ones are not: they are
+                    // functions of the universals, and a gap the local
+                    // check finds may be unreachable once they are
+                    // accounted for. Re-ask against the determinized
+                    // formula before giving up.
+                    if !self.deep_determinacy_applies() || !self.is_determined_deeply(var) {
+                        continue;
+                    }
                 }
                 determinacy::Determinacy::Constant(lit) => {
                     trace!("{} is forced constant", var);

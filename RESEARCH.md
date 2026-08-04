@@ -101,6 +101,61 @@ Open questions:
   determinize less and are harder — so the number argues for
   definition-level *inputs*, not for detection being the only
   bottleneck.
+* **Is the determinacy check itself the bottleneck? Almost never —
+  and where it is, the instances are not circuits.** The survey above
+  says the determinized fraction is the strongest predictor of
+  solvability, so the obvious follow-up is whether the *check* is
+  leaving determinations on the table. It is incomplete, provably:
+  `has_unique_consequence` asks whether the implication clauses of `v`,
+  **on their own**, admit an assignment under which none of them fires,
+  and it treats the premise variables as free. The determined ones are
+  not free — they are functions of the universals — so a gap it finds
+  may be unreachable.
+
+  Closing that is a two-line change in principle: ask the same question
+  against the determinized formula, which the conflict-check solver
+  already holds. Each implication clause `C` contributes `C \ {v}`
+  ("this one does not fire"), and unsatisfiability of the conjunction
+  means `v` is forced under every universal assignment and every choice
+  of the still-open variables. Implemented as
+  `is_determined_globally` / `Options::deep_determinacy`, fuzz-verified
+  against the brute-force oracle in the option sweep, root level only.
+
+  It finds nothing on circuit-derived instances, and the reason is
+  structural rather than incidental: **the inputs of a gate are
+  independent by construction**, so the gap the local check finds is
+  genuinely reachable and the extra context adds no constraint. On
+  `parity`, `mux-tree` and `bv-add-inverse` the strengthened check is
+  never even *reached* at the root — every local check already answers
+  Deterministic or Constant. On `choice-16` and `bv-ult-choice-8` it
+  runs 33–64 times and determinizes **zero** variables.
+
+  On *clausal* instances, where premises are correlated, it does fire:
+
+  | instance | initially determinized | decisions | conflicts | time |
+  |---|---|---|---|---|
+  | `random-6-10-40-2` | 9/50 → 9/50 | 76 → **48** | 11 → **5** | 1.55 → **0.86 ms** |
+  | `random-6-10-40-6` | 6/50 → **10/50** | 93 → **41** | 9 → **7** | 1.46 → **0.95 ms** |
+  | `random-6-10-40-4` | 10/50 → 10/50 | 24 → 27 | 4 → 5 | 0.61 → 0.76 ms |
+
+  Two of three clausal seeds get ~1.6x faster with 37–56% fewer
+  decisions, and on one of them the predictor itself moves (6/50 →
+  10/50). The circuit families pay for checks that find nothing
+  (`choice-16` 685 → 759 decisions), though at these sizes that is
+  within search variance rather than a measured cost of the check.
+
+  **The conclusion is the useful part, and it is a negative for the
+  obvious reading of the survey.** Low determinization on hard
+  QBFEVAL instances is *not* caused by a weak determinacy check. The
+  check is already effectively complete on the structure it was built
+  for, because gate inputs are independent. What is missing on those
+  instances is the definitions themselves — destroyed by one-sided
+  encoding, or never present. That argues for definition-level input
+  and for a *reconstructing* preprocessor (HQSpre's gate detection),
+  and against spending effort on the check. Kept behind
+  `Options::deep_determinacy`, default off, since the population it
+  helps is the clausal one and the corpora to settle whether that
+  matters at scale were not available in this environment.
 * **Preprocessing, and the tension it has with this thesis — open.**
   Bloqqer and HQSpre are not optional in practice; a large part of
   QDIMACS-level performance comes from them, and being fast on QDIMACS

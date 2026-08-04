@@ -649,6 +649,57 @@ impl IncDet {
         Some(result)
     }
 
+    /// Whether `var` is determined *given the Skolem functions already
+    /// determined* — a strictly stronger question than the one
+    /// [`crate::incdet::determinacy`] asks.
+    ///
+    /// The local check tests whether the implication clauses of `var`,
+    /// on their own, leave a gap: an assignment of the premise
+    /// variables under which no implication fires. It treats those
+    /// premises as free. But the determined ones are not free, they are
+    /// *functions of the universals*, and a gap the local check finds
+    /// may not be reachable once they are taken into account. So the
+    /// local check reports "undetermined" for variables that are in
+    /// fact forced.
+    ///
+    /// The query is the same one, conjoined with the determinized
+    /// formula: for each implication clause `C` of either polarity,
+    /// `C \ {var}` says that implication does not fire, and the
+    /// conjunction of those with the functions is satisfiable exactly
+    /// when a real gap exists. Unsatisfiable means `var` is determined
+    /// under every universal assignment and every choice of the
+    /// variables that are still open, which is what registering a
+    /// Skolem function requires.
+    ///
+    /// Returns `None` when `var` has no implication clauses at all, in
+    /// which case there is nothing to be determined by.
+    pub(crate) fn is_determined_globally(&mut self, var: Var) -> Option<bool> {
+        let mut no_fire = Vec::new();
+        for lit in [Lit::positive(var), Lit::negative(var)] {
+            for cid in self.skolem[lit].implications() {
+                let clause = &self.allocator[cid];
+                let guard = self.conflict_check.sat_solver.add_variable();
+                let mut build: Vec<_> = clause
+                    .iter()
+                    .filter(|l| l.var() != var)
+                    .map(|&l| self.conflict_check.sat_solver.lookup(l))
+                    .collect();
+                if build.is_empty() {
+                    // the implication fires unconditionally; the local
+                    // check already turns this into a constant
+                    return Some(true);
+                }
+                build.push(!guard);
+                self.conflict_check.sat_solver.add_clause(&build);
+                no_fire.push(guard);
+            }
+        }
+        if no_fire.is_empty() {
+            return None;
+        }
+        Some(self.conflict_check.solve(&no_fire).is_none())
+    }
+
     /// Tries the remembered conflicting universal assignments as extra
     /// assumptions, newest first, and returns the first model found.
     ///

@@ -66,6 +66,10 @@ pub(crate) struct SkolemStats {
     /// checks: one per live decision level, so it grows with search
     /// depth and is paid on every call
     pub(crate) check_assumptions: u64,
+    /// strengthened determinacy checks run, and how many found a
+    /// variable the local check had given up on
+    pub(crate) deep_det_checks: u32,
+    pub(crate) deep_determinizations: u32,
     pub(crate) conflict_check_reboots: u32,
     pub(crate) function_propagations: u32,
     pub(crate) constant_propagations: u32,

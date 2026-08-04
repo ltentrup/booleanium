@@ -432,7 +432,11 @@ fn random_circuit(u: usize, e: usize, gates: usize, seed: u64) -> Circuit {
 const BDD_LIMIT: usize = 1_000_000;
 
 fn measure(name: &str, encoding: &str, qcnf: &QCNF) -> SolverResult {
-    let mut solver = IncDet::from_qcnf_with_options(qcnf, Options::default());
+    let mut options = Options::default();
+    if std::env::var("BENCH_DEEP_DETERMINACY").is_ok() {
+        options.deep_determinacy = true;
+    }
+    let mut solver = IncDet::from_qcnf_with_options(qcnf, options);
     let start = Instant::now();
     let result = solver.solve();
     let elapsed = start.elapsed();

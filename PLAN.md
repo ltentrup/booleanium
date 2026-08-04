@@ -602,6 +602,20 @@ defaults — recorded here so they are not retried naively:
   waves touch most variables' implication sets — and skipping solver calls
   perturbs the incremental solver state enough that the search got slower
   on balance.
+* **Deep determinacy** (`Options::deep_determinacy`, default off): the
+  local determinacy check treats the premise variables of an
+  implication clause as free, when the determined ones are functions of
+  the universals, so it reports "undetermined" for variables that are
+  forced. `is_determined_globally` re-asks against the determinized
+  formula (root level only), fuzz-verified in the option sweep. It
+  finds *nothing* on circuit-derived instances — gate inputs are
+  independent by construction, so the local check is already complete
+  there — and fires only on clausal ones, where two of three random
+  seeds get ~1.6x faster with 37-56% fewer decisions. The useful
+  conclusion is negative: low determinization on hard QBFEVAL
+  instances is not a weak-check problem, so the lever is
+  definition-level input or a reconstructing preprocessor, not the
+  check. See `RESEARCH.md`.
 * **BDDs for the conflict check — measured, not adopted** (`src/bdd.rs`,
   a minimal ROBDD package with a node budget). Carrying Skolem
   functions as BDDs over the universals makes the check a pointer

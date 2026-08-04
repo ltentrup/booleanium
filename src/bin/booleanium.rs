@@ -46,6 +46,11 @@ struct Args {
     #[arg(long)]
     restarts: bool,
 
+    /// When the local determinacy check gives up, re-ask against the
+    /// Skolem functions already determined (root level only).
+    #[arg(long)]
+    deep_determinacy: bool,
+
     /// Verify the Skolem functions of a satisfiable result.
     #[arg(long)]
     certify: bool,
@@ -80,6 +85,7 @@ impl Args {
             case_splits: !self.no_case_splits,
             case_split_threshold: self.case_split_threshold,
             restarts: self.restarts,
+            deep_determinacy: self.deep_determinacy,
             proof: self.proof.is_some(),
             ..Options::default()
         }
