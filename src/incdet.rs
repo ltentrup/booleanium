@@ -458,9 +458,16 @@ impl IncDet {
     /// The trail length at the first propagation fixpoint of the most
     /// recent search: how many variables the input structure determinized
     /// before any decision (diagnostic for encoding experiments).
+    ///
+    /// `None` when the search never reached a fixpoint — it refuted
+    /// during the first propagation — in which case the instance says
+    /// nothing about how much structure the encoding carries.
     #[must_use]
-    pub fn initial_deterministic(&self) -> usize {
-        self.stats.global.initial_deterministic
+    pub fn initial_deterministic(&self) -> Option<usize> {
+        self.stats
+            .global
+            .initial_fixpoint
+            .then_some(self.stats.global.initial_deterministic)
     }
 
     /// The number of decisions of the most recent search.
@@ -1411,6 +1418,7 @@ impl IncDet {
             }
             if initial.take().is_some() {
                 self.stats.global.initial_deterministic = self.trail.len();
+                self.stats.global.initial_fixpoint = true;
                 info!("number of initial deterministic vars: {}", self.trail.len());
             }
             if !self.query_assumptions.is_empty() {

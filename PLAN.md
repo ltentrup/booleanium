@@ -602,6 +602,18 @@ defaults — recorded here so they are not retried naively:
   waves touch most variables' implication sets — and skipping solver calls
   perturbs the incremental solver state enough that the search got slower
   on balance.
+* **Definability ceiling — measured** (`definable_from_universals`,
+  `BENCH_DEFINABILITY=1`): Padoa's criterion on two copies of the
+  matrix sharing the universals gives the ceiling on what any detector
+  or encoding could determinize. On 42 satisfiable families,
+  propagation from circuit input is *at* the ceiling on 18 and misses
+  61 variables total (1.5/family); one-sided CNF misses 205
+  (4.9/family). Every structured family has gap zero, and `choice-16`'s
+  striking 1-of-115 is its actual ceiling. The lever is the encoding,
+  losing 3.4x more than detection. Two measurement artifacts were fixed
+  in the process: vacuous definability on unsatisfiable matrices, and
+  `initial_deterministic` silently reading 0 for instances that refute
+  before the first fixpoint (it now returns `Option`).
 * **Deep determinacy — measured and rejected**
   (`Options::deep_determinacy`, default off): the local determinacy
   check treats the premise variables of an implication clause as free,

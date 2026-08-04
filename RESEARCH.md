@@ -169,6 +169,63 @@ Open questions:
   definition-level input and a *reconstructing* preprocessor. Kept
   behind `Options::deep_determinacy`, default off, as a measured
   negative rather than a tuning knob.
+* **How much structure is there to find? A ceiling, measured.** Every
+  negative above turns on the same unexamined assumption — that a low
+  determinized count means detection is failing. That is testable
+  directly. A variable is *definable* from the universals iff no two
+  models agreeing on all universals disagree on it (Padoa), which is
+  decided by one SAT call on two copies of the matrix sharing the
+  universals: `F(U,E) ∧ F(U,E′) ∧ v ∧ ¬v′` unsatisfiable. Definability
+  is exactly "ID could determinize this at the root", so it is the
+  **ceiling on what any detector, preprocessor or encoding could
+  recover** (`definable_from_universals`, `BENCH_DEFINABILITY=1`).
+
+  Two artifacts had to be excluded first, and both are worth recording
+  because both would have inflated the answer:
+
+  * an **unsatisfiable matrix** makes every variable vacuously
+    definable — no two models can disagree when there are none — so
+    those instances are reported `vacuous` rather than counted
+    (`random-6-10-40-03`, 1 of 53);
+  * `initial_deterministic` **silently read 0** for instances that
+    refute during the first propagation and never reach a fixpoint,
+    mistaking an early refutation for an absence of structure. Every
+    one of the largest apparent detection gaps was such an instance.
+    The counter now returns `Option`, and the ten affected families
+    drop out.
+
+  On the 42 satisfiable families where the question is meaningful:
+
+  | | at the ceiling | variables missed | mean per family |
+  |---|---|---|---|
+  | circuit input (QCIR) | **18 / 42** | 61 | 1.5 |
+  | one-sided CNF (PG) | — | **205** | **4.9** |
+
+  **Propagation is at the ceiling on every structured family** —
+  `parity`, `mux-tree`, `bv-add-inverse` and `choice` all have gap
+  zero. And `choice-16`, the family that determinizes a startling
+  1 of 115, is *at its ceiling*: exactly one variable in that formula
+  is definable from the universals. Nothing was being missed there;
+  the structure is not there to miss. The same for `bv-ult-choice`,
+  ceiling 3, propagation 2.
+
+  Where a gap remains it is random circuits, and it is modest — a
+  handful of variables per instance, never the whole formula.
+
+  **The lever is the encoding, and now it is quantified: one-sided CNF
+  loses 3.4x more than detection does** (205 against 61). That is the
+  RQ1 thesis with a number attached, and it also bounds what a
+  reconstructing preprocessor could be worth: recovering *everything*
+  PG threw away would buy about five variables per family here, and
+  recovering what propagation misses on top of perfect input would buy
+  1.5. Neither is the order-of-magnitude that low determinization on
+  hard instances would need.
+
+  So the honest summary of the whole determinization thread: detection
+  is close to complete, the encoding is where the loss is, and on the
+  families where the count is dramatically low the count is *correct* —
+  which is why forcing it up (`deep_determinacy`, above) made things
+  worse rather than better.
 * **Preprocessing, and the tension it has with this thesis — open.**
   Bloqqer and HQSpre are not optional in practice; a large part of
   QDIMACS-level performance comes from them, and being fast on QDIMACS

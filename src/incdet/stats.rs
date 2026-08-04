@@ -26,7 +26,14 @@ pub(crate) struct GlobalStats {
     pub(crate) decisions: u32,
     /// trail length at the first propagation fixpoint of the search:
     /// how many variables the input structure determinizes up front
+    ///
+    /// Only meaningful when the fixpoint is actually reached. An
+    /// instance that refutes during the very first propagation never
+    /// gets there, and reading the counter as "0 determinized" mistakes
+    /// an early refutation for an absence of structure — which is what
+    /// it silently did before `initial_fixpoint` was added.
     pub(crate) initial_deterministic: usize,
+    pub(crate) initial_fixpoint: bool,
     pub(crate) conflicts: u32,
     pub(crate) restarts: u32,
     pub(crate) added_clauses: u32,

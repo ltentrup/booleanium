@@ -80,6 +80,12 @@ impl Circuit {
 
     /// Two-sided Tseitin CNF: every gate is fully defined.
     fn to_two_sided(&self) -> QCNF {
+        let matrix = self.two_sided_matrix();
+        self.build(&matrix)
+    }
+
+    /// The two-sided clauses, in DIMACS literals.
+    fn two_sided_matrix(&self) -> Vec<Vec<i32>> {
         let mut matrix: Vec<Vec<i32>> = Vec::new();
         for (idx, gate) in self.gates.iter().enumerate() {
             let g = self.gate_var(idx);
@@ -109,7 +115,7 @@ impl Circuit {
             }
         }
         matrix.push(vec![self.output]);
-        self.build(&matrix)
+        matrix
     }
 
     /// One-sided Plaisted–Greenbaum CNF: each gate keeps only the
@@ -427,6 +433,72 @@ fn random_circuit(u: usize, e: usize, gates: usize, seed: u64) -> Circuit {
 
 /// Solves one encoding and reports verdict, time, and structure
 /// recovery (initially determinized variables / all existentials).
+/// How many existentials the *matrix itself* determines from the
+/// universals, by Padoa's criterion.
+///
+/// This separates the two explanations for a low initially-determinized
+/// count. Either the structure is not there — the formula genuinely
+/// leaves those variables free — or it is there and propagation does
+/// not find it. Propagation only cascades through clauses that force a
+/// value locally; definability is the semantic question, over the whole
+/// matrix at once, and it is the ceiling on what any amount of
+/// detection could recover.
+///
+/// `v` is definable from the universals iff no two models agreeing on
+/// every universal disagree on `v`. Take two copies of the matrix
+/// sharing the universal variables and renaming everything else apart,
+/// then ask for a model of the pair with `v` true in one copy and false
+/// in the other: unsatisfiable means `v` is a function of the
+/// universals.
+fn definable_from_universals(circuit: &Circuit) -> Option<usize> {
+    use varisat::{ExtendFormula, Lit as VLit, Solver};
+
+    let matrix = circuit.two_sided_matrix();
+    let inputs = circuit.inputs();
+    let total = inputs + circuit.gates.len();
+    // the primed copy renames every non-universal variable
+    let prime = |v: i32| -> i32 {
+        if v as usize <= circuit.universals {
+            v
+        } else {
+            v + i32::try_from(total).expect("variable count fits an i32")
+        }
+    };
+    let encode = |l: i32| VLit::from_dimacs(isize::try_from(l).expect("literal fits"));
+
+    let mut solver = Solver::new();
+    // A matrix with no models makes every variable vacuously definable
+    // — no two models can disagree when there are none — so the
+    // question is meaningless there and the count would be a
+    // measurement artifact rather than structure.
+    {
+        let mut plain = Solver::new();
+        for clause in &matrix {
+            plain.add_clause(&clause.iter().map(|&l| encode(l)).collect::<Vec<_>>());
+        }
+        if !plain.solve().expect("the matrix is decidable") {
+            return None;
+        }
+    }
+    for clause in &matrix {
+        let original: Vec<VLit> = clause.iter().map(|&l| encode(l)).collect();
+        solver.add_clause(&original);
+        let copy: Vec<VLit> =
+            clause.iter().map(|&l| encode(l.signum() * prime(l.abs()))).collect();
+        solver.add_clause(&copy);
+    }
+    // every existential and every gate variable is a candidate
+    Some(
+        (circuit.universals + 1..=total)
+            .filter(|&v| {
+                let v = i32::try_from(v).expect("variable fits an i32");
+                solver.assume(&[encode(v), encode(-prime(v))]);
+                !solver.solve().expect("the definability query is decidable")
+            })
+            .count(),
+    )
+}
+
 /// Node cap for the Skolem-function BDDs: past this the answer is
 /// "it blew up", which is the only answer that matters.
 const BDD_LIMIT: usize = 1_000_000;
@@ -472,7 +544,7 @@ fn measure(name: &str, encoding: &str, qcnf: &QCNF) -> SolverResult {
     };
     println!(
         "{name:<24} {encoding:>10} {verdict:>7} {elapsed:>12.3?}  initial {:>5}/{existentials:<5} decisions {:>6} conflicts {:>6} bdd {bdd:>11}",
-        solver.initial_deterministic(),
+        solver.initial_deterministic().map_or_else(|| "-".to_string(), |d| d.to_string()),
         solver.decisions(),
         solver.conflicts(),
     );
@@ -484,6 +556,12 @@ fn run(name: &str, circuit: &Circuit) {
         if !name.contains(&filter) {
             return;
         }
+    }
+    if std::env::var("BENCH_DEFINABILITY").is_ok() {
+        let total = circuit.existentials + circuit.gates.len();
+        let definable = definable_from_universals(circuit)
+            .map_or_else(|| "vacuous".to_string(), |d| d.to_string());
+        println!("{name:<24} {:>10} definable {definable:>7}/{total:<5}", "padoa");
     }
     let parsed = qcir::parse_qcir(&circuit.to_qcir()).expect("generated circuit parses");
     assert!(!parsed.negated);
