@@ -506,8 +506,17 @@ fn main() {
     for n in [8, 12, 16] {
         run(&format!("choice-{n}"), &choice_of_relation(n));
     }
-    for seed in 1..=6 {
-        run(&format!("random-6-10-40-{seed}"), &random_circuit(6, 10, 40, seed));
+    // Random circuits are the family where gate inputs are picked
+    // independently at random, so a gate's premises are frequently
+    // *other gates sharing inputs* — heavy reconvergent fanout, and
+    // premises that are therefore correlated. Enough seeds to tell a
+    // real effect from search variance; the structured families above
+    // (parity, mux tree, adder) are the contrast.
+    for seed in 1..=24 {
+        run(&format!("random-6-10-40-{seed:02}"), &random_circuit(6, 10, 40, seed));
+    }
+    for seed in 1..=12 {
+        run(&format!("random-8-14-60-{seed:02}"), &random_circuit(8, 14, 60, seed));
     }
     // widths chosen to show *scaling*: the inverted adder is the
     // definitional shape (∀x ∃y. x = y + c), where ID determinizes
