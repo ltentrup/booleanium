@@ -282,6 +282,60 @@ Open questions:
   The RQ1 survey's fractions were computed with the first of these, so
   its bucket boundaries are approximate — the monotone trend it reports
   is not in doubt, the absolute percentages are.
+* **What the gap costs: nothing. The thread closes.** The two real
+  counterexamples above invite an obvious follow-up — build the
+  reconstructing preprocessor and recover what propagation misses — and
+  the follow-up is answered before it is built. Diagnosing the two
+  instances first:
+
+  * `16966_UNSAT` has **two universal variables** and 260 existentials;
+  * `6061_SAT` has **one**.
+
+  "96% definable from the universals" with two universals is not gate
+  structure at all — it is a matrix so constrained that almost every
+  variable is pinned, which is a SAT-level property, not a Skolem one.
+  And `--deep-determinacy` recovers nothing on either (6 and 3 checks,
+  0 determinizations), because there is no *implication* structure to
+  cascade from.
+
+  Then the decisive number. Gap against solve cost across the 72
+  instances with both:
+
+  | population | n | median solve | max solve | median conflicts |
+  |---|---|---|---|---|
+  | gap > 30pp | 18 | 0.106 ms | **2.2 ms** | 1 |
+  | gap ≤ 2pp (at the ceiling) | 39 | 0.131 ms | **539 ms** | 1 |
+
+  and the six slowest instances in the corpus, with their gaps:
+
+  | instance | gap | solve | conflicts |
+  |---|---|---|---|
+  | `adder2` | ~0pp | **539 ms** | 610 |
+  | `br` | 5pp | 145 ms | 99 |
+  | `stmt27rrr` | ~0pp | 68 ms | 39 |
+  | `bug8` | 1pp | 29 ms | 17 |
+  | `bug10rr` | 5pp | 21 ms | 4 |
+  | `stmt7rr` | 1pp | 14 ms | 20 |
+
+  **No slow instance has a meaningful definability gap, and no
+  large-gap instance is slow** — the worst of the eighteen takes
+  2.2 ms. `16966_UNSAT`, with the 96-point gap, solves in **1.6 ms with
+  two conflicts**; `6061_SAT` in 1.8 ms with two. The search does not
+  need the structure it is missing, because on those instances it
+  finds the answer immediately anyway.
+
+  So recovering lost definitions cannot pay on this corpus, and the
+  reason is the same anti-correlation the BDD experiment found: **the
+  thing is cheap exactly where it is not needed.** That closes
+  definition recovery as a performance lever here. It does *not* close
+  preprocessing — bloqqer and HQSpre do much more than definition
+  recovery, and the case for them rests on clause-level work this says
+  nothing about — but it removes the specific argument that ID needs a
+  gate-reconstructing frontend to be fast on QDIMACS.
+
+  (Small negative gaps in the table are sampling noise: the ceiling
+  samples at most 150 candidates, so an estimate can fall a point below
+  the exact recovered count.)
 * **Preprocessing, and the tension it has with this thesis — open.**
   Bloqqer and HQSpre are not optional in practice; a large part of
   QDIMACS-level performance comes from them, and being fast on QDIMACS

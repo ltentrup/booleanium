@@ -625,6 +625,15 @@ defaults — recorded here so they are not retried naively:
   trail length (up to 350% of existentials), the denominator omitted
   free variables, and >2-block instances were being compared against a
   sub-formula's fixpoint.
+* **The definability gap costs nothing — thread closed**: across 72
+  CADET instances, the 18 with a >30pp gap have median solve 0.106 ms
+  and *max* 2.2 ms, while the six slowest instances all sit within 5pp
+  of their ceiling (`adder2` 539 ms at ~0pp). The two real
+  counterexamples have one and two universal variables respectively, so
+  their "definability" is matrix constrainedness, not gate structure.
+  Recovering lost definitions cannot pay here: the structure is missing
+  exactly where the search does not need it. Closes definition recovery
+  as a lever; says nothing about clause-level preprocessing.
 * **Deep determinacy — measured and rejected**
   (`Options::deep_determinacy`, default off): the local determinacy
   check treats the premise variables of an implication clause as free,
